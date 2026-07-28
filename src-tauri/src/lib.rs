@@ -1,6 +1,8 @@
+pub mod domain;
 pub mod error;
 pub mod paths;
 pub mod storage;
+pub mod work;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
