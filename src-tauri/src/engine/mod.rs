@@ -35,6 +35,8 @@ pub enum EngineError {
     Start(String),
     #[error("engine event channel closed")]
     ChannelClosed,
+    #[error("engine run is not active")]
+    NotRunning,
     #[error("engine run was aborted")]
     Aborted,
 }

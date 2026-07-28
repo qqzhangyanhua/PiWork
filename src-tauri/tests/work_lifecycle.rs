@@ -96,6 +96,84 @@ struct PanickingPublisher {
     panicked: std::sync::atomic::AtomicBool,
 }
 
+struct NoResourceStartFailingEngine {
+    abort_calls: std::sync::atomic::AtomicUsize,
+}
+
+struct PanickingAbortEngine {
+    abort_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl PanickingAbortEngine {
+    fn new() -> Self {
+        Self {
+            abort_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn abort_calls(&self) -> usize {
+        self.abort_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for PanickingAbortEngine {
+    fn kind(&self) -> &'static str {
+        "panicking-abort"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _prompt: String,
+        _sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        Err(EngineError::Start("abort must recover this failure".into()))
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        self.abort_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        panic!("intentional abort panic");
+    }
+}
+
+impl NoResourceStartFailingEngine {
+    fn new() -> Self {
+        Self {
+            abort_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn abort_calls(&self) -> usize {
+        self.abort_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for NoResourceStartFailingEngine {
+    fn kind(&self) -> &'static str {
+        "no-resource-start-failing"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _prompt: String,
+        _sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        Err(EngineError::Start(
+            "failed before creating resources".into(),
+        ))
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        self.abort_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(EngineError::NotRunning)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ControlledStartBehavior {
     Immediate,
@@ -314,7 +392,7 @@ impl EngineAdapter for ControlledEngine {
             .lock()
             .await
             .remove(run_id)
-            .ok_or(EngineError::Aborted)?;
+            .ok_or(EngineError::NotRunning)?;
         let _ = resource.cancel.send(true);
         resource.completion.await.map_err(|_| EngineError::Aborted)
     }
@@ -484,7 +562,7 @@ impl EngineAdapter for BlockingStartEngine {
     }
 
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
-        Err(EngineError::Aborted)
+        Err(EngineError::NotRunning)
     }
 }
 
@@ -608,7 +686,7 @@ impl EngineAdapter for FloodingStartEngine {
     }
 
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
-        Err(EngineError::Aborted)
+        Err(EngineError::NotRunning)
     }
 }
 
@@ -701,6 +779,93 @@ async fn partial_engine_start_failure_aborts_once_before_clearing_active() {
     wait_for_no_controlled_producers(&engine).await;
 }
 
+#[tokio::test]
+async fn start_failure_without_an_engine_resource_is_confirmed_safe() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Fail before resource creation").await;
+    let engine = Arc::new(NoResourceStartFailingEngine::new());
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(publisher),
+        "No-resource model",
+    );
+
+    let first = supervisor
+        .start(&work.summary.id, "First")
+        .await
+        .unwrap_err();
+    let after_first = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let retry = supervisor
+        .start(&work.summary.id, "Retry")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(first).unwrap()["code"],
+        "engine_start_failed"
+    );
+    assert_eq!(after_first.summary.status, WorkStatus::Failed);
+    assert_eq!(after_first.runs[0].status, RunStatus::Failed);
+    assert_eq!(
+        serde_json::to_value(retry).unwrap()["code"],
+        "engine_start_failed"
+    );
+    assert_eq!(engine.abort_calls(), 2);
+}
+
+#[tokio::test]
+async fn abort_panic_becomes_unconfirmed_without_stranding_waiters() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Recover abort panic").await;
+    let engine = Arc::new(PanickingAbortEngine::new());
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::with_timeouts(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(publisher),
+        "Panicking abort model",
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(100),
+    );
+
+    let first = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        supervisor.start(&work.summary.id, "First"),
+    )
+    .await
+    .expect("abort panic stranded a termination waiter")
+    .unwrap_err();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let retry = supervisor
+        .start(&work.summary.id, "Retry")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(first).unwrap()["code"],
+        "engine_faulted"
+    );
+    assert_eq!(detail.summary.status, WorkStatus::Failed);
+    assert_eq!(detail.runs[0].status, RunStatus::Failed);
+    assert_eq!(
+        serde_json::to_value(retry).unwrap()["code"],
+        "engine_faulted"
+    );
+    assert_eq!(engine.abort_calls(), 1);
+}
+
 struct EarlyClosingEngine;
 
 #[async_trait]
@@ -729,7 +894,7 @@ impl EngineAdapter for EarlyClosingEngine {
     }
 
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
-        Err(EngineError::Aborted)
+        Err(EngineError::NotRunning)
     }
 }
 
@@ -767,6 +932,12 @@ async fn channel_close_before_terminal_is_journaled_as_a_failed_run() {
     assert_eq!(detail.summary.status, WorkStatus::Failed);
     assert_eq!(detail.runs[0].id, run.id);
     assert_eq!(detail.runs[0].status, RunStatus::Failed);
+
+    supervisor
+        .start(&work.summary.id, "Retry after natural stop")
+        .await
+        .expect("a naturally stopped engine left the active slot faulted");
+    receive_complete_run(&mut published).await;
 }
 
 #[tokio::test]

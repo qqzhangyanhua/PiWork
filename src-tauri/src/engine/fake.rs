@@ -142,9 +142,9 @@ impl EngineAdapter for FakeEngineAdapter {
             let outcome = match result {
                 Ok(()) => FakeTaskOutcome::Completed,
                 Err(EngineError::Aborted) => FakeTaskOutcome::Aborted,
-                Err(EngineError::ChannelClosed) | Err(EngineError::Start(_)) => {
-                    FakeTaskOutcome::ChannelClosed
-                }
+                Err(EngineError::ChannelClosed)
+                | Err(EngineError::NotRunning)
+                | Err(EngineError::Start(_)) => FakeTaskOutcome::ChannelClosed,
             };
             #[cfg(test)]
             if let Some(completion_gate) = completion_gate {
@@ -165,7 +165,7 @@ impl EngineAdapter for FakeEngineAdapter {
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {
         let (generation, cancel, completion) = {
             let mut active_runs = self.active.lock().await;
-            let active = active_runs.get_mut(run_id).ok_or(EngineError::Aborted)?;
+            let active = active_runs.get_mut(run_id).ok_or(EngineError::NotRunning)?;
             if active.state == FakeRunState::Cancelling {
                 return Err(EngineError::Aborted);
             }
@@ -189,7 +189,7 @@ impl EngineAdapter for FakeEngineAdapter {
         match outcome.map_err(|_| EngineError::Aborted)? {
             FakeTaskOutcome::Aborted => Ok(()),
             FakeTaskOutcome::Completed | FakeTaskOutcome::ChannelClosed => {
-                Err(EngineError::Aborted)
+                Err(EngineError::NotRunning)
             }
         }
     }
@@ -286,6 +286,20 @@ mod tests {
                 "run_completed",
             ]
         );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !engine.active.lock().await.contains_key("run-1") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("naturally completed fake run remained active");
+        assert!(matches!(
+            engine.abort("run-1").await,
+            Err(crate::engine::EngineError::NotRunning)
+        ));
     }
 
     #[tokio::test]
@@ -321,6 +335,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abort_reports_not_running_when_the_producer_already_completed() {
+        let (engine, completion_gate) =
+            FakeEngineAdapter::new_with_paused_first_completion(Duration::ZERO);
+        let context = EngineRunContext::test("work-1", "run-1");
+        let (sender, mut receiver) = mpsc::channel(16);
+        engine
+            .start(context, "Complete first".into(), sender)
+            .await
+            .unwrap();
+        while let Some(event) = receiver.recv().await {
+            if event.is_terminal() {
+                break;
+            }
+        }
+        completion_gate.wait_until_reached().await;
+
+        let abort_engine = engine.clone();
+        let abort = tokio::spawn(async move { abort_engine.abort("run-1").await });
+        completion_gate.release();
+
+        assert!(matches!(
+            abort.await.unwrap(),
+            Err(crate::engine::EngineError::NotRunning)
+        ));
+    }
+
+    #[tokio::test]
     async fn abort_waits_for_stop_and_old_cleanup_cannot_remove_a_restarted_run() {
         let engine = FakeEngineAdapter::new(Duration::from_millis(40));
         let context = EngineRunContext::test("work-1", "run-1");
@@ -345,6 +386,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         engine.abort("run-1").await.unwrap();
 
-        assert!(engine.abort("unknown-run").await.is_err());
+        assert!(matches!(
+            engine.abort("unknown-run").await,
+            Err(crate::engine::EngineError::NotRunning)
+        ));
     }
 }

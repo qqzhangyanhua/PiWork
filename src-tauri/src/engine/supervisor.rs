@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use tokio::{
-    sync::{Mutex, Notify, mpsc, oneshot, watch},
+    sync::{Mutex, mpsc, oneshot, watch},
     task::{AbortHandle, JoinError, JoinHandle},
 };
 use uuid::Uuid;
@@ -78,23 +78,24 @@ struct TerminationOwner {
     run_id: String,
     timeout: Duration,
     state: Mutex<AbortState>,
-    completed: Notify,
+    completed: watch::Sender<Option<AbortOutcome>>,
 }
 
 impl TerminationOwner {
     fn new(engine: Arc<dyn EngineAdapter>, run_id: String, timeout: Duration) -> Arc<Self> {
+        let (completed, _) = watch::channel(None);
         Arc::new(Self {
             engine,
             run_id,
             timeout,
             state: Mutex::new(AbortState::Open),
-            completed: Notify::new(),
+            completed,
         })
     }
 
     async fn abort_once(self: &Arc<Self>) -> AbortOutcome {
+        let mut completed = self.completed.subscribe();
         loop {
-            let notified = self.completed.notified();
             let should_start = {
                 let mut state = self.state.lock().await;
                 match *state {
@@ -108,23 +109,33 @@ impl TerminationOwner {
             };
             if should_start {
                 let owner = Arc::clone(self);
-                tokio::spawn(async move {
-                    let outcome = match tokio::time::timeout(
-                        owner.timeout,
-                        owner.engine.abort(&owner.run_id),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => AbortOutcome::Confirmed,
-                        Ok(Err(_)) | Err(_) => AbortOutcome::Unconfirmed,
-                    };
-                    *owner.state.lock().await = AbortState::Done(outcome);
-                    owner.completed.notify_waiters();
-                });
+                tokio::spawn(complete_abort(owner));
             }
-            notified.await;
+            let outcome = *completed.borrow();
+            if let Some(outcome) = outcome {
+                return outcome;
+            }
+            if completed.changed().await.is_err() {
+                return AbortOutcome::Unconfirmed;
+            }
         }
     }
+}
+
+async fn complete_abort(owner: Arc<TerminationOwner>) {
+    let engine = Arc::clone(&owner.engine);
+    let run_id = owner.run_id.clone();
+    let timeout = owner.timeout;
+    let abort =
+        tokio::spawn(async move { tokio::time::timeout(timeout, engine.abort(&run_id)).await });
+    let outcome = match abort.await {
+        Ok(Ok(Ok(()))) | Ok(Ok(Err(crate::engine::EngineError::NotRunning))) => {
+            AbortOutcome::Confirmed
+        }
+        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => AbortOutcome::Unconfirmed,
+    };
+    *owner.state.lock().await = AbortState::Done(outcome);
+    owner.completed.send_replace(Some(outcome));
 }
 
 #[derive(Clone)]
@@ -792,5 +803,76 @@ impl From<EngineEvent> for WorkEventPayload {
             },
             EngineEvent::RunFailed { message } => Self::RunFailed { message },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use async_trait::async_trait;
+    use tokio::{sync::mpsc, task::JoinSet};
+
+    use super::{AbortOutcome, TerminationOwner};
+    use crate::engine::{
+        EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef,
+    };
+
+    #[derive(Default)]
+    struct InstantAbortEngine {
+        abort_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EngineAdapter for InstantAbortEngine {
+        fn kind(&self) -> &'static str {
+            "instant-abort"
+        }
+
+        async fn start(
+            &self,
+            _context: EngineRunContext,
+            _prompt: String,
+            _sink: mpsc::Sender<EngineEvent>,
+        ) -> Result<EngineSessionRef, EngineError> {
+            Err(EngineError::Start("not used by this test".into()))
+        }
+
+        async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+            self.abort_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_abort_waiters_observe_one_instant_abort_result() {
+        let engine = Arc::new(InstantAbortEngine::default());
+
+        for iteration in 0..100 {
+            let owner = TerminationOwner::new(
+                engine.clone(),
+                format!("run-{iteration}"),
+                Duration::from_secs(1),
+            );
+            let mut waiters = JoinSet::new();
+            for _ in 0..16 {
+                let owner = Arc::clone(&owner);
+                waiters.spawn(async move { owner.abort_once().await });
+            }
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while let Some(outcome) = waiters.join_next().await {
+                    assert!(outcome.unwrap() == AbortOutcome::Confirmed);
+                }
+            })
+            .await
+            .expect("concurrent abort waiter missed the completed result");
+        }
+
+        assert_eq!(
+            engine.abort_calls.load(std::sync::atomic::Ordering::SeqCst),
+            100
+        );
     }
 }
