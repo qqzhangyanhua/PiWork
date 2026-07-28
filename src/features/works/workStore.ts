@@ -33,26 +33,91 @@ const normalizeError = (error: unknown): AppError => {
   return { code: "unknown", message: String(error) };
 };
 
-const sortPersistedEvents = (detail: WorkDetail) => {
-  const runOrder = new Map(
-    [...detail.runs]
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-      .map((run, index) => [run.id, index]),
+const statusForEvent = (
+  currentStatus: WorkSummary["status"],
+  event: WorkEventEnvelope,
+): WorkSummary["status"] => {
+  if (event.payload.type === "runStarted") {
+    return "running";
+  }
+  if (event.payload.type === "runCompleted") {
+    return "completed";
+  }
+  if (event.payload.type === "runFailed") {
+    return "failed";
+  }
+  return currentStatus;
+};
+
+const mergeWorkDetail = (state: WorkState, detail: WorkDetail) => {
+  const currentSummary = state.works[detail.summary.id];
+  let mergedSummary =
+    currentSummary && currentSummary.updatedAt >= detail.summary.updatedAt
+      ? currentSummary
+      : detail.summary;
+  const eventBySequence = new Map<string, WorkEventEnvelope>();
+
+  for (const persistedEvent of detail.events) {
+    eventBySequence.set(
+      `${persistedEvent.runId}\u0000${persistedEvent.sequence}`,
+      persistedEvent,
+    );
+  }
+  for (const liveEvent of state.timelines[detail.summary.id] ?? []) {
+    eventBySequence.set(
+      `${liveEvent.runId}\u0000${liveEvent.sequence}`,
+      liveEvent,
+    );
+  }
+
+  const mergedEvents = [...eventBySequence.values()];
+  const knownRunIds = new Set(detail.runs.map((run) => run.id));
+  const runTime = new Map(
+    detail.runs.map((run) => [run.id, run.createdAt] as const),
+  );
+  for (const event of mergedEvents) {
+    const currentTime = runTime.get(event.runId);
+    if (
+      !knownRunIds.has(event.runId) &&
+      (!currentTime || event.occurredAt < currentTime)
+    ) {
+      runTime.set(event.runId, event.occurredAt);
+    }
+  }
+  mergedEvents.sort(
+    (left, right) =>
+      (runTime.get(left.runId) ?? left.occurredAt).localeCompare(
+        runTime.get(right.runId) ?? right.occurredAt,
+      ) ||
+      left.runId.localeCompare(right.runId) ||
+      left.sequence - right.sequence ||
+      left.occurredAt.localeCompare(right.occurredAt) ||
+      left.version - right.version,
   );
 
-  return detail.events
-    .map((event, index) => ({ event, index }))
-    .sort((left, right) => {
-      const runDifference =
-        (runOrder.get(left.event.runId) ?? Number.MAX_SAFE_INTEGER) -
-        (runOrder.get(right.event.runId) ?? Number.MAX_SAFE_INTEGER);
-      return (
-        runDifference ||
-        left.event.sequence - right.event.sequence ||
-        left.index - right.index
-      );
-    })
-    .map(({ event }) => event);
+  const lastSequenceByRun = { ...state.lastSequenceByRun };
+  for (const event of mergedEvents) {
+    lastSequenceByRun[event.runId] = Math.max(
+      lastSequenceByRun[event.runId] ?? 0,
+      event.sequence,
+    );
+    if (event.occurredAt >= mergedSummary.updatedAt) {
+      mergedSummary = {
+        ...mergedSummary,
+        status: statusForEvent(mergedSummary.status, event),
+        updatedAt: event.occurredAt,
+      };
+    }
+  }
+
+  return {
+    works: { ...state.works, [detail.summary.id]: mergedSummary },
+    timelines: {
+      ...state.timelines,
+      [detail.summary.id]: mergedEvents,
+    },
+    lastSequenceByRun,
+  };
 };
 
 export const createWorkStore = (client: PiWorkClient = tauriClient) => {
@@ -97,10 +162,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           ) {
             return;
           }
-          get().upsertWork(detail.summary);
-          for (const persistedEvent of sortPersistedEvents(detail)) {
-            get().applyEvent(persistedEvent);
-          }
+          set((state) => mergeWorkDetail(state, detail));
         } catch (error) {
           set({ error: normalizeError(error) });
         } finally {
@@ -118,11 +180,8 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       try {
         const detail = await client.createWork(input);
         selectionRequest += 1;
-        get().upsertWork(detail.summary);
+        set((state) => mergeWorkDetail(state, detail));
         set({ selectedWorkId: detail.summary.id });
-        for (const persistedEvent of sortPersistedEvents(detail)) {
-          get().applyEvent(persistedEvent);
-        }
         return detail;
       } catch (error) {
         set({ error: normalizeError(error) });
@@ -171,10 +230,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           ) {
             return;
           }
-          get().upsertWork(detail.summary);
-          for (const persistedEvent of sortPersistedEvents(detail)) {
-            get().applyEvent(persistedEvent);
-          }
+          set((state) => mergeWorkDetail(state, detail));
         } catch (error) {
           if (request === selectionRequest) {
             set({ error: normalizeError(error) });
@@ -202,18 +258,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
 
       set((state) => {
         const currentWork = state.works[event.workId];
-        const status =
-          event.payload.type === "runStarted"
-            ? "running"
-            : event.payload.type === "runCompleted"
-              ? "completed"
-              : event.payload.type === "runFailed"
-                ? "failed"
-                : currentWork?.status;
         const updatedWork = currentWork
           ? {
               ...currentWork,
-              status: status ?? currentWork.status,
+              status: statusForEvent(currentWork.status, event),
               updatedAt: event.occurredAt,
             }
           : undefined;

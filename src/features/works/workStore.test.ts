@@ -154,6 +154,46 @@ describe("createWorkStore", () => {
     });
   });
 
+  it("hydrates persisted history that arrived before a live run watermark", async () => {
+    const detailResult = deferred<WorkDetail>();
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: () => detailResult.promise,
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+    await Promise.resolve();
+
+    store.getState().applyEvent(
+      event(3, {
+        type: "runCompleted",
+        summary: "live completion",
+        artifacts: [],
+        validation: [],
+        limitations: [],
+      }),
+    );
+    detailResult.resolve({
+      summary: work,
+      runs: [run],
+      events: [
+        event(1, { type: "runStarted", modelLabel: "gpt-5" }),
+        event(2, { type: "runFailed", message: "persisted failure" }),
+      ],
+    });
+    await hydration;
+
+    expect(
+      store.getState().timelines.w1?.map(({ sequence }) => sequence),
+    ).toEqual([1, 2, 3]);
+    expect(store.getState().lastSequenceByRun.r1).toBe(3);
+    expect(store.getState().works.w1).toMatchObject({
+      status: "completed",
+      updatedAt: "2026-07-28T09:00:03.000Z",
+    });
+  });
+
   it("ignores a stale detail response after selecting another work", async () => {
     const firstResult = deferred<WorkDetail>();
     const secondResult = deferred<WorkDetail>();
@@ -196,6 +236,52 @@ describe("createWorkStore", () => {
     expect(store.getState().timelines.w2).toHaveLength(1);
     expect(store.getState().timelines.w1).toBeUndefined();
     expect(store.getState().loading).toBe(false);
+  });
+
+  it("selects a work without losing persisted history behind a live watermark", async () => {
+    const detailResult = deferred<WorkDetail>();
+    const client: PiWorkClient = {
+      ...unusedClient,
+      getWork: () => detailResult.promise,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    store.getState().selectWork("w1");
+    store.getState().applyEvent(
+      event(3, {
+        type: "runCompleted",
+        summary: "live completion",
+        artifacts: [],
+        validation: [],
+        limitations: [],
+      }),
+    );
+    detailResult.resolve({
+      summary: work,
+      runs: [run],
+      events: [
+        event(1, { type: "runStarted", modelLabel: "gpt-5" }),
+        event(2, { type: "runFailed", message: "persisted failure" }),
+        event(3, {
+          type: "runCompleted",
+          summary: "live completion",
+          artifacts: [],
+          validation: [],
+          limitations: [],
+        }),
+      ],
+    });
+    await Promise.resolve();
+
+    expect(
+      store.getState().timelines.w1?.map(({ sequence }) => sequence),
+    ).toEqual([1, 2, 3]);
+    expect(store.getState().lastSequenceByRun.r1).toBe(3);
+    expect(store.getState().works.w1).toMatchObject({
+      status: "completed",
+      updatedAt: "2026-07-28T09:00:03.000Z",
+    });
   });
 
   it("keeps the current selection loading when an older hydrate resolves", async () => {
