@@ -32,6 +32,7 @@ function SurfaceContent() {
   const latestRuns = useWorkStore((state) => state.latestRuns);
   const loading = useWorkStore((state) => state.loading);
   const error = useWorkStore((state) => state.error);
+  const hydrationError = useWorkStore((state) => state.hydrationError);
   const [createOpen, setCreateOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -41,17 +42,18 @@ function SurfaceContent() {
   const selectedWork = selectedWorkId ? works[selectedWorkId] : undefined;
   const timeline = selectedWork ? timelines[selectedWork.id] ?? [] : [];
   const hasWorks = Object.keys(works).length > 0;
+  const pageError = hydrationError ?? (!hasWorks ? error : null);
 
   return (
     <main className="work-surface">
       <WorkSidebar createOpen={createOpen} onCreateOpenChange={setCreateOpen} />
       {!hasWorks && loading ? (
         <section className="surface-state surface-state--loading" role="status" aria-label={t("state.loading")}><div className="loading-line" /><div className="loading-line loading-line--short" /></section>
-      ) : !hasWorks && error ? (
+      ) : pageError ? (
         <section className="surface-state" role="alert">
-          <h1>{t("state.errorTitle")}</h1><p>{error.message}</p>
+          <h1>{t("state.errorTitle")}</h1><p>{pageError.message}</p>
           <div className="surface-state__actions"><button className="button button--primary" type="button" onClick={() => void hydrate()}>{t("common.retry")}</button><button className="button" type="button" onClick={() => setDiagnosticsOpen((open) => !open)}>{t("diagnostics.open")}</button></div>
-          {diagnosticsOpen && <pre className="diagnostics">{formatDiagnostics(error, t("diagnostics.unavailable"))}</pre>}
+          {diagnosticsOpen && <pre className="diagnostics">{formatDiagnostics(pageError, t("diagnostics.unavailable"))}</pre>}
         </section>
       ) : !selectedWork ? (
         <section className="surface-state surface-state--empty"><h1>{t("work.empty")}</h1><p>{t("state.emptyBody")}</p><button className="button button--primary" type="button" onClick={() => setCreateOpen(true)}>{t("work.new")}</button></section>

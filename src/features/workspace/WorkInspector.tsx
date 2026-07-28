@@ -10,7 +10,6 @@ export function WorkInspector({ timeline, open }: { timeline: TimelineItem[]; op
   const { t } = useTranslation();
   const [active, setActive] = useState<InspectorTab>("progress");
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
-  const artifacts = timeline.flatMap(({ payload }) => payload.type === "runCompleted" ? payload.artifacts : []);
   const toolCount = timeline.filter(({ payload }) => payload.type === "toolStarted").length;
   const completed = timeline.some(({ payload }) => payload.type === "runCompleted");
   const activateRelative = (event: KeyboardEvent, index: number) => {
@@ -26,8 +25,12 @@ export function WorkInspector({ timeline, open }: { timeline: TimelineItem[]; op
 
   const content = () => {
     if (active === "progress") return timeline.length ? <ul className="inspector-list"><li>{t("inspector.runEvents", { count: timeline.length })}</li><li>{t("inspector.toolEvents", { count: toolCount })}</li>{completed && <li>{t("status.completed")}</li>}</ul> : <p className="inspector-empty">{t("inspector.noProgress")}</p>;
-    if (active === "artifacts") return artifacts.length ? <ul className="inspector-list">{artifacts.map((artifact, index) => <li key={`${artifact}-${index}`}>{artifact}</li>)}</ul> : <p className="inspector-empty">{t("inspector.noArtifacts")}</p>;
-    return <p className="inspector-empty">{t(active === "changes" ? "inspector.noChanges" : "inspector.noLogs")}</p>;
+    const emptyKey = active === "changes"
+      ? "inspector.noChanges"
+      : active === "artifacts"
+        ? "inspector.noArtifacts"
+        : "inspector.noLogs";
+    return <p className="inspector-empty">{t(emptyKey)}</p>;
   };
 
   return (

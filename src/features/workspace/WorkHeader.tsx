@@ -30,7 +30,13 @@ export function WorkHeader({ work, timeline, error, latestRun, inspectorOpen, on
         </div>
         <div className="work-header__meta">
           <span className="model-label">{modelLabel}</span>
-          <span className={`status-badge status-badge--${work.status}`}>{t(`status.${work.status}`)}</span>
+          <span
+            aria-label={t("header.workStatus")}
+            className={`status-badge status-badge--${work.status}`}
+            role="status"
+          >
+            {t(`status.${work.status}`)}
+          </span>
           <button
             className="icon-button work-header__inspector-toggle"
             type="button"

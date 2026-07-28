@@ -15,6 +15,7 @@
     "emptyBody": "从一个持续目标开始，PiWork 会保留每次 Run 的协作脉络。"
   },
   "diagnostics": { "open": "打开诊断", "unavailable": "诊断详情无法安全显示" },
+  "header": { "workStatus": "Work 状态" },
   "status": {
     "draft": "草稿", "queued": "排队中", "running": "运行中", "waiting": "等待中",
     "idle": "空闲", "completed": "已完成", "failed": "失败", "stopped": "已停止",
@@ -37,7 +38,6 @@
     "placeholder": "描述下一步，或补充当前 Run 的要求…",
     "send": "发送",
     "continue": "继续 Work",
-    "queue": "排队指令",
     "queued": "已排队 {{count}} 条指令"
   },
   "inspector": {

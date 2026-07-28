@@ -65,6 +65,9 @@ describe("WorkSurface", () => {
 
     client.emit(runCompletedEvent({ runId: "run-1" }));
     expect(await screen.findByText("Work 已完成")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Work 状态" }),
+    ).toHaveTextContent("已完成");
 
     await user.type(composer, "再优化一次");
     await user.click(screen.getByRole("button", { name: "继续 Work" }));
@@ -79,7 +82,7 @@ describe("WorkSurface", () => {
 
     const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
     await user.type(composer, "完成后补充单元测试");
-    await user.click(screen.getByRole("button", { name: "排队指令" }));
+    await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(client.startWork).not.toHaveBeenCalled();
     expect(screen.getByText("已排队 1 条指令")).toBeInTheDocument();
@@ -138,14 +141,26 @@ describe("WorkSurface", () => {
   it("提供可访问的检查器标签页与真实空状态", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
-    client.seed(seededDetail());
+    const detail = seededDetail("completed");
+    detail.events = [
+      event(1, {
+        type: "runCompleted",
+        summary: "交付完成",
+        artifacts: ["inspector-output.html"],
+        validation: [],
+        limitations: [],
+      }),
+    ];
+    client.seed(detail);
     render(<WorkSurface client={client} />);
 
     const tabs = await screen.findByRole("tablist", { name: "Work 检查器" });
     const artifacts = within(tabs).getByRole("tab", { name: "产物" });
     await user.click(artifacts);
     expect(artifacts).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("还没有产物")).toBeInTheDocument();
+    const artifactPanel = screen.getByRole("tabpanel", { name: "产物" });
+    expect(within(artifactPanel).getByText("还没有产物")).toBeInTheDocument();
+    expect(within(artifactPanel).queryByText("inspector-output.html")).not.toBeInTheDocument();
     await user.keyboard("{ArrowRight}");
     expect(within(tabs).getByRole("tab", { name: "日志" })).toHaveFocus();
   });
@@ -167,6 +182,23 @@ describe("WorkSurface", () => {
     expect(screen.getByText(/safe.db/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(client.listWorks).toHaveBeenCalledTimes(2));
+  });
+
+  it("初始 Work 详情加载失败时显示完整错误页", async () => {
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.getWork.mockRejectedValueOnce({
+      code: "detail_unavailable",
+      message: "Work 详情不可用",
+    });
+
+    render(<WorkSurface client={client} />);
+
+    const errorPage = await screen.findByRole("alert");
+    expect(errorPage).toHaveTextContent("Work 详情不可用");
+    expect(within(errorPage).getByRole("button", { name: "重试" })).toBeInTheDocument();
+    expect(within(errorPage).getByRole("button", { name: "打开诊断" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "营收看板" })).not.toBeInTheDocument();
   });
 
   it("无 Work 时显示产品空状态并校验创建表单", async () => {

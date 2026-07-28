@@ -19,9 +19,7 @@ export function WorkComposer({ work }: { work: WorkSummary }) {
   const queued = queuedInstructions[work.id] ?? [];
   const loading = useWorkStore((state) => state.loading);
   const shouldQueue = queueStatuses.includes(work.status);
-  const actionLabel = shouldQueue
-    ? t("composer.queue")
-    : continueStatuses.includes(work.status)
+  const actionLabel = continueStatuses.includes(work.status)
       ? t("composer.continue")
       : t("composer.send");
 

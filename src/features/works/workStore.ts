@@ -23,6 +23,7 @@ export type WorkState = {
   lastSequenceByRun: Record<string, number>;
   loading: boolean;
   error: AppError | null;
+  hydrationError: AppError | null;
   hydrate(): Promise<void>;
   createWork(input: CreateWorkInput): Promise<WorkDetail>;
   startWork(workId: string, prompt: string): Promise<RunSummary>;
@@ -371,6 +372,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       lastSequenceByRun: {},
       loading: false,
       error: null,
+      hydrationError: null,
       hydrate: async () => {
         if (hydration) {
           return hydration;
@@ -404,6 +406,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               }
             }
             if (!selectedWorkId) {
+              if (operation === errorOwner) set({ hydrationError: null });
               succeedOperation(operation);
               return;
             }
@@ -419,9 +422,13 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               return;
             }
             set((state) => reduceWork(state, { type: "detail", detail }));
+            if (operation === errorOwner) set({ hydrationError: null });
             succeedOperation(operation);
           } catch (error) {
             failOperation(operation, error);
+            if (operation === errorOwner) {
+              set({ hydrationError: normalizeAppError(error) });
+            }
           } finally {
             endOperation();
             hydration = null;

@@ -15,6 +15,7 @@
     "emptyBody": "Start with a lasting goal. PiWork keeps the collaboration context across every Run."
   },
   "diagnostics": { "open": "Open diagnostics", "unavailable": "Diagnostic details cannot be displayed safely" },
+  "header": { "workStatus": "Work status" },
   "status": {
     "draft": "Draft", "queued": "Queued", "running": "Running", "waiting": "Waiting",
     "idle": "Idle", "completed": "Completed", "failed": "Failed", "stopped": "Stopped",
@@ -37,7 +38,6 @@
     "placeholder": "Describe the next step, or add a requirement for the current Run…",
     "send": "Send",
     "continue": "Continue Work",
-    "queue": "Queue instruction",
     "queued": "{{count}} instructions queued"
   },
   "inspector": {
