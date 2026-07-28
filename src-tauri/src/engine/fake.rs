@@ -4,18 +4,32 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use tokio::sync::Notify;
+
 use super::{EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef};
 
 #[derive(Clone)]
 pub struct FakeEngineAdapter {
     delay: Duration,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
+    #[cfg(test)]
+    completion_gate: Option<Arc<FakeCompletionGate>>,
 }
 
 struct ActiveRun {
     generation: Uuid,
-    cancel: oneshot::Sender<()>,
-    completion: oneshot::Receiver<FakeTaskOutcome>,
+    state: FakeRunState,
+    cancel: Option<oneshot::Sender<()>>,
+    completion: Option<oneshot::Receiver<FakeTaskOutcome>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FakeRunState {
+    Running,
+    Cancelling,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,12 +39,62 @@ enum FakeTaskOutcome {
     ChannelClosed,
 }
 
+#[cfg(test)]
+struct FakeCompletionGate {
+    armed: AtomicBool,
+    reached: Notify,
+    release: Notify,
+}
+
+#[cfg(test)]
+impl FakeCompletionGate {
+    fn new() -> Self {
+        Self {
+            armed: AtomicBool::new(true),
+            reached: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    async fn pause_if_armed(&self) {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    async fn wait_until_reached(&self) {
+        tokio::time::timeout(Duration::from_secs(1), self.reached.notified())
+            .await
+            .expect("fake engine did not reach its completion gate");
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 impl FakeEngineAdapter {
     pub fn new(delay: Duration) -> Self {
         Self {
             delay,
             active: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            completion_gate: None,
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_paused_first_completion(delay: Duration) -> (Self, Arc<FakeCompletionGate>) {
+        let completion_gate = Arc::new(FakeCompletionGate::new());
+        (
+            Self {
+                delay,
+                active: Arc::new(Mutex::new(HashMap::new())),
+                completion_gate: Some(Arc::clone(&completion_gate)),
+            },
+            completion_gate,
+        )
     }
 }
 
@@ -58,8 +122,9 @@ impl EngineAdapter for FakeEngineAdapter {
             run_id.clone(),
             ActiveRun {
                 generation,
-                cancel: abort_sender,
-                completion: completion_receiver,
+                state: FakeRunState::Running,
+                cancel: Some(abort_sender),
+                completion: Some(completion_receiver),
             },
         );
         drop(active);
@@ -70,6 +135,8 @@ impl EngineAdapter for FakeEngineAdapter {
         };
         let delay = self.delay;
         let active = Arc::clone(&self.active);
+        #[cfg(test)]
+        let completion_gate = self.completion_gate.clone();
         tokio::spawn(async move {
             let result = emit_run(context, prompt, sink, delay, abort_receiver).await;
             let outcome = match result {
@@ -79,12 +146,15 @@ impl EngineAdapter for FakeEngineAdapter {
                     FakeTaskOutcome::ChannelClosed
                 }
             };
+            #[cfg(test)]
+            if let Some(completion_gate) = completion_gate {
+                completion_gate.pause_if_armed().await;
+            }
             let _ = completion_sender.send(outcome);
             let mut active = active.lock().await;
-            if active
-                .get(&run_id)
-                .is_some_and(|entry| entry.generation == generation)
-            {
+            if active.get(&run_id).is_some_and(|entry| {
+                entry.generation == generation && entry.state == FakeRunState::Running
+            }) {
                 active.remove(&run_id);
             }
         });
@@ -93,14 +163,30 @@ impl EngineAdapter for FakeEngineAdapter {
     }
 
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {
-        let active = self
-            .active
-            .lock()
-            .await
-            .remove(run_id)
-            .ok_or(EngineError::Aborted)?;
-        let _ = active.cancel.send(());
-        match active.completion.await.map_err(|_| EngineError::Aborted)? {
+        let (generation, cancel, completion) = {
+            let mut active_runs = self.active.lock().await;
+            let active = active_runs.get_mut(run_id).ok_or(EngineError::Aborted)?;
+            if active.state == FakeRunState::Cancelling {
+                return Err(EngineError::Aborted);
+            }
+            active.state = FakeRunState::Cancelling;
+            let cancel = active.cancel.take().ok_or(EngineError::Aborted)?;
+            let completion = active.completion.take().ok_or(EngineError::Aborted)?;
+            (active.generation, cancel, completion)
+        };
+
+        let _ = cancel.send(());
+        let outcome = completion.await;
+        let mut active_runs = self.active.lock().await;
+        if active_runs
+            .get(run_id)
+            .is_some_and(|active| active.generation == generation)
+        {
+            active_runs.remove(run_id);
+        }
+        drop(active_runs);
+
+        match outcome.map_err(|_| EngineError::Aborted)? {
             FakeTaskOutcome::Aborted => Ok(()),
             FakeTaskOutcome::Completed | FakeTaskOutcome::ChannelClosed => {
                 Err(EngineError::Aborted)
@@ -200,6 +286,38 @@ mod tests {
                 "run_completed",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn start_rejects_a_run_while_its_previous_generation_is_cancelling() {
+        let (engine, completion_gate) =
+            FakeEngineAdapter::new_with_paused_first_completion(Duration::from_secs(60));
+        let context = EngineRunContext::test("work-1", "run-1");
+        let (first_sender, _first_receiver) = mpsc::channel(16);
+        engine
+            .start(context.clone(), "First".into(), first_sender)
+            .await
+            .unwrap();
+
+        let abort_engine = engine.clone();
+        let abort = tokio::spawn(async move { abort_engine.abort("run-1").await });
+        completion_gate.wait_until_reached().await;
+
+        let (overlap_sender, _overlap_receiver) = mpsc::channel(16);
+        let overlap = engine
+            .start(context.clone(), "Overlapping".into(), overlap_sender)
+            .await;
+        assert!(matches!(overlap, Err(crate::engine::EngineError::Start(_))));
+
+        completion_gate.release();
+        abort.await.unwrap().unwrap();
+
+        let (second_sender, _second_receiver) = mpsc::channel(16);
+        engine
+            .start(context, "Second".into(), second_sender)
+            .await
+            .unwrap();
+        engine.abort("run-1").await.unwrap();
     }
 
     #[tokio::test]

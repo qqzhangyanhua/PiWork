@@ -54,55 +54,6 @@ impl TestHarness {
     }
 }
 
-struct ManualEventEngine {
-    sender: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<mpsc::Sender<EngineEvent>>>>,
-}
-
-impl ManualEventEngine {
-    fn new() -> (
-        Self,
-        tokio::sync::oneshot::Receiver<mpsc::Sender<EngineEvent>>,
-    ) {
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        (
-            Self {
-                sender: std::sync::Mutex::new(Some(sender)),
-            },
-            receiver,
-        )
-    }
-}
-
-#[async_trait]
-impl EngineAdapter for ManualEventEngine {
-    fn kind(&self) -> &'static str {
-        "manual"
-    }
-
-    async fn start(
-        &self,
-        _context: EngineRunContext,
-        _prompt: String,
-        sink: mpsc::Sender<EngineEvent>,
-    ) -> Result<EngineSessionRef, EngineError> {
-        self.sender
-            .lock()
-            .unwrap()
-            .take()
-            .ok_or_else(|| EngineError::Start("manual sender already taken".into()))?
-            .send(sink)
-            .map_err(|_| EngineError::Start("manual receiver closed".into()))?;
-        Ok(EngineSessionRef {
-            engine_kind: self.kind().into(),
-            session_id: "manual-session".into(),
-        })
-    }
-
-    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
-        Err(EngineError::Aborted)
-    }
-}
-
 struct PersistAssertingPublisher {
     repository: WorkRepository,
     observed: mpsc::Sender<WorkEventEnvelope>,
@@ -143,6 +94,240 @@ impl EventPublisher for PersistAssertingPublisher {
 
 struct PanickingPublisher {
     panicked: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+enum ControlledStartBehavior {
+    Immediate,
+    PartialError,
+    Gated,
+    Never,
+}
+
+struct ControlledResource {
+    cancel: tokio::sync::watch::Sender<bool>,
+    completion: tokio::sync::oneshot::Receiver<()>,
+}
+
+struct ControlledEngineState {
+    behavior: ControlledStartBehavior,
+    commands: tokio::sync::broadcast::Sender<EngineEvent>,
+    resources: tokio::sync::Mutex<std::collections::HashMap<String, ControlledResource>>,
+    started: tokio::sync::Semaphore,
+    release_start: tokio::sync::Semaphore,
+    abort_calls: std::sync::atomic::AtomicUsize,
+    live_producers: std::sync::atomic::AtomicUsize,
+    dropped_starts: std::sync::atomic::AtomicUsize,
+    pause_next_abort: std::sync::atomic::AtomicBool,
+    abort_paused: tokio::sync::Semaphore,
+    release_abort: tokio::sync::Semaphore,
+}
+
+#[derive(Clone)]
+struct ControlledEngine {
+    state: Arc<ControlledEngineState>,
+}
+
+struct StartFutureGuard {
+    state: Arc<ControlledEngineState>,
+}
+
+impl Drop for StartFutureGuard {
+    fn drop(&mut self) {
+        self.state
+            .dropped_starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl ControlledEngine {
+    fn new(behavior: ControlledStartBehavior) -> Self {
+        let (commands, _) = tokio::sync::broadcast::channel(32);
+        Self {
+            state: Arc::new(ControlledEngineState {
+                behavior,
+                commands,
+                resources: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+                started: tokio::sync::Semaphore::new(0),
+                release_start: tokio::sync::Semaphore::new(0),
+                abort_calls: std::sync::atomic::AtomicUsize::new(0),
+                live_producers: std::sync::atomic::AtomicUsize::new(0),
+                dropped_starts: std::sync::atomic::AtomicUsize::new(0),
+                pause_next_abort: std::sync::atomic::AtomicBool::new(false),
+                abort_paused: tokio::sync::Semaphore::new(0),
+                release_abort: tokio::sync::Semaphore::new(0),
+            }),
+        }
+    }
+
+    fn new_with_paused_abort(behavior: ControlledStartBehavior) -> Self {
+        let engine = Self::new(behavior);
+        engine
+            .state
+            .pause_next_abort
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        engine
+    }
+
+    async fn wait_started(&self) {
+        self.state.started.acquire().await.unwrap().forget();
+    }
+
+    fn release_start(&self) {
+        self.state.release_start.add_permits(1);
+    }
+
+    async fn wait_until_abort_is_paused(&self) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            self.state.abort_paused.acquire(),
+        )
+        .await
+        .expect("controlled engine did not pause its abort")
+        .unwrap()
+        .forget();
+    }
+
+    fn release_abort(&self) {
+        self.state.release_abort.add_permits(1);
+    }
+
+    fn send(&self, event: EngineEvent) {
+        self.state.commands.send(event).unwrap();
+    }
+
+    fn abort_calls(&self) -> usize {
+        self.state
+            .abort_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn live_producers(&self) -> usize {
+        self.state
+            .live_producers
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn dropped_starts(&self) -> usize {
+        self.state
+            .dropped_starts
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for ControlledEngine {
+    fn kind(&self) -> &'static str {
+        "controlled"
+    }
+
+    async fn start(
+        &self,
+        context: EngineRunContext,
+        _prompt: String,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        let _future_guard = StartFutureGuard {
+            state: Arc::clone(&self.state),
+        };
+        let (cancel, mut cancellation) = tokio::sync::watch::channel(false);
+        let (completion_sender, completion) = tokio::sync::oneshot::channel();
+        let mut commands = self.state.commands.subscribe();
+        let producer_state = Arc::clone(&self.state);
+        self.state
+            .live_producers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = cancellation.changed() => {
+                        if changed.is_err() || *cancellation.borrow() {
+                            if producer_state
+                                .pause_next_abort
+                                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                producer_state.abort_paused.add_permits(1);
+                                producer_state
+                                    .release_abort
+                                    .acquire()
+                                    .await
+                                    .expect("controlled abort release gate closed")
+                                    .forget();
+                            }
+                            break;
+                        }
+                    }
+                    command = commands.recv() => {
+                        match command {
+                            Ok(event) => {
+                                if sink.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+            producer_state
+                .live_producers
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = completion_sender.send(());
+        });
+        self.state
+            .resources
+            .lock()
+            .await
+            .insert(context.run_id, ControlledResource { cancel, completion });
+        self.state.started.add_permits(1);
+
+        match self.state.behavior {
+            ControlledStartBehavior::Immediate => {}
+            ControlledStartBehavior::PartialError => {
+                return Err(EngineError::Start("partial controlled failure".into()));
+            }
+            ControlledStartBehavior::Gated => {
+                self.state
+                    .release_start
+                    .acquire()
+                    .await
+                    .map_err(|_| EngineError::Start("start gate closed".into()))?
+                    .forget();
+            }
+            ControlledStartBehavior::Never => std::future::pending::<()>().await,
+        }
+
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: "controlled-session".into(),
+        })
+    }
+
+    async fn abort(&self, run_id: &str) -> Result<(), EngineError> {
+        self.state
+            .abort_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let resource = self
+            .state
+            .resources
+            .lock()
+            .await
+            .remove(run_id)
+            .ok_or(EngineError::Aborted)?;
+        let _ = resource.cancel.send(true);
+        resource.completion.await.map_err(|_| EngineError::Aborted)
+    }
+}
+
+async fn wait_for_no_controlled_producers(engine: &ControlledEngine) {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while engine.live_producers() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("controlled producer remained alive");
 }
 
 impl PanickingPublisher {
@@ -235,28 +420,6 @@ async fn start_work_returns_before_the_engine_stream_finishes() {
     .unwrap();
 
     assert_eq!(run.status, RunStatus::Running);
-}
-
-struct StartFailingEngine;
-
-#[async_trait]
-impl EngineAdapter for StartFailingEngine {
-    fn kind(&self) -> &'static str {
-        "start-failing"
-    }
-
-    async fn start(
-        &self,
-        _context: EngineRunContext,
-        _prompt: String,
-        _sink: mpsc::Sender<EngineEvent>,
-    ) -> Result<EngineSessionRef, EngineError> {
-        Err(EngineError::Start("intentional failure".into()))
-    }
-
-    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
-        Err(EngineError::Aborted)
-    }
 }
 
 struct BlockingStartEngine {
@@ -364,6 +527,46 @@ async fn cancelling_the_start_caller_does_not_cancel_engine_startup() {
     assert_eq!(detail.summary.status, WorkStatus::Completed);
 }
 
+#[tokio::test]
+async fn supervisor_times_out_and_terminates_an_engine_start_that_never_returns() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Timeout engine start").await;
+    let engine = ControlledEngine::new(ControlledStartBehavior::Never);
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::with_timeouts(
+        harness.repository.clone(),
+        Arc::new(engine.clone()),
+        Arc::new(publisher),
+        "Controlled model",
+        std::time::Duration::from_millis(50),
+        std::time::Duration::from_millis(100),
+    );
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        supervisor.start(&work.summary.id, "Build it"),
+    )
+    .await
+    .expect("supervisor did not own the engine startup deadline")
+    .unwrap_err();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(error).unwrap()["code"],
+        "engine_start_failed"
+    );
+    assert_eq!(detail.summary.status, WorkStatus::Failed);
+    assert_eq!(detail.runs[0].status, RunStatus::Failed);
+    assert_eq!(engine.abort_calls(), 1);
+    assert_eq!(engine.dropped_starts(), 1);
+    wait_for_no_controlled_producers(&engine).await;
+}
+
 struct FloodingStartEngine;
 
 #[async_trait]
@@ -437,21 +640,37 @@ async fn adapter_can_fill_more_than_the_engine_channel_before_start_returns() {
 }
 
 #[tokio::test]
-async fn engine_start_failure_marks_the_run_and_work_failed_and_clears_active() {
+async fn partial_engine_start_failure_aborts_once_before_clearing_active() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Fail safely").await;
+    let engine = ControlledEngine::new_with_paused_abort(ControlledStartBehavior::PartialError);
     let (publisher, _published) = ChannelEventPublisher::channel(16);
-    let supervisor = EngineSupervisor::new(
+    let supervisor = Arc::new(EngineSupervisor::new(
         harness.repository.clone(),
-        Arc::new(StartFailingEngine),
+        Arc::new(engine.clone()),
         Arc::new(publisher),
-        "Failing model",
-    );
+        "Controlled model",
+    ));
 
-    let first_error = supervisor
-        .start(&work.summary.id, "Build it")
+    let first_supervisor = Arc::clone(&supervisor);
+    let first_work_id = work.summary.id.clone();
+    let first =
+        tokio::spawn(async move { first_supervisor.start(&first_work_id, "Build it").await });
+    engine.wait_until_abort_is_paused().await;
+
+    let overlap_error = supervisor
+        .start(&work.summary.id, "Overlapping")
         .await
         .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(overlap_error).unwrap()["code"],
+        "work_already_running"
+    );
+    assert_eq!(engine.abort_calls(), 1);
+    assert_eq!(engine.live_producers(), 1);
+
+    engine.release_abort();
+    let first_error = first.await.unwrap().unwrap_err();
     let after_first = harness
         .repository
         .get(&work.summary.id)
@@ -461,11 +680,14 @@ async fn engine_start_failure_marks_the_run_and_work_failed_and_clears_active() 
 
     assert_eq!(
         serde_json::to_value(first_error).unwrap()["code"],
-        "engine_error"
+        "engine_start_failed"
     );
     assert_eq!(after_first.summary.status, WorkStatus::Failed);
     assert_eq!(after_first.runs[0].status, RunStatus::Failed);
     assert!(after_first.runs[0].completed_at.is_some());
+    assert_eq!(engine.abort_calls(), 1);
+    assert_eq!(engine.dropped_starts(), 1);
+    wait_for_no_controlled_producers(&engine).await;
 
     let second_error = supervisor
         .start(&work.summary.id, "Try again")
@@ -473,8 +695,10 @@ async fn engine_start_failure_marks_the_run_and_work_failed_and_clears_active() 
         .unwrap_err();
     assert_eq!(
         serde_json::to_value(second_error).unwrap()["code"],
-        "engine_error"
+        "engine_start_failed"
     );
+    assert_eq!(engine.abort_calls(), 2);
+    wait_for_no_controlled_producers(&engine).await;
 }
 
 struct EarlyClosingEngine;
@@ -798,19 +1022,18 @@ async fn publisher_failure_does_not_stop_the_persisted_event_stream() {
 async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Finalize append failure").await;
-    let (engine, event_sender) = ManualEventEngine::new();
+    let engine = ControlledEngine::new(ControlledStartBehavior::Immediate);
     let (publisher, mut published) = ChannelEventPublisher::channel(16);
     let supervisor = EngineSupervisor::new(
         harness.repository.clone(),
-        Arc::new(engine),
+        Arc::new(engine.clone()),
         Arc::new(publisher),
-        "Manual model",
+        "Controlled model",
     );
     let run = supervisor
         .start(&work.summary.id, "Build it")
         .await
         .unwrap();
-    let sender = event_sender.await.unwrap();
     let preexisting = WorkEventEnvelope {
         version: 1,
         work_id: work.summary.id.clone(),
@@ -827,13 +1050,9 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
         .await
         .unwrap();
 
-    sender
-        .send(EngineEvent::AssistantDelta {
-            text: "engine sequence one".into(),
-        })
-        .await
-        .unwrap();
-    drop(sender);
+    engine.send(EngineEvent::AssistantDelta {
+        text: "engine sequence one".into(),
+    });
     let failed = tokio::time::timeout(std::time::Duration::from_secs(1), published.recv())
         .await
         .expect("consumer did not publish its finalized failure")
@@ -843,51 +1062,51 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
     assert_eq!(failed.sequence, 2);
     assert!(matches!(failed.payload, WorkEventPayload::RunFailed { .. }));
     assert_eq!(events, vec![preexisting, failed]);
+    assert_eq!(engine.abort_calls(), 1);
+    wait_for_no_controlled_producers(&engine).await;
 }
 
 #[tokio::test]
-async fn finalize_failure_keeps_the_active_slot_faulted() {
+async fn attach_failure_aborts_idle_engine_once_and_keeps_the_active_slot_faulted() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Keep faulted slot").await;
-    let (engine, event_sender) = ManualEventEngine::new();
+    let engine = ControlledEngine::new(ControlledStartBehavior::Gated);
     let (publisher, _published) = ChannelEventPublisher::channel(16);
-    let supervisor = EngineSupervisor::new(
+    let supervisor = Arc::new(EngineSupervisor::with_timeouts(
         harness.repository.clone(),
-        Arc::new(engine),
+        Arc::new(engine.clone()),
         Arc::new(publisher),
-        "Manual model",
-    );
-    supervisor
-        .start(&work.summary.id, "Build it")
-        .await
-        .unwrap();
-    let sender = event_sender.await.unwrap();
+        "Controlled model",
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(200),
+    ));
+    let start_supervisor = Arc::clone(&supervisor);
+    let start_work_id = work.summary.id.clone();
+    let start =
+        tokio::spawn(async move { start_supervisor.start(&start_work_id, "Build it").await });
+    engine.wait_started().await;
     sqlx::query("PRAGMA query_only = ON")
         .execute(&harness.pool)
         .await
         .unwrap();
-    sender
-        .send(EngineEvent::AssistantDelta {
-            text: "cannot be persisted".into(),
-        })
-        .await
-        .unwrap();
-    drop(sender);
+    engine.release_start();
 
-    let error = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let error = supervisor
-                .start(&work.summary.id, "Try again")
-                .await
-                .unwrap_err();
-            if serde_json::to_value(&error).unwrap()["code"] == "engine_faulted" {
-                return error;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("active slot was cleared instead of becoming faulted");
+    let start_error = tokio::time::timeout(std::time::Duration::from_secs(1), start)
+        .await
+        .expect("attach failure did not stop the idle engine promptly")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(start_error).unwrap()["code"],
+        "engine_faulted"
+    );
+    assert_eq!(engine.abort_calls(), 1);
+    wait_for_no_controlled_producers(&engine).await;
+
+    let error = supervisor
+        .start(&work.summary.id, "Try again")
+        .await
+        .unwrap_err();
     sqlx::query("PRAGMA query_only = OFF")
         .execute(&harness.pool)
         .await
@@ -904,19 +1123,23 @@ async fn finalize_failure_keeps_the_active_slot_faulted() {
 }
 
 #[tokio::test]
-async fn consumer_panic_still_gets_a_durable_failure_fallback() {
+async fn publisher_panic_aborts_the_engine_once_and_gets_a_durable_failure_fallback() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Recover consumer panic").await;
+    let engine = ControlledEngine::new(ControlledStartBehavior::Immediate);
     let supervisor = EngineSupervisor::new(
         harness.repository.clone(),
-        Arc::new(FakeEngineAdapter::new(std::time::Duration::from_millis(20))),
+        Arc::new(engine.clone()),
         Arc::new(PanickingPublisher::new()),
-        "Fake model",
+        "Controlled model",
     );
     let run = supervisor
         .start(&work.summary.id, "Build it")
         .await
         .unwrap();
+    engine.send(EngineEvent::AssistantDelta {
+        text: "panic while publishing this event".into(),
+    });
 
     let detail = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -939,6 +1162,8 @@ async fn consumer_panic_still_gets_a_durable_failure_fallback() {
     assert!(detail.events.iter().any(|event| {
         event.run_id == run.id && matches!(event.payload, WorkEventPayload::RunFailed { .. })
     }));
+    assert_eq!(engine.abort_calls(), 1);
+    wait_for_no_controlled_producers(&engine).await;
 }
 
 #[tokio::test]

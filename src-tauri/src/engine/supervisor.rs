@@ -1,9 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use tokio::{
-    sync::{Mutex, mpsc, oneshot, watch},
-    task::{AbortHandle, JoinHandle},
+    sync::{Mutex, Notify, mpsc, oneshot, watch},
+    task::{AbortHandle, JoinError, JoinHandle},
 };
 use uuid::Uuid;
 
@@ -19,38 +19,112 @@ use crate::{
 
 use super::publisher::EventPublisher;
 
+const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
+
 type ActiveRuns = Arc<Mutex<HashMap<String, ActiveEntry>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct ActiveEntry {
     generation: Uuid,
     work_id: String,
     run_id: Option<String>,
     session: Option<EngineSessionRef>,
     task: Option<AbortHandle>,
+    termination: Option<Arc<TerminationOwner>>,
     state: ActiveState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum ActiveState {
     Starting,
     Running,
     Faulted { reason: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum StartSignal {
     Pending,
     Ready,
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsumerOutcome {
     Terminal,
-    Failed,
+    Abnormal(&'static str),
     StartFailed,
-    Faulted,
+}
+
+enum StartPhaseOutcome {
+    Returned(Result<EngineSessionRef, crate::engine::EngineError>),
+    TimedOut,
+    ConsumerFinished(Result<ConsumerOutcome, JoinError>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbortOutcome {
+    Confirmed,
+    Unconfirmed,
+}
+
+enum AbortState {
+    Open,
+    Aborting,
+    Done(AbortOutcome),
+}
+
+struct TerminationOwner {
+    engine: Arc<dyn EngineAdapter>,
+    run_id: String,
+    timeout: Duration,
+    state: Mutex<AbortState>,
+    completed: Notify,
+}
+
+impl TerminationOwner {
+    fn new(engine: Arc<dyn EngineAdapter>, run_id: String, timeout: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            engine,
+            run_id,
+            timeout,
+            state: Mutex::new(AbortState::Open),
+            completed: Notify::new(),
+        })
+    }
+
+    async fn abort_once(self: &Arc<Self>) -> AbortOutcome {
+        loop {
+            let notified = self.completed.notified();
+            let should_start = {
+                let mut state = self.state.lock().await;
+                match *state {
+                    AbortState::Open => {
+                        *state = AbortState::Aborting;
+                        true
+                    }
+                    AbortState::Aborting => false,
+                    AbortState::Done(outcome) => return outcome,
+                }
+            };
+            if should_start {
+                let owner = Arc::clone(self);
+                tokio::spawn(async move {
+                    let outcome = match tokio::time::timeout(
+                        owner.timeout,
+                        owner.engine.abort(&owner.run_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => AbortOutcome::Confirmed,
+                        Ok(Err(_)) | Err(_) => AbortOutcome::Unconfirmed,
+                    };
+                    *owner.state.lock().await = AbortState::Done(outcome);
+                    owner.completed.notify_waiters();
+                });
+            }
+            notified.await;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +133,8 @@ pub struct EngineSupervisor {
     engine: Arc<dyn EngineAdapter>,
     publisher: Arc<dyn EventPublisher>,
     model_label: String,
+    startup_timeout: Duration,
+    abort_timeout: Duration,
     active: ActiveRuns,
 }
 
@@ -69,11 +145,31 @@ impl EngineSupervisor {
         publisher: Arc<dyn EventPublisher>,
         model_label: impl Into<String>,
     ) -> Self {
+        Self::with_timeouts(
+            repository,
+            engine,
+            publisher,
+            model_label,
+            DEFAULT_STARTUP_TIMEOUT,
+            DEFAULT_ABORT_TIMEOUT,
+        )
+    }
+
+    pub fn with_timeouts(
+        repository: WorkRepository,
+        engine: Arc<dyn EngineAdapter>,
+        publisher: Arc<dyn EventPublisher>,
+        model_label: impl Into<String>,
+        startup_timeout: Duration,
+        abort_timeout: Duration,
+    ) -> Self {
         Self {
             repository,
             engine,
             publisher,
             model_label: model_label.into(),
+            startup_timeout,
+            abort_timeout,
             active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -97,6 +193,7 @@ impl EngineSupervisor {
                     run_id: None,
                     session: None,
                     task: None,
+                    termination: None,
                     state: ActiveState::Starting,
                 },
             );
@@ -112,6 +209,8 @@ impl EngineSupervisor {
             work_id.to_owned(),
             prompt.to_owned(),
             self.model_label.clone(),
+            self.startup_timeout,
+            self.abort_timeout,
             result_sender,
         ));
         let abort_handle = task.abort_handle();
@@ -145,6 +244,8 @@ async fn run_lifecycle(
     work_id: String,
     prompt: String,
     model_label: String,
+    startup_timeout: Duration,
+    abort_timeout: Duration,
     result_sender: oneshot::Sender<Result<RunSummary, AppError>>,
 ) {
     let work = match repository.get(&work_id).await {
@@ -181,7 +282,7 @@ async fn run_lifecycle(
     ) {
         Ok(context) => context,
         Err(error) => {
-            let faulted = finalize_failure(
+            let outcome = finalize_without_abort(
                 &repository,
                 &publisher,
                 &active,
@@ -190,9 +291,8 @@ async fn run_lifecycle(
                 generation,
                 "Engine context initialization failed",
             )
-            .await
-                == ConsumerOutcome::Faulted;
-            let response = if faulted {
+            .await;
+            let response = if outcome == AbortOutcome::Unconfirmed {
                 AppError::engine_faulted(&work_id)
             } else {
                 AppError::engine(error.to_string())
@@ -202,9 +302,11 @@ async fn run_lifecycle(
         }
     };
 
+    let termination = TerminationOwner::new(Arc::clone(&engine), run.id.clone(), abort_timeout);
+    set_termination(&active, &work_id, generation, Arc::clone(&termination)).await;
     let (event_sender, event_receiver) = mpsc::channel(16);
     let (signal_sender, signal_receiver) = watch::channel(StartSignal::Pending);
-    let consumer = tokio::spawn(consume_events(
+    let mut consumer = tokio::spawn(consume_events(
         repository.clone(),
         Arc::clone(&publisher),
         Arc::clone(&active),
@@ -215,14 +317,25 @@ async fn run_lifecycle(
         signal_receiver,
     ));
 
-    let session = match engine
-        .start(context, prompt.trim().to_owned(), event_sender)
-        .await
-    {
-        Ok(session) => session,
-        Err(error) => {
+    let start_phase = {
+        let start = engine.start(context, prompt.trim().to_owned(), event_sender);
+        tokio::pin!(start);
+        let deadline = tokio::time::sleep(startup_timeout);
+        tokio::pin!(deadline);
+        tokio::select! {
+            result = &mut start => StartPhaseOutcome::Returned(result),
+            _ = &mut deadline => StartPhaseOutcome::TimedOut,
+            result = &mut consumer => StartPhaseOutcome::ConsumerFinished(result),
+        }
+    };
+
+    let session = match start_phase {
+        StartPhaseOutcome::Returned(Ok(session)) => session,
+        StartPhaseOutcome::Returned(Err(_)) | StartPhaseOutcome::TimedOut => {
             let _ = signal_sender.send(StartSignal::Failed);
-            let outcome = finalize_failure(
+            stop_consumer(&mut consumer, abort_timeout).await;
+            let outcome = terminate_abnormally(
+                &termination,
                 &repository,
                 &publisher,
                 &active,
@@ -232,24 +345,48 @@ async fn run_lifecycle(
                 "Engine failed to start",
             )
             .await;
-            let _ = consumer.await;
-            let response = if outcome == ConsumerOutcome::Faulted {
-                AppError::engine_faulted(&work_id)
+            let response = if outcome == AbortOutcome::Confirmed {
+                AppError::engine_start_failed(&work_id)
             } else {
-                AppError::engine(error.to_string())
+                AppError::engine_faulted(&work_id)
+            };
+            let _ = result_sender.send(Err(response));
+            return;
+        }
+        StartPhaseOutcome::ConsumerFinished(result) => {
+            let reason = consumer_failure_reason(result);
+            let _ = signal_sender.send(StartSignal::Failed);
+            let outcome = terminate_abnormally(
+                &termination,
+                &repository,
+                &publisher,
+                &active,
+                &work_id,
+                &run.id,
+                generation,
+                reason,
+            )
+            .await;
+            let response = if outcome == AbortOutcome::Confirmed {
+                AppError::engine_start_failed(&work_id)
+            } else {
+                AppError::engine_faulted(&work_id)
             };
             let _ = result_sender.send(Err(response));
             return;
         }
     };
+
     let attached = match repository
         .attach_engine_session(&run.id, &session.engine_kind, &session.session_id)
         .await
     {
         Ok(attached) => attached,
-        Err(error) => {
+        Err(_) => {
             let _ = signal_sender.send(StartSignal::Failed);
-            let outcome = finalize_failure(
+            stop_consumer(&mut consumer, abort_timeout).await;
+            let outcome = terminate_abnormally(
+                &termination,
                 &repository,
                 &publisher,
                 &active,
@@ -259,11 +396,10 @@ async fn run_lifecycle(
                 "Engine session could not be attached",
             )
             .await;
-            let _ = consumer.await;
-            let response = if outcome == ConsumerOutcome::Faulted {
-                AppError::engine_faulted(&work_id)
+            let response = if outcome == AbortOutcome::Confirmed {
+                AppError::engine_start_failed(&work_id)
             } else {
-                error
+                AppError::engine_faulted(&work_id)
             };
             let _ = result_sender.send(Err(response));
             return;
@@ -273,17 +409,34 @@ async fn run_lifecycle(
     let _ = signal_sender.send(StartSignal::Ready);
     let _ = result_sender.send(Ok(attached));
 
-    if consumer.await.is_err() {
-        let _ = finalize_failure(
-            &repository,
-            &publisher,
-            &active,
-            &work_id,
-            &run.id,
-            generation,
-            "Engine event consumer stopped unexpectedly",
-        )
-        .await;
+    match consumer.await {
+        Ok(ConsumerOutcome::Terminal) => {}
+        Ok(ConsumerOutcome::Abnormal(reason)) => {
+            let _ = terminate_abnormally(
+                &termination,
+                &repository,
+                &publisher,
+                &active,
+                &work_id,
+                &run.id,
+                generation,
+                reason,
+            )
+            .await;
+        }
+        Ok(ConsumerOutcome::StartFailed) | Err(_) => {
+            let _ = terminate_abnormally(
+                &termination,
+                &repository,
+                &publisher,
+                &active,
+                &work_id,
+                &run.id,
+                generation,
+                "Engine event consumer stopped unexpectedly",
+            )
+            .await;
+        }
     }
 }
 
@@ -299,7 +452,32 @@ async fn consume_events(
     mut start_signal: watch::Receiver<StartSignal>,
 ) -> ConsumerOutcome {
     let mut sequence = 1_u32;
-    while let Some(event) = receiver.recv().await {
+    loop {
+        let current_start_signal = *start_signal.borrow();
+        let event = match current_start_signal {
+            StartSignal::Failed => return ConsumerOutcome::StartFailed,
+            StartSignal::Pending => {
+                tokio::select! {
+                    biased;
+                    changed = start_signal.changed() => {
+                        if changed.is_err() || *start_signal.borrow() == StartSignal::Failed {
+                            return ConsumerOutcome::StartFailed;
+                        }
+                        continue;
+                    }
+                    event = receiver.recv() => event,
+                }
+            }
+            StartSignal::Ready => receiver.recv().await,
+        };
+        let Some(event) = event else {
+            return match await_start_signal(&mut start_signal).await {
+                StartSignal::Ready => {
+                    ConsumerOutcome::Abnormal("Engine event stream closed before a terminal event")
+                }
+                StartSignal::Failed | StartSignal::Pending => ConsumerOutcome::StartFailed,
+            };
+        };
         let terminal = event.is_terminal();
         if terminal {
             match await_start_signal_while_draining(&mut start_signal, &mut receiver).await {
@@ -329,16 +507,7 @@ async fn consume_events(
                     return ConsumerOutcome::StartFailed;
                 }
             }
-            return finalize_failure(
-                &repository,
-                &publisher,
-                &active,
-                &work_id,
-                &run_id,
-                generation,
-                "Engine event could not be journaled",
-            )
-            .await;
+            return ConsumerOutcome::Abnormal("Engine event could not be journaled");
         }
         if terminal {
             remove_active(&active, &work_id, generation).await;
@@ -347,34 +516,25 @@ async fn consume_events(
         }
         let _ = publisher.publish(envelope).await;
         let Some(next) = sequence.checked_add(1) else {
-            return finalize_failure(
-                &repository,
-                &publisher,
-                &active,
-                &work_id,
-                &run_id,
-                generation,
-                "Engine event sequence limit was reached",
-            )
-            .await;
+            return ConsumerOutcome::Abnormal("Engine event sequence limit was reached");
         };
         sequence = next;
     }
+}
 
-    match await_start_signal(&mut start_signal).await {
-        StartSignal::Ready => {
-            finalize_failure(
-                &repository,
-                &publisher,
-                &active,
-                &work_id,
-                &run_id,
-                generation,
-                "Engine event stream closed before a terminal event",
-            )
-            .await
-        }
-        StartSignal::Failed | StartSignal::Pending => ConsumerOutcome::StartFailed,
+async fn stop_consumer(consumer: &mut JoinHandle<ConsumerOutcome>, timeout: Duration) {
+    if tokio::time::timeout(timeout, &mut *consumer).await.is_err() {
+        consumer.abort();
+        let _ = consumer.await;
+    }
+}
+
+fn consumer_failure_reason(result: Result<ConsumerOutcome, JoinError>) -> &'static str {
+    match result {
+        Ok(ConsumerOutcome::Abnormal(reason)) => reason,
+        Ok(ConsumerOutcome::Terminal) => "Engine terminated before its session was attached",
+        Ok(ConsumerOutcome::StartFailed) => "Engine startup failed",
+        Err(_) => "Engine event consumer stopped unexpectedly",
     }
 }
 
@@ -414,7 +574,9 @@ async fn await_start_signal_while_draining(
     }
 }
 
-async fn finalize_failure(
+#[allow(clippy::too_many_arguments)]
+async fn terminate_abnormally(
+    termination: &Arc<TerminationOwner>,
     repository: &WorkRepository,
     publisher: &Arc<dyn EventPublisher>,
     active: &ActiveRuns,
@@ -422,7 +584,38 @@ async fn finalize_failure(
     run_id: &str,
     generation: Uuid,
     reason: &'static str,
-) -> ConsumerOutcome {
+) -> AbortOutcome {
+    let abort = termination.abort_once().await;
+    let finalized = repository
+        .finalize_run_failure(run_id, work_id, reason)
+        .await;
+    match (abort, finalized) {
+        (AbortOutcome::Confirmed, Ok(envelope)) => {
+            remove_active(active, work_id, generation).await;
+            let _ = publisher.publish(envelope).await;
+            AbortOutcome::Confirmed
+        }
+        (abort, Ok(envelope)) => {
+            set_faulted(active, work_id, generation, reason).await;
+            let _ = publisher.publish(envelope).await;
+            abort
+        }
+        (_, Err(_)) => {
+            set_faulted(active, work_id, generation, reason).await;
+            AbortOutcome::Unconfirmed
+        }
+    }
+}
+
+async fn finalize_without_abort(
+    repository: &WorkRepository,
+    publisher: &Arc<dyn EventPublisher>,
+    active: &ActiveRuns,
+    work_id: &str,
+    run_id: &str,
+    generation: Uuid,
+    reason: &'static str,
+) -> AbortOutcome {
     match repository
         .finalize_run_failure(run_id, work_id, reason)
         .await
@@ -430,11 +623,11 @@ async fn finalize_failure(
         Ok(envelope) => {
             remove_active(active, work_id, generation).await;
             let _ = publisher.publish(envelope).await;
-            ConsumerOutcome::Failed
+            AbortOutcome::Confirmed
         }
         Err(_) => {
             set_faulted(active, work_id, generation, reason).await;
-            ConsumerOutcome::Faulted
+            AbortOutcome::Unconfirmed
         }
     }
 }
@@ -450,26 +643,41 @@ async fn monitor_lifecycle(
     if task.await.is_ok() {
         return;
     }
-    let run_id = {
+    let identity = {
         let active = active.lock().await;
         active
             .get(&work_id)
             .filter(|entry| entry.generation == generation && entry.work_id == work_id)
-            .and_then(|entry| entry.run_id.clone())
+            .map(|entry| (entry.run_id.clone(), entry.termination.clone()))
     };
-    if let Some(run_id) = run_id {
-        let _ = finalize_failure(
-            &repository,
-            &publisher,
-            &active,
-            &work_id,
-            &run_id,
-            generation,
-            "Engine lifecycle task stopped unexpectedly",
-        )
-        .await;
-    } else {
-        remove_active(&active, &work_id, generation).await;
+    match identity {
+        Some((Some(run_id), Some(termination))) => {
+            let _ = terminate_abnormally(
+                &termination,
+                &repository,
+                &publisher,
+                &active,
+                &work_id,
+                &run_id,
+                generation,
+                "Engine lifecycle task stopped unexpectedly",
+            )
+            .await;
+        }
+        Some((Some(run_id), None)) => {
+            let _ = finalize_without_abort(
+                &repository,
+                &publisher,
+                &active,
+                &work_id,
+                &run_id,
+                generation,
+                "Engine lifecycle task stopped unexpectedly",
+            )
+            .await;
+        }
+        Some((None, _)) => remove_active(&active, &work_id, generation).await,
+        None => {}
     }
 }
 
@@ -490,6 +698,21 @@ async fn set_run_id(active: &ActiveRuns, work_id: &str, generation: Uuid, run_id
         .filter(|entry| entry.generation == generation && entry.work_id == work_id)
     {
         entry.run_id = Some(run_id.to_owned());
+    }
+}
+
+async fn set_termination(
+    active: &ActiveRuns,
+    work_id: &str,
+    generation: Uuid,
+    termination: Arc<TerminationOwner>,
+) {
+    let mut active = active.lock().await;
+    if let Some(entry) = active
+        .get_mut(work_id)
+        .filter(|entry| entry.generation == generation && entry.work_id == work_id)
+    {
+        entry.termination = Some(termination);
     }
 }
 

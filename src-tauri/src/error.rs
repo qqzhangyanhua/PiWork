@@ -42,6 +42,9 @@ pub enum AppError {
     #[error("Work engine lifecycle is faulted: {work_id}")]
     EngineFaulted { work_id: String },
 
+    #[error("Engine failed to start for Work: {work_id}")]
+    EngineStartFailed { work_id: String },
+
     #[error("engine operation failed: {message}")]
     Engine { message: String },
 
@@ -136,6 +139,12 @@ impl AppError {
         }
     }
 
+    pub fn engine_start_failed(work_id: impl Into<String>) -> Self {
+        Self::EngineStartFailed {
+            work_id: work_id.into(),
+        }
+    }
+
     pub fn engine(message: impl Into<String>) -> Self {
         Self::Engine {
             message: message.into(),
@@ -191,6 +200,11 @@ impl AppError {
             Self::EngineFaulted { work_id } => (
                 "engine_faulted",
                 "Work engine lifecycle is faulted",
+                Some(json!({ "workId": work_id })),
+            ),
+            Self::EngineStartFailed { work_id } => (
+                "engine_start_failed",
+                "Engine failed to start",
                 Some(json!({ "workId": work_id })),
             ),
             Self::Engine { .. } => ("engine_error", "Engine operation failed", None),
