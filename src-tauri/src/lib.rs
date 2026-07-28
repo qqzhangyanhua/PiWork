@@ -13,6 +13,32 @@ pub mod work;
 type StartupError = Box<dyn std::error::Error>;
 type StartupResult<T> = Result<T, StartupError>;
 
+trait SecondInstanceWindow {
+    type Error;
+
+    fn is_visible(&self) -> Result<bool, Self::Error>;
+    fn set_focus(&self) -> Result<(), Self::Error>;
+}
+
+impl<R: tauri::Runtime> SecondInstanceWindow for tauri::WebviewWindow<R> {
+    type Error = tauri::Error;
+
+    fn is_visible(&self) -> Result<bool, Self::Error> {
+        self.is_visible()
+    }
+
+    fn set_focus(&self) -> Result<(), Self::Error> {
+        self.set_focus()
+    }
+}
+
+fn focus_visible_main_window<W: SecondInstanceWindow>(window: &W) -> Result<(), W::Error> {
+    if window.is_visible()? {
+        window.set_focus()?;
+    }
+    Ok(())
+}
+
 async fn orchestrate_startup<T, E, Recover, RecoverFuture, Assemble, Show>(
     recover: Recover,
     assemble: Assemble,
@@ -31,6 +57,11 @@ where
 
 fn application_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = focus_visible_main_window(&window);
+            }
+        }))
         .setup(|app| {
             let paths = paths::AppPaths::from_resolver(app.path())?;
             // Tauri's setup callback runs synchronously on the event-loop thread. Bridge the
@@ -96,7 +127,37 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        cell::Cell,
+        sync::{Arc, Mutex},
+    };
+
+    struct TestSecondInstanceWindow {
+        visible: bool,
+        focus_count: Cell<usize>,
+    }
+
+    impl TestSecondInstanceWindow {
+        fn new(visible: bool) -> Self {
+            Self {
+                visible,
+                focus_count: Cell::new(0),
+            }
+        }
+    }
+
+    impl super::SecondInstanceWindow for TestSecondInstanceWindow {
+        type Error = &'static str;
+
+        fn is_visible(&self) -> Result<bool, Self::Error> {
+            Ok(self.visible)
+        }
+
+        fn set_focus(&self) -> Result<(), Self::Error> {
+            self.focus_count.set(self.focus_count.get() + 1);
+            Ok(())
+        }
+    }
 
     #[test]
     fn application_builder_typechecks() {
@@ -115,6 +176,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(main_window["visible"], false);
+    }
+
+    #[test]
+    fn single_instance_plugin_is_registered_before_user_setup() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(manifest.contains("tauri-plugin-single-instance"));
+
+        let source = include_str!("lib.rs");
+        let plugin = source
+            .find(".plugin(tauri_plugin_single_instance::init")
+            .expect("single-instance plugin registration is missing");
+        let setup = source
+            .find(".setup(|app|")
+            .expect("application setup hook is missing");
+        assert!(plugin < setup, "single-instance must be registered first");
+    }
+
+    #[test]
+    fn second_instance_does_not_focus_a_hidden_startup_window() {
+        let window = TestSecondInstanceWindow::new(false);
+
+        super::focus_visible_main_window(&window).unwrap();
+
+        assert_eq!(window.focus_count.get(), 0);
+    }
+
+    #[test]
+    fn second_instance_focuses_an_already_visible_main_window() {
+        let window = TestSecondInstanceWindow::new(true);
+
+        super::focus_visible_main_window(&window).unwrap();
+
+        assert_eq!(window.focus_count.get(), 1);
     }
 
     #[tokio::test]

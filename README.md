@@ -9,7 +9,7 @@ Windows 10/11 x64 is the first supported desktop target.
 ## Prerequisites
 
 - Windows 10 or 11 x64
-- Node.js 20 or later
+- Node.js 20.19+ or 22.12+
 - pnpm 9.12.0 (Corepack is recommended)
 - Rust stable with the MSVC toolchain
 - Microsoft C++ Build Tools and WebView2 development prerequisites required by Tauri 2
