@@ -1,7 +1,25 @@
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { ContinuousLoopLogo } from "../components/brand/ContinuousLoopLogo";
+import {
+  WorkStoreProvider,
+  useWorkStore,
+} from "../features/works/WorkStoreProvider";
+import { useWorkEvents } from "../features/works/useWorkEvents";
+import type { PiWorkClient } from "./tauriClient";
 
-export function App() {
+function WorkBootstrap() {
+  const hydrate = useWorkStore((state) => state.hydrate);
+
+  useWorkEvents();
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
+
+  return <ProductShell />;
+}
+
+function ProductShell() {
   const { t } = useTranslation();
 
   return (
@@ -17,5 +35,17 @@ export function App() {
       </header>
       <div aria-hidden="true" className="app-shell__workspace" />
     </main>
+  );
+}
+
+export type AppProps = {
+  client?: PiWorkClient;
+};
+
+export function App({ client }: AppProps) {
+  return (
+    <WorkStoreProvider client={client}>
+      <WorkBootstrap />
+    </WorkStoreProvider>
   );
 }
