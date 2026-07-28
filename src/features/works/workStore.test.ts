@@ -716,4 +716,66 @@ describe("createWorkStore", () => {
 
     expect(store.getState().selectedWorkId).toBe("w1");
   });
+
+  it("yields hydrate detail loading to a newer successful selection", async () => {
+    const listResult = deferred<WorkSummary[]>();
+    const selectionResult = deferred<WorkDetail>();
+    let detailCalls = 0;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: () => listResult.promise,
+      getWork: () => {
+        detailCalls += 1;
+        return selectionResult.promise;
+      },
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+
+    store.getState().selectWork("w1");
+    listResult.resolve([work]);
+    await Promise.resolve();
+    selectionResult.resolve({
+      summary: work,
+      runs: [run],
+      events: [event(1, { type: "runStarted", modelLabel: "selected" })],
+    });
+    await hydration;
+    await Promise.resolve();
+
+    expect(detailCalls).toBe(1);
+    expect(store.getState().timelines.w1).toHaveLength(1);
+    expect(store.getState().selectedWorkId).toBe("w1");
+    expect(store.getState().loading).toBe(false);
+  });
+
+  it("does not hide a newer selection error behind hydrate", async () => {
+    const listResult = deferred<WorkSummary[]>();
+    const selectionResult = deferred<WorkDetail>();
+    let detailCalls = 0;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: () => listResult.promise,
+      getWork: () => {
+        detailCalls += 1;
+        return selectionResult.promise;
+      },
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+
+    store.getState().selectWork("w1");
+    listResult.resolve([work]);
+    await Promise.resolve();
+    selectionResult.reject(new Error("selection detail failed"));
+    await hydration;
+    await Promise.resolve();
+
+    expect(detailCalls).toBe(1);
+    expect(store.getState().error).toEqual({
+      code: "unknown",
+      message: "selection detail failed",
+    });
+    expect(store.getState().loading).toBe(false);
+  });
 });

@@ -357,6 +357,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               get().upsertWork(listedWork);
             }
 
+            if (latestSelectionIntent !== initialSelectionIntent) {
+              return;
+            }
+
             let selectedWorkId = get().selectedWorkId;
             if (
               !selectedWorkId &&
