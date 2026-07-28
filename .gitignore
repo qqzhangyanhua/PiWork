@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 
 # Tauri / Rust
 /target/
@@ -20,4 +21,3 @@
 Thumbs.db
 .idea/
 .vscode/
-
