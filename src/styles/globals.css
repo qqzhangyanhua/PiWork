@@ -62,7 +62,7 @@ button {
 }
 
 .app-shell__action:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--pw-accent-500) 28%, transparent);
+  outline: 3px solid var(--pw-accent-500);
   outline-offset: 2px;
 }
 
