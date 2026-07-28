@@ -1,14 +1,50 @@
 {
-  "app": {
-    "name": "PiWork"
+  "app": { "name": "PiWork" },
+  "common": { "cancel": "取消", "close": "关闭", "create": "创建", "retry": "重试" },
+  "work": { "new": "新建 Work", "empty": "创建第一个 Work" },
+  "sidebar": { "label": "Work 导航", "works": "全部 Work" },
+  "create": {
+    "goal": "目标",
+    "rootPath": "工作目录",
+    "goalRequired": "请输入目标",
+    "rootRequired": "请输入工作目录"
   },
-  "work": {
-    "new": "新建 Work",
-    "empty": "创建第一个 Work"
+  "state": {
+    "loading": "正在加载 Work",
+    "errorTitle": "无法加载 Work",
+    "emptyBody": "从一个持续目标开始，PiWork 会保留每次 Run 的协作脉络。"
   },
+  "diagnostics": { "open": "打开诊断", "unavailable": "诊断详情无法安全显示" },
   "status": {
-    "draft": "草稿",
-    "running": "运行中",
-    "completed": "已完成"
+    "draft": "草稿", "queued": "排队中", "running": "运行中", "waiting": "等待中",
+    "idle": "空闲", "completed": "已完成", "failed": "失败", "stopped": "已停止",
+    "interrupted": "已中断", "archived": "已归档"
+  },
+  "timeline": {
+    "label": "Work 时间线",
+    "emptyTitle": "准备开始这个 Work",
+    "emptyBody": "输入第一条指令，后续 Run 会持续沉淀在这里。",
+    "runStarted": "Run 已开始",
+    "succeeded": "成功",
+    "failed": "失败",
+    "completed": "已完成",
+    "runFailed": "Run 失败",
+    "validation": "验证",
+    "limitations": "限制"
+  },
+  "composer": {
+    "label": "给 PiWork 指令",
+    "placeholder": "描述下一步，或补充当前 Run 的要求…",
+    "send": "发送",
+    "continue": "继续 Work",
+    "queue": "排队指令",
+    "queued": "已排队 {{count}} 条指令"
+  },
+  "inspector": {
+    "label": "Work 检查器", "open": "打开检查器", "close": "关闭检查器",
+    "progress": "进度", "changes": "变更", "artifacts": "产物", "logs": "日志",
+    "noProgress": "Run 开始后将在这里汇总进度", "noChanges": "还没有变更",
+    "noArtifacts": "还没有产物", "noLogs": "还没有日志",
+    "runEvents": "{{count}} 条 Run 事件", "toolEvents": "{{count}} 次工具调用"
   }
 }

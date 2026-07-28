@@ -18,12 +18,15 @@ export type WorkState = {
   works: Record<string, WorkSummary>;
   selectedWorkId: string | null;
   timelines: Record<string, TimelineItem[]>;
+  queuedInstructions: Record<string, string[]>;
+  latestRuns: Record<string, RunSummary>;
   lastSequenceByRun: Record<string, number>;
   loading: boolean;
   error: AppError | null;
   hydrate(): Promise<void>;
   createWork(input: CreateWorkInput): Promise<WorkDetail>;
   startWork(workId: string, prompt: string): Promise<RunSummary>;
+  queueInstruction(workId: string, prompt: string): void;
   selectWork(workId: string): void;
   upsertWork(work: WorkSummary): void;
   applyEvent(event: WorkEventEnvelope): void;
@@ -138,6 +141,18 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
     if (mutation.type === "startResponse") {
       const { run } = mutation;
       registerRun(run.workId, run.id, run.createdAt);
+      const previousLatestRun = state.latestRuns[run.workId];
+      const latestRun =
+        !previousLatestRun ||
+        run.createdAt.localeCompare(previousLatestRun.createdAt) > 0 ||
+        (run.createdAt === previousLatestRun.createdAt &&
+          run.id.localeCompare(previousLatestRun.id) > 0)
+          ? run
+          : previousLatestRun;
+      const latestRuns = {
+        ...state.latestRuns,
+        [run.workId]: latestRun,
+      };
       const previousCurrentRun = currentRunByWork.get(run.workId);
       const runIsNotOlder =
         !previousCurrentRun ||
@@ -160,9 +175,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         run.createdAt < currentWork.updatedAt ||
         protectsSameRunTerminal
       ) {
-        return state;
+        return latestRun === previousLatestRun ? state : { latestRuns };
       }
       return {
+        latestRuns,
         works: {
           ...state.works,
           [run.workId]: {
@@ -254,6 +270,16 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         ...mergedEvents.map((event) => event.runId),
       ]),
     );
+    const latestRun = detail.runs.reduce<RunSummary | undefined>(
+      (latest, candidate) =>
+        !latest ||
+        candidate.createdAt.localeCompare(latest.createdAt) > 0 ||
+        (candidate.createdAt === latest.createdAt &&
+          candidate.id.localeCompare(latest.id) > 0)
+          ? candidate
+          : latest,
+      state.latestRuns[detail.summary.id],
+    );
     const previousCurrentRun = currentRunByWork.get(detail.summary.id);
     if (
       candidateCurrentRun &&
@@ -295,6 +321,9 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       lastSequenceByRun[runId] = maximum;
     }
     return {
+      latestRuns: latestRun
+        ? { ...state.latestRuns, [detail.summary.id]: latestRun }
+        : state.latestRuns,
       works: { ...state.works, [detail.summary.id]: mergedSummary },
       timelines: {
         ...state.timelines,
@@ -337,6 +366,8 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       works: {},
       selectedWorkId: null,
       timelines: {},
+      queuedInstructions: {},
+      latestRuns: {},
       lastSequenceByRun: {},
       loading: false,
       error: null,
@@ -430,6 +461,19 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         } finally {
           endOperation();
         }
+      },
+      queueInstruction: (workId, prompt) => {
+        const instruction = prompt.trim();
+        if (!instruction) return;
+        set((state) => ({
+          queuedInstructions: {
+            ...state.queuedInstructions,
+            [workId]: [
+              ...(state.queuedInstructions[workId] ?? []),
+              instruction,
+            ],
+          },
+        }));
       },
       selectWork: (workId) => {
         const intent = beginSelectionIntent();

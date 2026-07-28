@@ -1,0 +1,64 @@
+import { CornerDownLeft } from "lucide-react";
+import { useState } from "react";
+import { useTranslation } from "react-i18next";
+
+import type { WorkSummary } from "../../bindings";
+import { useWorkStore } from "../works/WorkStoreProvider";
+
+const queueStatuses: WorkSummary["status"][] = ["queued", "running", "waiting"];
+const continueStatuses: WorkSummary["status"][] = [
+  "completed", "failed", "stopped", "interrupted", "idle",
+];
+
+export function WorkComposer({ work }: { work: WorkSummary }) {
+  const { t } = useTranslation();
+  const [prompt, setPrompt] = useState("");
+  const startWork = useWorkStore((state) => state.startWork);
+  const queueInstruction = useWorkStore((state) => state.queueInstruction);
+  const queuedInstructions = useWorkStore((state) => state.queuedInstructions);
+  const queued = queuedInstructions[work.id] ?? [];
+  const loading = useWorkStore((state) => state.loading);
+  const shouldQueue = queueStatuses.includes(work.status);
+  const actionLabel = shouldQueue
+    ? t("composer.queue")
+    : continueStatuses.includes(work.status)
+      ? t("composer.continue")
+      : t("composer.send");
+
+  const submit = async () => {
+    const instruction = prompt.trim();
+    if (!instruction) return;
+    if (shouldQueue) {
+      queueInstruction(work.id, instruction);
+      setPrompt("");
+      return;
+    }
+    await startWork(work.id, instruction);
+    setPrompt("");
+  };
+
+  return (
+    <footer className="work-composer">
+      {queued.length > 0 && <p className="queue-count">{t("composer.queued", { count: queued.length })}</p>}
+      <div className="work-composer__box">
+        <label className="sr-only" htmlFor="work-prompt">{t("composer.label")}</label>
+        <textarea
+          id="work-prompt"
+          placeholder={t("composer.placeholder")}
+          value={prompt}
+          onChange={(event) => setPrompt(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+        />
+        <button className="button button--primary" type="button" disabled={!prompt.trim() || (loading && !shouldQueue)} onClick={() => void submit()}>
+          <CornerDownLeft aria-hidden="true" size={15} />
+          {actionLabel}
+        </button>
+      </div>
+    </footer>
+  );
+}

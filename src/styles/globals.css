@@ -11,7 +11,7 @@ body,
 body {
   background: var(--pw-surface-canvas);
   color: var(--pw-text-primary);
-  font-family: Inter, "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
 }
 
 button {

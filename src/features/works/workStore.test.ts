@@ -70,6 +70,20 @@ const run: RunSummary = {
 };
 
 describe("createWorkStore", () => {
+  it("queues trimmed instructions per Work without creating events", () => {
+    const store = createWorkStore(unusedClient);
+
+    store.getState().queueInstruction("w1", "  Follow up  ");
+    store.getState().queueInstruction("w1", "   ");
+    store.getState().queueInstruction("w2", "Second Work");
+
+    expect(store.getState().queuedInstructions).toEqual({
+      w1: ["Follow up"],
+      w2: ["Second Work"],
+    });
+    expect(store.getState().timelines).toEqual({});
+  });
+
   it("ignores a duplicate sequence for the same run", () => {
     const store = createWorkStore(unusedClient);
 
@@ -119,6 +133,29 @@ describe("createWorkStore", () => {
     expect(
       store.getState().timelines.w1?.map(({ sequence }) => sequence),
     ).toEqual([1, 2]);
+  });
+
+  it("retains the latest Run summary for workspace metadata", async () => {
+    const newerRun: RunSummary = {
+      ...run,
+      id: "r2",
+      modelLabel: "new-model",
+      createdAt: "2026-07-28T09:00:02.000Z",
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [newerRun, run],
+        events: [],
+      }),
+    };
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+
+    expect(store.getState().latestRuns.w1).toEqual(newerRun);
   });
 
   it("does not let a stale hydrate detail overwrite a newer live event", async () => {

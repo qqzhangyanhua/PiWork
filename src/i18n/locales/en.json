@@ -1,14 +1,50 @@
 {
-  "app": {
-    "name": "PiWork"
+  "app": { "name": "PiWork" },
+  "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "retry": "Retry" },
+  "work": { "new": "New Work", "empty": "Create your first Work" },
+  "sidebar": { "label": "Work navigation", "works": "All Works" },
+  "create": {
+    "goal": "Goal",
+    "rootPath": "Working directory",
+    "goalRequired": "Enter a goal",
+    "rootRequired": "Enter a working directory"
   },
-  "work": {
-    "new": "New Work",
-    "empty": "Create your first Work"
+  "state": {
+    "loading": "Loading Works",
+    "errorTitle": "Unable to load Works",
+    "emptyBody": "Start with a lasting goal. PiWork keeps the collaboration context across every Run."
   },
+  "diagnostics": { "open": "Open diagnostics", "unavailable": "Diagnostic details cannot be displayed safely" },
   "status": {
-    "draft": "Draft",
-    "running": "Running",
-    "completed": "Completed"
+    "draft": "Draft", "queued": "Queued", "running": "Running", "waiting": "Waiting",
+    "idle": "Idle", "completed": "Completed", "failed": "Failed", "stopped": "Stopped",
+    "interrupted": "Interrupted", "archived": "Archived"
+  },
+  "timeline": {
+    "label": "Work timeline",
+    "emptyTitle": "Ready to start this Work",
+    "emptyBody": "Send the first instruction. Future Runs will keep accumulating here.",
+    "runStarted": "Run started",
+    "succeeded": "Succeeded",
+    "failed": "Failed",
+    "completed": "Completed",
+    "runFailed": "Run failed",
+    "validation": "Validation",
+    "limitations": "Limitations"
+  },
+  "composer": {
+    "label": "Instructions for PiWork",
+    "placeholder": "Describe the next step, or add a requirement for the current Run…",
+    "send": "Send",
+    "continue": "Continue Work",
+    "queue": "Queue instruction",
+    "queued": "{{count}} instructions queued"
+  },
+  "inspector": {
+    "label": "Work inspector", "open": "Open inspector", "close": "Close inspector",
+    "progress": "Progress", "changes": "Changes", "artifacts": "Artifacts", "logs": "Logs",
+    "noProgress": "Run progress will be summarized here", "noChanges": "No changes yet",
+    "noArtifacts": "No artifacts yet", "noLogs": "No logs yet",
+    "runEvents": "{{count}} Run events", "toolEvents": "{{count}} tool calls"
   }
 }

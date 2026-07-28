@@ -1,39 +1,26 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { i18n } from "../i18n";
+import { createMockTauriClient } from "../test/mockTauriClient";
 import { App } from "./App";
-import type { PiWorkClient } from "./tauriClient";
 
-const makeClient = () => {
-  const listWorks = vi.fn(async () => []);
-  const listenToWorkEvents = vi.fn(async () => () => undefined);
-  const client: PiWorkClient = {
-    createWork: async () => {
-      throw new Error("unused");
-    },
-    listWorks,
-    getWork: async () => {
-      throw new Error("unused");
-    },
-    startWork: async () => {
-      throw new Error("unused");
-    },
-    listenToWorkEvents,
-  };
-  return { client, listWorks, listenToWorkEvents };
-};
+beforeEach(async () => {
+  await i18n.changeLanguage("en");
+});
 
 describe("App", () => {
   it("renders the PiWork product shell and bootstraps Work state", async () => {
-    const { client, listWorks, listenToWorkEvents } = makeClient();
+    const client = createMockTauriClient();
     render(<App client={client} />);
-    expect(screen.getByRole("heading", { name: "PiWork" })).toBeInTheDocument();
-    await waitFor(() => expect(listWorks).toHaveBeenCalledTimes(1));
-    expect(listenToWorkEvents).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("PiWork")).toBeInTheDocument();
+    expect(screen.getByTestId("continuous-loop-logo")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New Work" })).toBeInTheDocument();
+    await waitFor(() => expect(client.listWorks).toHaveBeenCalledTimes(1));
+    expect(client.listenToWorkEvents).toHaveBeenCalledTimes(1);
   });
 
   it("renders the localized product shell", async () => {
-    const { client } = makeClient();
+    const client = createMockTauriClient();
     await i18n.changeLanguage("zh-CN");
     render(<App client={client} />);
     expect(
