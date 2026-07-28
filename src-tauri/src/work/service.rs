@@ -50,6 +50,10 @@ impl WorkService {
             .ok_or_else(|| AppError::work_not_found(work_id))
     }
 
+    pub async fn recover_interrupted_runs(&self) -> Result<u64, AppError> {
+        self.repository.recover_interrupted_runs().await
+    }
+
     pub async fn start_work(&self, work_id: &str, prompt: &str) -> Result<RunSummary, AppError> {
         match &self.execution {
             Execution::Supervisor(supervisor) => supervisor.start(work_id, prompt).await,

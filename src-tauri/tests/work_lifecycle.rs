@@ -25,6 +25,44 @@ struct TestHarness {
     workspace_path: std::path::PathBuf,
 }
 
+struct StartCountingEngine {
+    start_count: std::sync::atomic::AtomicUsize,
+}
+
+impl StartCountingEngine {
+    fn new() -> Self {
+        Self {
+            start_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn start_count(&self) -> usize {
+        self.start_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for StartCountingEngine {
+    fn kind(&self) -> &'static str {
+        "start-counting"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _prompt: String,
+        _sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        self.start_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(EngineError::Start("unexpected recovery start".into()))
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        Err(EngineError::NotRunning)
+    }
+}
+
 impl TestHarness {
     async fn new() -> Self {
         let temporary_directory = tempfile::tempdir().unwrap();
@@ -1940,6 +1978,283 @@ async fn service_creates_lists_and_gets_work_details() {
 
     assert_eq!(listed, vec![created.summary.clone()]);
     assert_eq!(found, created);
+}
+
+#[tokio::test]
+async fn startup_marks_unfinished_runs_interrupted_without_resuming() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Recover interrupted run").await;
+    let run = harness
+        .repository
+        .insert_run(&work.summary.id, "Fake model")
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&work.summary.id, WorkStatus::Queued)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&work.summary.id, WorkStatus::Running)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_run_status(&run.id, RunStatus::Running)
+        .await
+        .unwrap();
+    let engine = Arc::new(StartCountingEngine::new());
+    let (publisher, _published) = ChannelEventPublisher::channel(1);
+    let supervisor = Arc::new(EngineSupervisor::new(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(publisher),
+        "Fake model",
+    ));
+    let service = WorkService::with_supervisor(harness.repository.clone(), supervisor);
+
+    let recovered = service.recover_interrupted_runs().await.unwrap();
+
+    let recovered_work = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered, 1);
+    assert_eq!(recovered_work.summary.status, WorkStatus::Interrupted);
+    assert_eq!(recovered_work.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(engine.start_count(), 0);
+}
+
+#[tokio::test]
+async fn startup_recovers_queued_and_waiting_runs_across_works_without_changing_terminal_runs() {
+    let harness = TestHarness::new().await;
+    let queued_work = harness.create_work("Recover queued run").await;
+    let queued_run = harness
+        .repository
+        .insert_run(&queued_work.summary.id, "Fake model")
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&queued_work.summary.id, WorkStatus::Queued)
+        .await
+        .unwrap();
+
+    let waiting_work = harness.create_work("Recover waiting run").await;
+    let waiting_run = harness
+        .repository
+        .insert_run(&waiting_work.summary.id, "Fake model")
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&waiting_work.summary.id, WorkStatus::Queued)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&waiting_work.summary.id, WorkStatus::Running)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&waiting_work.summary.id, WorkStatus::Waiting)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_run_status(&waiting_run.id, RunStatus::Running)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_run_status(&waiting_run.id, RunStatus::Waiting)
+        .await
+        .unwrap();
+
+    let completed_work = harness.create_work("Keep completed run").await;
+    let completed_run = harness
+        .repository
+        .insert_run(&completed_work.summary.id, "Fake model")
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&completed_work.summary.id, WorkStatus::Queued)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&completed_work.summary.id, WorkStatus::Running)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&completed_work.summary.id, WorkStatus::Completed)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_run_status(&completed_run.id, RunStatus::Running)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_run_status(&completed_run.id, RunStatus::Completed)
+        .await
+        .unwrap();
+    let terminal_before = harness
+        .repository
+        .get(&completed_work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let service = WorkService::new(harness.repository.clone());
+
+    let recovered = service.recover_interrupted_runs().await.unwrap();
+
+    let queued_after = harness
+        .repository
+        .get(&queued_work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let waiting_after = harness
+        .repository
+        .get(&waiting_work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let terminal_after = harness
+        .repository
+        .get(&completed_work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered, 2);
+    assert_eq!(queued_after.summary.status, WorkStatus::Interrupted);
+    assert_eq!(queued_after.runs[0].id, queued_run.id);
+    assert_eq!(queued_after.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(waiting_after.summary.status, WorkStatus::Interrupted);
+    assert_eq!(waiting_after.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(terminal_after, terminal_before);
+}
+
+#[tokio::test]
+async fn startup_recovery_rolls_back_work_changes_when_run_update_fails() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Rollback interrupted recovery").await;
+    let run = harness
+        .repository
+        .insert_run(&work.summary.id, "Fake model")
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&work.summary.id, WorkStatus::Queued)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_work_status(&work.summary.id, WorkStatus::Running)
+        .await
+        .unwrap();
+    harness
+        .repository
+        .set_run_status(&run.id, RunStatus::Running)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_recovery_run_update \
+         BEFORE UPDATE OF status ON runs \
+         WHEN OLD.status = 'running' AND NEW.status = 'interrupted' \
+         BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END",
+    )
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    let service = WorkService::new(harness.repository.clone());
+
+    assert!(service.recover_interrupted_runs().await.is_err());
+
+    let after = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.summary.status, WorkStatus::Running);
+    assert_eq!(after.runs[0].status, RunStatus::Running);
+}
+
+#[tokio::test]
+async fn startup_recovery_leaves_every_terminal_run_and_work_unchanged() {
+    let harness = TestHarness::new().await;
+    let mut terminal_details = Vec::new();
+    for (run_status, work_status) in [
+        (RunStatus::Completed, WorkStatus::Completed),
+        (RunStatus::Failed, WorkStatus::Failed),
+        (RunStatus::Stopped, WorkStatus::Stopped),
+        (RunStatus::Interrupted, WorkStatus::Interrupted),
+    ] {
+        let work = harness
+            .create_work(&format!("Keep {run_status:?} run"))
+            .await;
+        let run = harness
+            .repository
+            .insert_run(&work.summary.id, "Fake model")
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_work_status(&work.summary.id, WorkStatus::Queued)
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_work_status(&work.summary.id, WorkStatus::Running)
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_work_status(&work.summary.id, work_status)
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_run_status(&run.id, RunStatus::Running)
+            .await
+            .unwrap();
+        harness
+            .repository
+            .set_run_status(&run.id, run_status)
+            .await
+            .unwrap();
+        terminal_details.push(
+            harness
+                .repository
+                .get(&work.summary.id)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    let service = WorkService::new(harness.repository.clone());
+
+    assert_eq!(service.recover_interrupted_runs().await.unwrap(), 0);
+
+    for before in terminal_details {
+        let after = harness
+            .repository
+            .get(&before.summary.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, before);
+    }
 }
 
 #[tokio::test]

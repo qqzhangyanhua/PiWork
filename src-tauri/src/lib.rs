@@ -14,10 +14,17 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .setup(|app| {
             let paths = paths::AppPaths::from_resolver(app.path())?;
-            let database = tauri::async_runtime::block_on(storage::sqlite::Database::open(
-                paths.database_path(),
-            ))?;
-            let repository = work::repository::WorkRepository::new(database.pool().clone());
+            // Tauri's setup callback runs synchronously on the event-loop thread. Bridge the
+            // complete database startup sequence once, before engine construction or managed UI
+            // state, so a migration or recovery error fails closed instead of exposing the UI.
+            let repository = tauri::async_runtime::block_on(async {
+                let database = storage::sqlite::Database::open(paths.database_path()).await?;
+                let repository = work::repository::WorkRepository::new(database.pool().clone());
+                work::service::WorkService::new(repository.clone())
+                    .recover_interrupted_runs()
+                    .await?;
+                Ok::<_, error::AppError>(repository)
+            })?;
             let engine = Arc::new(engine::fake::FakeEngineAdapter::new(
                 std::time::Duration::from_millis(120),
             ));

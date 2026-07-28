@@ -1,0 +1,41 @@
+PiWork Notices
+==============
+
+PiWork
+------
+
+Copyright (c) 2026 [Repository owner]
+
+The repository does not currently expose reliable owner metadata. Replace
+"[Repository owner]" with the actual repository owner's legal name before
+any public release. This placeholder does not represent or imply a company.
+
+pi coding agent
+---------------
+
+Repository: https://github.com/earendil-works/pi
+License: MIT
+Upstream copyright: Copyright (c) 2025 Mario Zechner
+
+The current foundation build uses a PiWork fake engine. It does not package
+or distribute the pi coding agent source code or binary.
+
+Onyx
+----
+
+Repository: https://github.com/onyx-dot-app/onyx
+License: MIT Expat for content outside the repository's `ee` directories;
+content under `ee` directories is covered by the Onyx Enterprise License.
+Upstream copyright: Copyright (c) 2023-present DanswerAI, Inc.
+
+PiWork may reuse only non-`ee`, MIT-licensed Onyx content. Onyx branding,
+product descriptions, URLs, and attribution are not displayed in PiWork's
+normal product UI.
+
+License packaging
+-----------------
+
+When third-party source code or a real dependency enters the distributed
+product, the complete applicable license and copyright text will be shipped
+with the package. This NOTICE summarizes attribution and does not replace
+those license texts.

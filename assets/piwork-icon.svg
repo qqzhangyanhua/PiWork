@@ -1,6 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 70 70" role="img" aria-labelledby="title">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
   <title id="title">PiWork Continuous Loop</title>
-  <g fill="none" stroke="#6b50ef" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.5">
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="#6b50ef" />
+  <g transform="translate(92 92) scale(12)" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.5">
     <path d="M11 25C18 17 26 17 34 21C42 25 49 25 59 17" />
     <path d="M27 19C25 30 24 40 23 49C22 56 26 59 31 56C34 54 36 51 37 47" />
     <path d="M46 23C44 31 42 39 42 47C42 55 46 59 52 57C59 54 62 44 60 34C59 28 55 23 49 22" />

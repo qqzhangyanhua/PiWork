@@ -184,6 +184,42 @@ impl WorkRepository {
         Ok(rows.into_iter().map(WorkSummary::from).collect())
     }
 
+    pub async fn recover_interrupted_runs(&self) -> Result<u64, AppError> {
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE works SET status = ?, updated_at = ? \
+             WHERE id IN (\
+                 SELECT DISTINCT work_id FROM runs \
+                 WHERE status IN (?, ?, ?)\
+             )",
+        )
+        .bind(WorkStatus::Interrupted)
+        .bind(now)
+        .bind(RunStatus::Running)
+        .bind(RunStatus::Waiting)
+        .bind(RunStatus::Queued)
+        .execute(&mut *transaction)
+        .await?;
+        let recovered = sqlx::query(
+            "UPDATE runs \
+             SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?) \
+             WHERE status IN (?, ?, ?)",
+        )
+        .bind(RunStatus::Interrupted)
+        .bind(now)
+        .bind(now)
+        .bind(RunStatus::Running)
+        .bind(RunStatus::Waiting)
+        .bind(RunStatus::Queued)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        transaction.commit().await?;
+
+        Ok(recovered)
+    }
+
     pub async fn insert_run(
         &self,
         work_id: &str,

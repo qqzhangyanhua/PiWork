@@ -4,12 +4,17 @@
 # Tauri / Rust
 /target/
 **/target/
+/src-tauri/gen/
 
 # JavaScript
 /node_modules/
 **/node_modules/
 /dist/
 **/dist/
+/coverage/
+**/coverage/
+*.log
+*.tmp
 
 # Local configuration and secrets
 .env
