@@ -1,4 +1,5 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { PiWorkClient } from "../../app/tauriClient";
@@ -61,6 +62,46 @@ function Listener() {
 function TimelineProbe() {
   const count = useWorkStore((state) => state.timelines.w1?.length ?? 0);
   return <output>{count}</output>;
+}
+
+function StoreErrorProbe() {
+  const message = useWorkStore((state) => state.error?.message ?? "none");
+  return <output data-testid="store-error">{message}</output>;
+}
+
+function HydratingListener() {
+  useWorkEvents();
+  const hydrate = useWorkStore((state) => state.hydrate);
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
+  return <StoreErrorProbe />;
+}
+
+function OperationListener({ operation }: { operation: "create" | "start" }) {
+  useWorkEvents();
+  const createWork = useWorkStore((state) => state.createWork);
+  const startWork = useWorkStore((state) => state.startWork);
+  const execute = () => {
+    const promise =
+      operation === "start"
+        ? startWork("w1", "go")
+        : createWork({
+            title: "Created",
+            goal: "Test ownership",
+            rootPath: "D:/dev/PiWork",
+            permissionMode: "balanced",
+          });
+    void promise.catch(() => undefined);
+  };
+  return (
+    <>
+      <button onClick={execute} type="button">
+        run operation
+      </button>
+      <StoreErrorProbe />
+    </>
+  );
 }
 
 describe("useWorkEvents", () => {
@@ -151,5 +192,153 @@ describe("useWorkEvents", () => {
     expect(
       await screen.findByText("event channel unavailable"),
     ).toBeInTheDocument();
+  });
+
+  it("keeps a subscription error when hydrate later succeeds", async () => {
+    const listResult = deferred<[]>();
+    const client: PiWorkClient = {
+      ...makeClient(async () => {
+        throw { code: "subscription", message: "subscription offline" };
+      }),
+      listWorks: () => listResult.promise,
+    };
+
+    render(
+      <WorkStoreProvider client={client}>
+        <HydratingListener />
+      </WorkStoreProvider>,
+    );
+    expect(await screen.findByText("subscription offline")).toBeInTheDocument();
+
+    await act(async () => listResult.resolve([]));
+    expect(screen.getByTestId("store-error")).toHaveTextContent(
+      "subscription offline",
+    );
+  });
+
+  it.each(["start", "create"] as const)(
+    "keeps a subscription error when %s succeeds",
+    async (operation) => {
+      const client: PiWorkClient = {
+        ...makeClient(async () => {
+          throw { code: "subscription", message: "subscription offline" };
+        }),
+        createWork: async () => ({
+          summary: {
+            id: "created",
+            title: "Created",
+            goal: "Test ownership",
+            rootPath: "D:/dev/PiWork",
+            permissionMode: "balanced",
+            status: "draft",
+            createdAt: "2026-07-28T09:00:00.000Z",
+            updatedAt: "2026-07-28T09:00:00.000Z",
+          },
+          runs: [],
+          events: [],
+        }),
+        startWork: async () => ({
+          id: "r1",
+          workId: "w1",
+          engineKind: "codex",
+          engineSessionId: null,
+          modelLabel: "gpt-5",
+          status: "running",
+          createdAt: "2026-07-28T09:00:01.000Z",
+          startedAt: "2026-07-28T09:00:01.000Z",
+          completedAt: null,
+        }),
+      };
+      render(
+        <WorkStoreProvider client={client}>
+          <OperationListener operation={operation} />
+        </WorkStoreProvider>,
+      );
+      expect(
+        await screen.findByText("subscription offline"),
+      ).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "run operation" }));
+      await waitFor(() =>
+        expect(screen.getByTestId("store-error")).toHaveTextContent(
+          "subscription offline",
+        ),
+      );
+    },
+  );
+
+  it("does not let a stale command failure replace a subscription error", async () => {
+    const firstStart = deferred<never>();
+    let starts = 0;
+    const client: PiWorkClient = {
+      ...makeClient(async () => {
+        throw { code: "subscription", message: "subscription offline" };
+      }),
+      startWork: () => {
+        starts += 1;
+        return starts === 1
+          ? firstStart.promise
+          : Promise.resolve({
+              id: "r2",
+              workId: "w1",
+              engineKind: "codex",
+              engineSessionId: null,
+              modelLabel: "gpt-5",
+              status: "running",
+              createdAt: "2026-07-28T09:00:02.000Z",
+              startedAt: "2026-07-28T09:00:02.000Z",
+              completedAt: null,
+            });
+      },
+    };
+    render(
+      <WorkStoreProvider client={client}>
+        <OperationListener operation="start" />
+      </WorkStoreProvider>,
+    );
+    expect(await screen.findByText("subscription offline")).toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: "run operation" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await act(async () => firstStart.reject(new Error("stale command")));
+
+    expect(screen.getByTestId("store-error")).toHaveTextContent(
+      "subscription offline",
+    );
+  });
+
+  it("clears a subscription error only after a new subscription succeeds", async () => {
+    const secondListen = deferred<() => void>();
+    let listens = 0;
+    const client = makeClient(() => {
+      listens += 1;
+      return listens === 1
+        ? Promise.reject({
+            code: "subscription",
+            message: "subscription offline",
+          })
+        : secondListen.promise;
+    });
+    const tree = (listening: boolean) => (
+      <WorkStoreProvider client={client}>
+        <StoreErrorProbe />
+        {listening ? <Listener /> : null}
+      </WorkStoreProvider>
+    );
+    const view = render(tree(true));
+    expect(await screen.findByText("subscription offline")).toBeInTheDocument();
+
+    view.rerender(tree(false));
+    view.rerender(tree(true));
+    await waitFor(() => expect(listens).toBe(2));
+    expect(screen.getByTestId("store-error")).toHaveTextContent(
+      "subscription offline",
+    );
+
+    await act(async () => secondListen.resolve(() => undefined));
+    await waitFor(() =>
+      expect(screen.getByTestId("store-error")).toHaveTextContent("none"),
+    );
   });
 });

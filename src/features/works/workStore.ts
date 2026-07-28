@@ -29,6 +29,10 @@ export type WorkState = {
   applyEvent(event: WorkEventEnvelope): void;
 };
 
+type InternalWorkState = WorkState & {
+  setSubscriptionError(error: AppError | null): void;
+};
+
 const statusForEvent = (
   currentStatus: WorkSummary["status"],
   event: WorkEventEnvelope,
@@ -59,12 +63,27 @@ const isTerminalStatus = (status: WorkSummary["status"]) =>
 
 export const createWorkStore = (client: PiWorkClient = tauriClient) => {
   let hydration: Promise<void> | null = null;
-  let selectionRequest = 0;
+  let selectionIntentSequence = 0;
+  let latestSelectionIntent = 0;
+  let selectionRequestSequence = 0;
+  let latestSelectionRequest = 0;
   let pendingOperations = 0;
   let operationSequence = 0;
   let errorOwner = 0;
+  let operationError: AppError | null = null;
+  let subscriptionError: AppError | null = null;
   const currentRunByWork = new Map<string, string>();
   const runSortKey = new Map<string, { at: string; id: string }>();
+
+  const beginSelectionIntent = () => {
+    latestSelectionIntent = ++selectionIntentSequence;
+    latestSelectionRequest = ++selectionRequestSequence;
+    return latestSelectionIntent;
+  };
+  const beginSelectionRequest = () => {
+    latestSelectionRequest = ++selectionRequestSequence;
+    return latestSelectionRequest;
+  };
 
   const metadataKey = (workId: string, runId: string) =>
     `${workId}\u0000${runId}`;
@@ -285,22 +304,28 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
     };
   };
 
-  const store = createStore<WorkState>((set, get) => {
+  const store = createStore<InternalWorkState>((set, get) => {
+    const publishError = () => {
+      set({ error: subscriptionError ?? operationError });
+    };
     const beginOperation = () => {
       const operation = ++operationSequence;
       errorOwner = operation;
       pendingOperations += 1;
-      set({ loading: true, error: null });
+      operationError = null;
+      set({ loading: true, error: subscriptionError });
       return operation;
     };
     const succeedOperation = (operation: number) => {
       if (operation === errorOwner) {
-        set({ error: null });
+        operationError = null;
+        publishError();
       }
     };
     const failOperation = (operation: number, error: unknown) => {
       if (operation === errorOwner) {
-        set({ error: normalizeAppError(error) });
+        operationError = normalizeAppError(error);
+        publishError();
       }
     };
     const endOperation = () => {
@@ -321,6 +346,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         }
 
         const operation = beginOperation();
+        const initialSelectionIntent = latestSelectionIntent;
         hydration = (async () => {
           try {
             const listedWorks = await client.listWorks();
@@ -331,18 +357,28 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               get().upsertWork(listedWork);
             }
 
-            const selectedWorkId =
-              get().selectedWorkId ?? sortedWorks[0]?.id ?? null;
-            set({ selectedWorkId });
+            let selectedWorkId = get().selectedWorkId;
+            if (
+              !selectedWorkId &&
+              latestSelectionIntent === initialSelectionIntent
+            ) {
+              selectedWorkId = sortedWorks[0]?.id ?? null;
+              if (selectedWorkId) {
+                beginSelectionIntent();
+                set({ selectedWorkId });
+              }
+            }
             if (!selectedWorkId) {
               succeedOperation(operation);
               return;
             }
 
-            const request = selectionRequest;
+            const intent = latestSelectionIntent;
+            const request = beginSelectionRequest();
             const detail = await client.getWork(selectedWorkId);
             if (
-              request !== selectionRequest ||
+              intent !== latestSelectionIntent ||
+              request !== latestSelectionRequest ||
               get().selectedWorkId !== selectedWorkId
             ) {
               return;
@@ -360,12 +396,14 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         return hydration;
       },
       createWork: async (input) => {
+        const intent = beginSelectionIntent();
         const operation = beginOperation();
         try {
           const detail = await client.createWork(input);
-          selectionRequest += 1;
           set((state) => reduceWork(state, { type: "detail", detail }));
-          set({ selectedWorkId: detail.summary.id });
+          if (intent === latestSelectionIntent) {
+            set({ selectedWorkId: detail.summary.id });
+          }
           succeedOperation(operation);
           return detail;
         } catch (error) {
@@ -390,14 +428,16 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         }
       },
       selectWork: (workId) => {
-        const request = ++selectionRequest;
+        const intent = beginSelectionIntent();
+        const request = beginSelectionRequest();
         const operation = beginOperation();
         set({ selectedWorkId: workId });
         void (async () => {
           try {
             const detail = await client.getWork(workId);
             if (
-              request !== selectionRequest ||
+              intent !== latestSelectionIntent ||
+              request !== latestSelectionRequest ||
               get().selectedWorkId !== workId
             ) {
               return;
@@ -405,7 +445,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
             set((state) => reduceWork(state, { type: "detail", detail }));
             succeedOperation(operation);
           } catch (error) {
-            if (request === selectionRequest) {
+            if (
+              intent === latestSelectionIntent &&
+              request === latestSelectionRequest
+            ) {
               failOperation(operation, error);
             }
           } finally {
@@ -417,6 +460,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         set((state) => reduceWork(state, { type: "upsert", work })),
       applyEvent: (event) =>
         set((state) => reduceWork(state, { type: "liveEvent", event })),
+      setSubscriptionError: (error) => {
+        subscriptionError = error;
+        publishError();
+      },
     };
   });
 

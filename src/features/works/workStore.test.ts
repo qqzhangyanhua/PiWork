@@ -572,4 +572,148 @@ describe("createWorkStore", () => {
       beforeHydration,
     );
   });
+
+  it("keeps a user selection made after create was invoked", async () => {
+    const createResult = deferred<WorkDetail>();
+    const createdWork: WorkSummary = { ...work, id: "created" };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      createWork: () => createResult.promise,
+      getWork: async () => ({ summary: work, runs: [], events: [] }),
+    };
+    const store = createWorkStore(client);
+    const creating = store.getState().createWork({
+      title: createdWork.title,
+      goal: createdWork.goal,
+      rootPath: createdWork.rootPath,
+      permissionMode: createdWork.permissionMode,
+    });
+
+    store.getState().selectWork("w1");
+    await Promise.resolve();
+    createResult.resolve({ summary: createdWork, runs: [], events: [] });
+    await creating;
+
+    expect(store.getState().selectedWorkId).toBe("w1");
+    expect(store.getState().works.created).toEqual(createdWork);
+  });
+
+  it("selects the later-invoked create when creates resolve in reverse", async () => {
+    const firstResult = deferred<WorkDetail>();
+    const secondResult = deferred<WorkDetail>();
+    const firstWork: WorkSummary = { ...work, id: "first" };
+    const secondWork: WorkSummary = { ...work, id: "second" };
+    let createCalls = 0;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      createWork: () => {
+        createCalls += 1;
+        return createCalls === 1 ? firstResult.promise : secondResult.promise;
+      },
+    };
+    const store = createWorkStore(client);
+    const input: CreateWorkInput = {
+      title: work.title,
+      goal: work.goal,
+      rootPath: work.rootPath,
+      permissionMode: work.permissionMode,
+    };
+
+    const firstCreate = store.getState().createWork(input);
+    const secondCreate = store.getState().createWork(input);
+    secondResult.resolve({ summary: secondWork, runs: [], events: [] });
+    await secondCreate;
+    firstResult.resolve({ summary: firstWork, runs: [], events: [] });
+    await firstCreate;
+
+    expect(store.getState().selectedWorkId).toBe("second");
+    expect(store.getState().works).toMatchObject({
+      first: firstWork,
+      second: secondWork,
+    });
+  });
+
+  it("lets a newer create invalidate a pending selection detail", async () => {
+    const selectionResult = deferred<WorkDetail>();
+    const createdWork: WorkSummary = { ...work, id: "created" };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      createWork: async () => ({
+        summary: createdWork,
+        runs: [],
+        events: [],
+      }),
+      getWork: () => selectionResult.promise,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    store.getState().selectWork("w1");
+    await store.getState().createWork({
+      title: createdWork.title,
+      goal: createdWork.goal,
+      rootPath: createdWork.rootPath,
+      permissionMode: createdWork.permissionMode,
+    });
+    selectionResult.resolve({
+      summary: work,
+      runs: [run],
+      events: [event(1, { type: "runStarted", modelLabel: "stale" })],
+    });
+    await Promise.resolve();
+
+    expect(store.getState().selectedWorkId).toBe("created");
+    expect(store.getState().timelines.w1).toBeUndefined();
+  });
+
+  it("does not auto-select during hydrate after a create intent", async () => {
+    const listResult = deferred<WorkSummary[]>();
+    const createResult = deferred<WorkDetail>();
+    const listedWork: WorkSummary = { ...work, id: "listed" };
+    const createdWork: WorkSummary = { ...work, id: "created" };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: () => listResult.promise,
+      createWork: () => createResult.promise,
+      getWork: async () => ({ summary: listedWork, runs: [], events: [] }),
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+    const creating = store.getState().createWork({
+      title: createdWork.title,
+      goal: createdWork.goal,
+      rootPath: createdWork.rootPath,
+      permissionMode: createdWork.permissionMode,
+    });
+
+    listResult.resolve([listedWork]);
+    await hydration;
+    expect(store.getState().selectedWorkId).toBeNull();
+
+    createResult.resolve({ summary: createdWork, runs: [], events: [] });
+    await creating;
+    expect(store.getState().selectedWorkId).toBe("created");
+  });
+
+  it("does not auto-select over an explicit select during hydrate", async () => {
+    const listResult = deferred<WorkSummary[]>();
+    const listedWork: WorkSummary = { ...work, id: "listed" };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: () => listResult.promise,
+      getWork: async (workId) => ({
+        summary: workId === "w1" ? work : listedWork,
+        runs: [],
+        events: [],
+      }),
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+
+    store.getState().selectWork("w1");
+    listResult.resolve([listedWork]);
+    await hydration;
+
+    expect(store.getState().selectedWorkId).toBe("w1");
+  });
 });

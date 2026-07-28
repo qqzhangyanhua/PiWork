@@ -21,13 +21,14 @@ export const useWorkEvents = () => {
           stopListening();
         } else {
           unlisten = stopListening;
+          store.getState().setSubscriptionError(null);
         }
       })
       .catch((error: unknown) => {
         if (!disposed) {
-          store.setState({
-            error: normalizeAppError(error),
-          });
+          store
+            .getState()
+            .setSubscriptionError(normalizeAppError(error));
         }
       });
 
