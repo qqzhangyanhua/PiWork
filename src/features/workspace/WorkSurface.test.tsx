@@ -1,14 +1,24 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { WorkDetail, WorkEventEnvelope } from "../../bindings";
+import type { RunSummary, WorkDetail, WorkEventEnvelope } from "../../bindings";
 import { i18n } from "../../i18n";
 import {
   createMockTauriClient,
   runCompletedEvent,
 } from "../../test/mockTauriClient";
 import { WorkSurface } from "./WorkSurface";
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+};
 
 const seededDetail = (status: WorkDetail["summary"]["status"] = "draft"): WorkDetail => ({
   summary: {
@@ -39,6 +49,10 @@ const event = (
 
 beforeEach(async () => {
   await i18n.changeLanguage("zh-CN");
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("WorkSurface", () => {
@@ -86,6 +100,51 @@ describe("WorkSurface", () => {
 
     expect(client.startWork).not.toHaveBeenCalled();
     expect(screen.getByText("已排队 1 条指令")).toBeInTheDocument();
+  });
+
+  it("连续 Enter 只启动一个 Run", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const pendingRun = deferred<RunSummary>();
+    client.seed(seededDetail());
+    client.startWork.mockImplementation(() => pendingRun.promise);
+    render(<WorkSurface client={client} />);
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    await user.type(composer, "只执行一次");
+    await user.keyboard("{Enter}{Enter}");
+
+    expect(client.startWork).toHaveBeenCalledTimes(1);
+    pendingRun.resolve({
+      id: "run-1",
+      workId: "work-1",
+      engineKind: "fake",
+      engineSessionId: "session-1",
+      modelLabel: "Fake model",
+      status: "running",
+      createdAt: "2026-07-28T08:00:10.000Z",
+      startedAt: "2026-07-28T08:00:10.000Z",
+      completedAt: null,
+    });
+    await waitFor(() => expect(composer).toHaveValue(""));
+  });
+
+  it("启动拒绝时显示产品错误且不产生未处理 rejection", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.startWork.mockRejectedValueOnce({
+      code: "engine_unavailable",
+      message: "无法启动 Run",
+    });
+    render(<WorkSurface client={client} />);
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    await user.type(composer, "开始");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("无法启动 Run")).toBeInTheDocument();
+    expect(composer).toHaveValue("开始");
   });
 
   it("为六类事件提供独立的可读渲染", async () => {
@@ -201,6 +260,33 @@ describe("WorkSurface", () => {
     expect(screen.queryByRole("heading", { name: "营收看板" })).not.toBeInTheDocument();
   });
 
+  it("初始详情失败后选择另一个 Work 可恢复工作区", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const first = seededDetail();
+    first.summary.title = "首要 Work";
+    first.summary.updatedAt = "2026-07-28T08:01:00.000Z";
+    const second = seededDetail();
+    second.summary.id = "work-2";
+    second.summary.title = "备用 Work";
+    second.summary.updatedAt = "2026-07-28T08:00:00.000Z";
+    client.seed(first);
+    client.seed(second);
+    client.getWork.mockRejectedValueOnce({
+      code: "detail_unavailable",
+      message: "首要详情不可用",
+    });
+    render(<WorkSurface client={client} />);
+
+    await screen.findByRole("alert");
+    await user.click(screen.getByRole("button", { name: /备用 Work/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "备用 Work" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("无 Work 时显示产品空状态并校验创建表单", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
@@ -211,6 +297,43 @@ describe("WorkSurface", () => {
     expect(screen.getByText("请输入目标")).toBeInTheDocument();
     expect(screen.getByText("请输入工作目录")).toBeInTheDocument();
     expect(client.createWork).not.toHaveBeenCalled();
+  });
+
+  it("创建 dialog 限制焦点并在 Escape、关闭和成功后归还触发按钮", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    render(<WorkSurface client={client} />);
+    const sidebar = screen.getByRole("complementary", { name: "Work 导航" });
+    const trigger = within(sidebar).getByRole("button", { name: "新建 Work" });
+
+    await user.click(trigger);
+    let dialog = screen.getByRole("dialog", { name: "新建 Work" });
+    const goal = within(dialog).getByLabelText("目标");
+    const close = within(dialog).getByRole("button", { name: "关闭" });
+    const create = within(dialog).getByRole("button", { name: "创建" });
+    expect(goal).toHaveFocus();
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(close).toHaveFocus();
+    await user.keyboard("{Shift>}{Tab}{/Shift}");
+    expect(create).toHaveFocus();
+    await user.keyboard("{Tab}");
+    expect(close).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    dialog = screen.getByRole("dialog", { name: "新建 Work" });
+    await user.click(within(dialog).getByRole("button", { name: "关闭" }));
+    expect(trigger).toHaveFocus();
+
+    await user.click(trigger);
+    dialog = screen.getByRole("dialog", { name: "新建 Work" });
+    await user.type(within(dialog).getByLabelText("目标"), "恢复焦点测试");
+    await user.type(within(dialog).getByLabelText("工作目录"), "D:\\workspace\\focus");
+    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
   });
 
   it("诊断详情不可序列化时仍显示安全文本", async () => {
@@ -243,5 +366,36 @@ describe("WorkSurface", () => {
     expect(screen.getByRole("complementary", { name: "Work 检查器" })).toHaveAttribute("data-open", "true");
     rendered.unmount();
     expect(client.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("窄屏关闭检查器时隐藏语义并在 Escape 后归还焦点", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: true,
+      media: "(max-width: 1099px)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    render(<WorkSurface client={client} />);
+
+    const toggle = await screen.findByRole("button", { name: "打开检查器" });
+    const inspector = screen.getByLabelText("Work 检查器", { selector: "aside" });
+    expect(inspector).toHaveAttribute("aria-hidden", "true");
+    expect(inspector).toHaveAttribute("inert");
+
+    await user.click(toggle);
+    expect(inspector).toHaveAttribute("aria-hidden", "false");
+    expect(inspector).not.toHaveAttribute("inert");
+    within(inspector).getByRole("tab", { name: "进度" }).focus();
+    await user.keyboard("{Escape}");
+
+    expect(inspector).toHaveAttribute("aria-hidden", "true");
+    expect(toggle).toHaveFocus();
   });
 });

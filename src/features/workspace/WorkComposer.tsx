@@ -1,5 +1,5 @@
 import { CornerDownLeft } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkSummary } from "../../bindings";
@@ -13,6 +13,8 @@ const continueStatuses: WorkSummary["status"][] = [
 export function WorkComposer({ work }: { work: WorkSummary }) {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const startWork = useWorkStore((state) => state.startWork);
   const queueInstruction = useWorkStore((state) => state.queueInstruction);
   const queuedInstructions = useWorkStore((state) => state.queuedInstructions);
@@ -31,8 +33,18 @@ export function WorkComposer({ work }: { work: WorkSummary }) {
       setPrompt("");
       return;
     }
-    await startWork(work.id, instruction);
-    setPrompt("");
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await startWork(work.id, instruction);
+      setPrompt("");
+    } catch {
+      // The store normalizes and exposes the error in the product UI.
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -52,7 +64,7 @@ export function WorkComposer({ work }: { work: WorkSummary }) {
             }
           }}
         />
-        <button className="button button--primary" type="button" disabled={!prompt.trim() || (loading && !shouldQueue)} onClick={() => void submit()}>
+        <button className="button button--primary" type="button" disabled={!prompt.trim() || submitting || (loading && !shouldQueue)} onClick={() => void submit()}>
           <CornerDownLeft aria-hidden="true" size={15} />
           {actionLabel}
         </button>

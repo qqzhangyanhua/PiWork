@@ -97,6 +97,7 @@
 
 .dialog-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; background: rgb(24 24 27 / 32%); }
 .create-dialog { width: min(460px, calc(100vw - 48px)); padding: 0; border: 1px solid var(--pw-border-default); border-radius: 12px; background: var(--pw-surface-panel); box-shadow: var(--pw-shadow-panel); }
+.create-dialog::backdrop { background: transparent; }
 .create-dialog__header { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--pw-border-default); }
 .create-dialog__header h2 { margin: 0; font-size: 15px; }
 .create-dialog form { display: grid; padding: 16px; }
@@ -112,7 +113,7 @@
   .work-surface { grid-template-columns: 200px minmax(700px, 1fr); }
   .workspace-main { grid-template-columns: minmax(0, 1fr); }
   .work-header__inspector-toggle { display: inline-grid; }
-  .work-inspector { position: relative; z-index: 20; grid-column: 1; grid-row: 2; width: 300px; height: 100%; justify-self: end; transform: translateX(100%); box-shadow: -12px 0 28px rgb(24 24 27 / 12%); transition: transform 160ms ease; }
-  .work-inspector[data-open="true"] { transform: translateX(0); }
+  .work-inspector { position: relative; z-index: 20; grid-column: 1; grid-row: 2; width: 300px; height: 100%; justify-self: end; visibility: hidden; pointer-events: none; transform: translateX(100%); box-shadow: -12px 0 28px rgb(24 24 27 / 12%); transition: transform 160ms ease, visibility 0s linear 160ms; }
+  .work-inspector[data-open="true"] { visibility: visible; pointer-events: auto; transform: translateX(0); transition-delay: 0s; }
   .inspector-scrim { position: relative; z-index: 15; display: block; grid-column: 1; grid-row: 2; width: 100%; height: 100%; border: 0; background: rgb(24 24 27 / 16%); }
 }

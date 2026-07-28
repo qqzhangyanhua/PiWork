@@ -1,4 +1,5 @@
 import { PanelRightOpen } from "lucide-react";
+import type { Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TimelineItem, AppError } from "../../domain/work";
@@ -10,10 +11,11 @@ type WorkHeaderProps = {
   error: AppError | null;
   latestRun?: RunSummary;
   inspectorOpen: boolean;
+  inspectorToggleRef: Ref<HTMLButtonElement>;
   onInspectorToggle(): void;
 };
 
-export function WorkHeader({ work, timeline, error, latestRun, inspectorOpen, onInspectorToggle }: WorkHeaderProps) {
+export function WorkHeader({ work, timeline, error, latestRun, inspectorOpen, inspectorToggleRef, onInspectorToggle }: WorkHeaderProps) {
   const { t } = useTranslation();
   const model = [...timeline]
     .reverse()
@@ -43,6 +45,7 @@ export function WorkHeader({ work, timeline, error, latestRun, inspectorOpen, on
             aria-label={t(inspectorOpen ? "inspector.close" : "inspector.open")}
             aria-expanded={inspectorOpen}
             onClick={onInspectorToggle}
+            ref={inspectorToggleRef}
           >
             <PanelRightOpen aria-hidden="true" size={18} />
           </button>

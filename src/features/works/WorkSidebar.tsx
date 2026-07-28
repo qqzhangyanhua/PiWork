@@ -1,5 +1,5 @@
 import { Clock3, Plus, X } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
@@ -7,7 +7,8 @@ import { useWorkStore } from "./WorkStoreProvider";
 
 type WorkSidebarProps = {
   createOpen: boolean;
-  onCreateOpenChange(open: boolean): void;
+  onCreateRequest(trigger: HTMLButtonElement): void;
+  onCreateClose(): void;
 };
 
 const relativeTime = (value: string, locale: string) => {
@@ -19,7 +20,7 @@ const relativeTime = (value: string, locale: string) => {
   );
 };
 
-export function WorkSidebar({ createOpen, onCreateOpenChange }: WorkSidebarProps) {
+export function WorkSidebar({ createOpen, onCreateRequest, onCreateClose }: WorkSidebarProps) {
   const { i18n, t } = useTranslation();
   const works = useWorkStore((state) => state.works);
   const selectedWorkId = useWorkStore((state) => state.selectedWorkId);
@@ -29,13 +30,49 @@ export function WorkSidebar({ createOpen, onCreateOpenChange }: WorkSidebarProps
   const [goal, setGoal] = useState("");
   const [rootPath, setRootPath] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const goalRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!createOpen) return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "");
+    }
+    goalRef.current?.focus();
+  }, [createOpen]);
 
   const sortedWorks = Object.values(works).sort((left, right) =>
     right.updatedAt.localeCompare(left.updatedAt),
   );
   const close = () => {
-    onCreateOpenChange(false);
+    onCreateClose();
     setSubmitted(false);
+  };
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+    ));
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
   };
   const submit = async (submitEvent: FormEvent) => {
     submitEvent.preventDefault();
@@ -65,7 +102,7 @@ export function WorkSidebar({ createOpen, onCreateOpenChange }: WorkSidebarProps
         <ContinuousLoopLogo size={28} />
         <strong>PiWork</strong>
       </div>
-      <button className="button button--primary work-sidebar__new" type="button" onClick={() => onCreateOpenChange(true)}>
+      <button className="button button--primary work-sidebar__new" type="button" onClick={(event) => onCreateRequest(event.currentTarget)}>
         <Plus aria-hidden="true" size={16} />
         {t("work.new")}
       </button>
@@ -91,7 +128,16 @@ export function WorkSidebar({ createOpen, onCreateOpenChange }: WorkSidebarProps
       </nav>
       {createOpen && (
         <div className="dialog-backdrop">
-          <section className="create-dialog" role="dialog" aria-modal="true" aria-labelledby="create-work-title">
+          <dialog
+            ref={dialogRef}
+            className="create-dialog"
+            aria-labelledby="create-work-title"
+            onCancel={(event) => {
+              event.preventDefault();
+              close();
+            }}
+            onKeyDown={handleDialogKeyDown}
+          >
             <header className="create-dialog__header">
               <h2 id="create-work-title">{t("work.new")}</h2>
               <button className="icon-button" type="button" aria-label={t("common.close")} onClick={close}>
@@ -100,7 +146,7 @@ export function WorkSidebar({ createOpen, onCreateOpenChange }: WorkSidebarProps
             </header>
             <form onSubmit={submit} noValidate>
               <label htmlFor="work-goal">{t("create.goal")}</label>
-              <textarea id="work-goal" value={goal} onChange={(event) => setGoal(event.target.value)} />
+              <textarea ref={goalRef} id="work-goal" value={goal} onChange={(event) => setGoal(event.target.value)} />
               {submitted && !goal.trim() && <p className="field-error">{t("create.goalRequired")}</p>}
               <label htmlFor="work-root">{t("create.rootPath")}</label>
               <input id="work-root" value={rootPath} onChange={(event) => setRootPath(event.target.value)} />
@@ -111,7 +157,7 @@ export function WorkSidebar({ createOpen, onCreateOpenChange }: WorkSidebarProps
                 <button className="button button--primary" type="submit">{t("common.create")}</button>
               </footer>
             </form>
-          </section>
+          </dialog>
         </div>
       )}
     </aside>

@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { TimelineItem } from "../../domain/work";
@@ -6,12 +6,31 @@ import type { TimelineItem } from "../../domain/work";
 const tabs = ["progress", "changes", "artifacts", "logs"] as const;
 type InspectorTab = (typeof tabs)[number];
 
-export function WorkInspector({ timeline, open }: { timeline: TimelineItem[]; open: boolean }) {
+const compactInspectorQuery = "(max-width: 1099px)";
+
+const useCompactInspector = () => {
+  const [compact, setCompact] = useState(
+    () => typeof matchMedia === "function" && matchMedia(compactInspectorQuery).matches,
+  );
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return;
+    const query = matchMedia(compactInspectorQuery);
+    const update = () => setCompact(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return compact;
+};
+
+export function WorkInspector({ timeline, open, onClose }: { timeline: TimelineItem[]; open: boolean; onClose(): void }) {
   const { t } = useTranslation();
+  const compact = useCompactInspector();
   const [active, setActive] = useState<InspectorTab>("progress");
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
   const toolCount = timeline.filter(({ payload }) => payload.type === "toolStarted").length;
   const completed = timeline.some(({ payload }) => payload.type === "runCompleted");
+  const hidden = compact && !open;
   const activateRelative = (event: KeyboardEvent, index: number) => {
     if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
     event.preventDefault();
@@ -34,7 +53,19 @@ export function WorkInspector({ timeline, open }: { timeline: TimelineItem[]; op
   };
 
   return (
-    <aside className="work-inspector" data-open={open} aria-label={t("inspector.label")}>
+    <aside
+      aria-hidden={hidden}
+      aria-label={t("inspector.label")}
+      className="work-inspector"
+      data-open={open}
+      inert={hidden}
+      onKeyDownCapture={(event) => {
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+    >
       <div className="work-inspector__tabs" role="tablist" aria-label={t("inspector.label")}>
         {tabs.map((tab, index) => (
           <button

@@ -498,6 +498,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               return;
             }
             set((state) => reduceWork(state, { type: "detail", detail }));
+            if (operation === errorOwner) set({ hydrationError: null });
             succeedOperation(operation);
           } catch (error) {
             if (
