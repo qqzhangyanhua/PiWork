@@ -35,11 +35,21 @@ function SurfaceContent() {
   const hydrationError = useWorkStore((state) => state.hydrationError);
   const [createOpen, setCreateOpen] = useState(false);
   const createTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const pendingWorkspaceFocusRef = useRef(false);
+  const [workspaceFocusRequest, setWorkspaceFocusRequest] = useState(0);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const inspectorToggleRef = useRef<HTMLButtonElement>(null);
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   useWorkEvents();
   useEffect(() => { void hydrate(); }, [hydrate]);
+  useEffect(() => {
+    if (!pendingWorkspaceFocusRef.current || createOpen || !selectedWorkId) return;
+    const composer = composerRef.current;
+    if (!composer) return;
+    pendingWorkspaceFocusRef.current = false;
+    composer.focus();
+  }, [createOpen, selectedWorkId, workspaceFocusRequest]);
 
   const selectedWork = selectedWorkId ? works[selectedWorkId] : undefined;
   const timeline = selectedWork ? timelines[selectedWork.id] ?? [] : [];
@@ -55,7 +65,16 @@ function SurfaceContent() {
   };
   const closeCreate = () => {
     setCreateOpen(false);
-    queueMicrotask(() => createTriggerRef.current?.focus());
+    queueMicrotask(() => {
+      const trigger = createTriggerRef.current;
+      createTriggerRef.current = null;
+      if (trigger?.isConnected) {
+        trigger.focus();
+        return;
+      }
+      pendingWorkspaceFocusRef.current = true;
+      setWorkspaceFocusRequest((request) => request + 1);
+    });
   };
 
   return (
@@ -74,7 +93,7 @@ function SurfaceContent() {
       ) : (
         <section className="workspace-main">
           <WorkHeader work={selectedWork} timeline={timeline} error={error} latestRun={latestRuns[selectedWork.id]} inspectorOpen={inspectorOpen} inspectorToggleRef={inspectorToggleRef} onInspectorToggle={() => inspectorOpen ? closeInspector() : setInspectorOpen(true)} />
-          <div className="workspace-center"><WorkTimeline timeline={timeline} /><WorkComposer work={selectedWork} /></div>
+          <div className="workspace-center"><WorkTimeline timeline={timeline} /><WorkComposer promptRef={composerRef} work={selectedWork} /></div>
           <WorkInspector timeline={timeline} open={inspectorOpen} onClose={closeInspector} />
           {inspectorOpen && <button className="inspector-scrim" aria-label={t("inspector.close")} type="button" onClick={closeInspector} />}
         </section>

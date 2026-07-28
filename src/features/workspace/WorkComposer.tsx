@@ -1,5 +1,5 @@
 import { CornerDownLeft } from "lucide-react";
-import { useRef, useState } from "react";
+import { type Ref, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkSummary } from "../../bindings";
@@ -10,7 +10,12 @@ const continueStatuses: WorkSummary["status"][] = [
   "completed", "failed", "stopped", "interrupted", "idle",
 ];
 
-export function WorkComposer({ work }: { work: WorkSummary }) {
+type WorkComposerProps = {
+  promptRef?: Ref<HTMLTextAreaElement>;
+  work: WorkSummary;
+};
+
+export function WorkComposer({ promptRef, work }: WorkComposerProps) {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -53,6 +58,7 @@ export function WorkComposer({ work }: { work: WorkSummary }) {
       <div className="work-composer__box">
         <label className="sr-only" htmlFor="work-prompt">{t("composer.label")}</label>
         <textarea
+          ref={promptRef}
           id="work-prompt"
           placeholder={t("composer.placeholder")}
           value={prompt}

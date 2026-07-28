@@ -336,6 +336,25 @@ describe("WorkSurface", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("中央空态创建成功后将焦点移入新工作台", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    render(<WorkSurface client={client} />);
+    const emptyHeading = await screen.findByRole("heading", { name: "创建第一个 Work" });
+    const emptyState = emptyHeading.closest("section");
+    expect(emptyState).not.toBeNull();
+    const trigger = within(emptyState!).getByRole("button", { name: "新建 Work" });
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
+    await user.type(within(dialog).getByLabelText("目标"), "中央空态焦点测试");
+    await user.type(within(dialog).getByLabelText("工作目录"), "D:\\workspace\\empty-focus");
+    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    expect(composer).toHaveFocus();
+  });
+
   it("诊断详情不可序列化时仍显示安全文本", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
