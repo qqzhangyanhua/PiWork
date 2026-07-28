@@ -1,8 +1,8 @@
 # PiWork 1.0 Product and Architecture Design
 
-Status: approved design, pending written-spec review  
-Date: 2026-07-28  
-Target: Windows 10/11 x64
+- Status: approved design
+- Date: 2026-07-28
+- Target: Windows 10/11 x64
 
 ## 1. Product thesis
 
