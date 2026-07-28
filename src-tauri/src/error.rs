@@ -36,6 +36,15 @@ pub enum AppError {
     #[error("Work was modified concurrently: {work_id}")]
     ConcurrentWorkModification { work_id: String },
 
+    #[error("Work already has an active Run: {work_id}")]
+    WorkAlreadyRunning { work_id: String },
+
+    #[error("engine operation failed: {message}")]
+    Engine { message: String },
+
+    #[error("event publication failed: {message}")]
+    EventPublish { message: String },
+
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -112,6 +121,24 @@ impl AppError {
         }
     }
 
+    pub fn work_already_running(work_id: impl Into<String>) -> Self {
+        Self::WorkAlreadyRunning {
+            work_id: work_id.into(),
+        }
+    }
+
+    pub fn engine(message: impl Into<String>) -> Self {
+        Self::Engine {
+            message: message.into(),
+        }
+    }
+
+    pub fn event_publish(message: impl Into<String>) -> Self {
+        Self::EventPublish {
+            message: message.into(),
+        }
+    }
+
     fn wire_parts(&self) -> (&'static str, &str, Option<Value>) {
         match self {
             Self::InvalidInput { field, message } => {
@@ -146,6 +173,17 @@ impl AppError {
                 "concurrent_modification",
                 "Work was modified concurrently",
                 Some(json!({ "workId": work_id })),
+            ),
+            Self::WorkAlreadyRunning { work_id } => (
+                "work_already_running",
+                "Work already has an active Run",
+                Some(json!({ "workId": work_id })),
+            ),
+            Self::Engine { .. } => ("engine_error", "Engine operation failed", None),
+            Self::EventPublish { .. } => (
+                "event_publish_error",
+                "Work event could not be published",
+                None,
             ),
             Self::Database(_) => ("database_error", "Database operation failed", None),
             Self::Migration(_) => ("migration_error", "Database migration failed", None),

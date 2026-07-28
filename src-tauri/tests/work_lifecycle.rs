@@ -1,14 +1,450 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use piwork_lib::{
     app_state::AppState,
     domain::{
-        event::WorkEventPayload,
+        event::{WorkEventEnvelope, WorkEventPayload},
         work::{CreateWorkInput, PermissionMode, RunStatus, WorkStatus},
+    },
+    engine::{
+        EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef,
+        fake::FakeEngineAdapter, publisher::ChannelEventPublisher, supervisor::EngineSupervisor,
     },
     storage::sqlite::Database,
     work::{repository::WorkRepository, service::WorkService},
 };
+use tokio::sync::mpsc;
+
+struct TestHarness {
+    _temporary_directory: tempfile::TempDir,
+    repository: WorkRepository,
+    workspace_path: std::path::PathBuf,
+}
+
+impl TestHarness {
+    async fn new() -> Self {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open_in_memory().await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+
+        Self {
+            _temporary_directory: temporary_directory,
+            repository,
+            workspace_path,
+        }
+    }
+
+    async fn create_work(&self, title: &str) -> piwork_lib::domain::work::WorkDetail {
+        self.repository
+            .create(CreateWorkInput {
+                title: title.into(),
+                goal: "Exercise the engine pipeline".into(),
+                root_path: self.workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+            })
+            .await
+            .unwrap()
+    }
+}
+
+async fn receive_complete_run(
+    receiver: &mut mpsc::Receiver<WorkEventEnvelope>,
+) -> Vec<WorkEventEnvelope> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut events = Vec::new();
+        loop {
+            let event = receiver.recv().await.unwrap();
+            let terminal = matches!(
+                event.payload,
+                WorkEventPayload::RunCompleted { .. } | WorkEventPayload::RunFailed { .. }
+            );
+            events.push(event);
+            if terminal {
+                return events;
+            }
+        }
+    })
+    .await
+    .expect("engine did not produce a terminal event")
+}
+
+#[tokio::test]
+async fn event_is_persisted_before_it_is_published() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Persist before publish").await;
+    let (publisher, mut published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::ZERO)),
+        Arc::new(publisher),
+    );
+
+    let run = supervisor
+        .start(&work.summary.id, "Build it")
+        .await
+        .unwrap();
+    let event = published.recv().await.unwrap();
+    let persisted = harness.repository.events_for_run(&run.id).await.unwrap();
+
+    assert!(persisted.iter().any(|candidate| {
+        candidate.run_id == event.run_id && candidate.sequence == event.sequence
+    }));
+}
+
+#[tokio::test]
+async fn start_work_returns_before_the_engine_stream_finishes() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Return immediately").await;
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = Arc::new(EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::from_millis(
+            300,
+        ))),
+        Arc::new(publisher),
+    ));
+    let service = WorkService::with_supervisor(harness.repository, supervisor);
+
+    let run = tokio::time::timeout(
+        std::time::Duration::from_millis(150),
+        service.start_work(&work.summary.id, "Build it"),
+    )
+    .await
+    .expect("start_work waited for the engine event stream")
+    .unwrap();
+
+    assert_eq!(run.status, RunStatus::Running);
+}
+
+struct StartFailingEngine;
+
+#[async_trait]
+impl EngineAdapter for StartFailingEngine {
+    fn kind(&self) -> &'static str {
+        "start-failing"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _prompt: String,
+        _sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        Err(EngineError::Start("intentional failure".into()))
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        Err(EngineError::Aborted)
+    }
+}
+
+#[tokio::test]
+async fn engine_start_failure_marks_the_run_and_work_failed_and_clears_active() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Fail safely").await;
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(StartFailingEngine),
+        Arc::new(publisher),
+    );
+
+    let first_error = supervisor
+        .start(&work.summary.id, "Build it")
+        .await
+        .unwrap_err();
+    let after_first = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(first_error).unwrap()["code"],
+        "engine_error"
+    );
+    assert_eq!(after_first.summary.status, WorkStatus::Failed);
+    assert_eq!(after_first.runs[0].status, RunStatus::Failed);
+    assert!(after_first.runs[0].completed_at.is_some());
+
+    let second_error = supervisor
+        .start(&work.summary.id, "Try again")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        serde_json::to_value(second_error).unwrap()["code"],
+        "engine_error"
+    );
+}
+
+struct EarlyClosingEngine;
+
+#[async_trait]
+impl EngineAdapter for EarlyClosingEngine {
+    fn kind(&self) -> &'static str {
+        "early-closing"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _prompt: String,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        tokio::spawn(async move {
+            let _ = sink
+                .send(EngineEvent::RunStarted {
+                    model_label: "early-closing".into(),
+                })
+                .await;
+        });
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: "early-close-session".into(),
+        })
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        Err(EngineError::Aborted)
+    }
+}
+
+#[tokio::test]
+async fn channel_close_before_terminal_is_journaled_as_a_failed_run() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Close early").await;
+    let (publisher, mut published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(EarlyClosingEngine),
+        Arc::new(publisher),
+    );
+
+    let run = supervisor
+        .start(&work.summary.id, "Build it")
+        .await
+        .unwrap();
+    let first = published.recv().await.unwrap();
+    let failed = tokio::time::timeout(std::time::Duration::from_secs(1), published.recv())
+        .await
+        .expect("supervisor did not publish a synthetic failure")
+        .unwrap();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first.sequence, 1);
+    assert_eq!(failed.sequence, 2);
+    assert!(matches!(failed.payload, WorkEventPayload::RunFailed { .. }));
+    assert_eq!(detail.summary.status, WorkStatus::Failed);
+    assert_eq!(detail.runs[0].id, run.id);
+    assert_eq!(detail.runs[0].status, RunStatus::Failed);
+}
+
+#[tokio::test]
+async fn fake_run_completes_with_the_stable_result_payload_and_terminal_state() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Complete cleanly").await;
+    let (publisher, mut published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::ZERO)),
+        Arc::new(publisher),
+    );
+
+    let run = supervisor
+        .start(&work.summary.id, "Build it")
+        .await
+        .unwrap();
+    let events = receive_complete_run(&mut published).await;
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(events.len(), 6);
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    assert!(matches!(
+        &events[5].payload,
+        WorkEventPayload::RunCompleted {
+            summary,
+            artifacts,
+            validation,
+            limitations,
+        } if summary == "Completed by the deterministic fake engine"
+            && artifacts.is_empty()
+            && validation == &["fake validation passed"]
+            && limitations == &["fake engine only"]
+    ));
+    assert_eq!(detail.summary.status, WorkStatus::Completed);
+    assert_eq!(detail.runs[0].id, run.id);
+    assert_eq!(detail.runs[0].status, RunStatus::Completed);
+    assert!(detail.runs[0].completed_at.is_some());
+}
+
+#[tokio::test]
+async fn a_work_rejects_a_second_active_run() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Only one active Run").await;
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository,
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::from_millis(
+            200,
+        ))),
+        Arc::new(publisher),
+    );
+
+    supervisor.start(&work.summary.id, "First").await.unwrap();
+    let error = supervisor
+        .start(&work.summary.id, "Second")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(error).unwrap(),
+        serde_json::json!({
+            "code": "work_already_running",
+            "message": "Work already has an active Run",
+            "details": { "workId": work.summary.id }
+        })
+    );
+}
+
+#[tokio::test]
+async fn completed_work_can_start_a_second_run_with_fresh_sequence_numbers() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Run twice").await;
+    let (publisher, mut published) = ChannelEventPublisher::channel(32);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::ZERO)),
+        Arc::new(publisher),
+    );
+
+    let first = supervisor.start(&work.summary.id, "First").await.unwrap();
+    let first_events = receive_complete_run(&mut published).await;
+    tokio::task::yield_now().await;
+    let second = supervisor.start(&work.summary.id, "Second").await.unwrap();
+    let second_events = receive_complete_run(&mut published).await;
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_ne!(first.id, second.id);
+    assert_eq!(first_events[0].sequence, 1);
+    assert_eq!(second_events[0].sequence, 1);
+    assert_eq!(detail.runs.len(), 2);
+    assert!(
+        detail
+            .runs
+            .iter()
+            .all(|run| run.status == RunStatus::Completed)
+    );
+}
+
+#[tokio::test]
+async fn start_rejects_an_empty_prompt_and_an_archived_work() {
+    let harness = TestHarness::new().await;
+    let empty_work = harness.create_work("Empty prompt").await;
+    let archived_work = harness.create_work("Archived work").await;
+    harness
+        .repository
+        .set_work_status(&archived_work.summary.id, WorkStatus::Archived)
+        .await
+        .unwrap();
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::ZERO)),
+        Arc::new(publisher),
+    );
+
+    let empty_error = supervisor
+        .start(&empty_work.summary.id, " \n ")
+        .await
+        .unwrap_err();
+    let archived_error = supervisor
+        .start(&archived_work.summary.id, "Build it")
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(empty_error).unwrap()["code"],
+        "invalid_input"
+    );
+    assert_eq!(
+        serde_json::to_value(archived_error).unwrap()["code"],
+        "invalid_work_state"
+    );
+    assert!(
+        harness
+            .repository
+            .get(&empty_work.summary.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn publisher_failure_does_not_stop_the_persisted_event_stream() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Ignore publish failure").await;
+    let (publisher, published) = ChannelEventPublisher::channel(1);
+    drop(published);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(FakeEngineAdapter::new(std::time::Duration::ZERO)),
+        Arc::new(publisher),
+    );
+
+    let run = supervisor
+        .start(&work.summary.id, "Build it")
+        .await
+        .unwrap();
+    let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let events = harness.repository.events_for_run(&run.id).await.unwrap();
+            if events.len() == 6 {
+                return events;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("publisher failure stopped event persistence");
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(events.last().unwrap().sequence, 6);
+    assert_eq!(detail.summary.status, WorkStatus::Completed);
+    assert_eq!(detail.runs[0].status, RunStatus::Completed);
+}
 
 #[tokio::test]
 async fn created_work_survives_database_reopen() {

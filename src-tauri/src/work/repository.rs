@@ -226,6 +226,268 @@ impl WorkRepository {
         Ok(run)
     }
 
+    pub async fn begin_run(
+        &self,
+        work_id: &str,
+        prompt: &str,
+        model_label: &str,
+    ) -> Result<RunSummary, AppError> {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Err(AppError::invalid_input(
+                "prompt",
+                "prompt must not be empty",
+            ));
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let work = Self::load_work(&mut transaction, work_id)
+            .await?
+            .ok_or_else(|| AppError::work_not_found(work_id))?;
+        if matches!(
+            work.status,
+            WorkStatus::Queued | WorkStatus::Running | WorkStatus::Waiting
+        ) {
+            return Err(AppError::work_already_running(work_id));
+        }
+        let queued = transition(work.status, WorkAction::Queue)
+            .map_err(|_| AppError::invalid_work_state(work_id, work.status, WorkStatus::Queued))?;
+        let running = transition(queued, WorkAction::Start)
+            .map_err(|_| AppError::invalid_work_state(work_id, queued, WorkStatus::Running))?;
+        let now = Utc::now();
+        let run = RunSummary {
+            id: Uuid::new_v4().to_string(),
+            work_id: work_id.to_owned(),
+            model_label: model_label.to_owned(),
+            status: RunStatus::Running,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: None,
+        };
+
+        let updated =
+            sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(running)
+                .bind(now)
+                .bind(work_id)
+                .bind(work.status)
+                .execute(&mut *transaction)
+                .await?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::concurrent_work_modification(work_id));
+        }
+        sqlx::query(
+            "INSERT INTO runs \
+             (id, work_id, model_label, status, created_at, updated_at, started_at, completed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+        )
+        .bind(&run.id)
+        .bind(&run.work_id)
+        .bind(&run.model_label)
+        .bind(run.status)
+        .bind(run.created_at)
+        .bind(now)
+        .bind(run.started_at)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
+             VALUES (?, ?, ?, 'user', ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(work_id)
+        .bind(&run.id)
+        .bind(prompt)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+
+        Ok(run)
+    }
+
+    pub async fn append_event_and_transition(
+        &self,
+        envelope: &WorkEventEnvelope,
+    ) -> Result<(), AppError> {
+        if envelope.sequence == 0 {
+            return Err(AppError::invalid_input(
+                "sequence",
+                "event sequence must be at least 1",
+            ));
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
+            .bind(&envelope.run_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| AppError::run_not_found(&envelope.run_id))?;
+        if run.work_id != envelope.work_id {
+            return Err(AppError::run_not_found(&envelope.run_id));
+        }
+        let work_status =
+            sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
+                .bind(&envelope.work_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| AppError::work_not_found(&envelope.work_id))?;
+        let current_sequence = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM events WHERE run_id = ?",
+        )
+        .bind(&envelope.run_id)
+        .fetch_one(&mut *transaction)
+        .await?
+        .unwrap_or(0);
+        let next_sequence = current_sequence
+            .checked_add(1)
+            .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
+        if next_sequence > i64::from(u32::MAX) || i64::from(envelope.sequence) != next_sequence {
+            return Err(AppError::invalid_input(
+                "sequence",
+                "event sequence is not the next sequence for this Run",
+            ));
+        }
+
+        let payload = serde_json::to_string(&envelope.payload)
+            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
+        sqlx::query(
+            "INSERT INTO events \
+             (id, work_id, run_id, sequence, version, occurred_at, payload) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&envelope.work_id)
+        .bind(&envelope.run_id)
+        .bind(i64::from(envelope.sequence))
+        .bind(i64::from(envelope.version))
+        .bind(envelope.occurred_at)
+        .bind(payload)
+        .execute(&mut *transaction)
+        .await?;
+
+        let terminal = match envelope.payload {
+            WorkEventPayload::RunCompleted { .. } => {
+                Some((RunAction::Complete, WorkAction::Complete))
+            }
+            WorkEventPayload::RunFailed { .. } => Some((RunAction::Fail, WorkAction::Fail)),
+            _ => None,
+        };
+        if let Some((run_action, work_action)) = terminal {
+            let next_run = transition_run(run.status, run_action).map_err(|_| {
+                AppError::invalid_run_state(
+                    &envelope.run_id,
+                    run.status,
+                    match run_action {
+                        RunAction::Complete => RunStatus::Completed,
+                        RunAction::Fail => RunStatus::Failed,
+                        _ => unreachable!(),
+                    },
+                )
+            })?;
+            let next_work = transition(work_status, work_action).map_err(|_| {
+                AppError::invalid_work_state(
+                    &envelope.work_id,
+                    work_status,
+                    match work_action {
+                        WorkAction::Complete => WorkStatus::Completed,
+                        WorkAction::Fail => WorkStatus::Failed,
+                        _ => unreachable!(),
+                    },
+                )
+            })?;
+            let now = Utc::now();
+            let run_update = sqlx::query(
+                "UPDATE runs SET status = ?, updated_at = ?, completed_at = ? \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(next_run)
+            .bind(now)
+            .bind(now)
+            .bind(&envelope.run_id)
+            .bind(run.status)
+            .execute(&mut *transaction)
+            .await?;
+            if run_update.rows_affected() == 0 {
+                return Err(AppError::concurrent_run_modification(&envelope.run_id));
+            }
+            let work_update = sqlx::query(
+                "UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+            )
+            .bind(next_work)
+            .bind(now)
+            .bind(&envelope.work_id)
+            .bind(work_status)
+            .execute(&mut *transaction)
+            .await?;
+            if work_update.rows_affected() == 0 {
+                return Err(AppError::concurrent_work_modification(&envelope.work_id));
+            }
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn events_for_run(&self, run_id: &str) -> Result<Vec<WorkEventEnvelope>, AppError> {
+        sqlx::query_as::<_, EventRow>(
+            "SELECT work_id, run_id, sequence, version, occurred_at, payload \
+             FROM events WHERE run_id = ? ORDER BY sequence ASC",
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(WorkEventEnvelope::try_from)
+        .collect()
+    }
+
+    pub async fn fail_run(&self, run_id: &str) -> Result<(), AppError> {
+        let mut transaction = self.pool.begin().await?;
+        let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| AppError::run_not_found(run_id))?;
+        let work_status =
+            sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
+                .bind(&run.work_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let next_run = transition_run(run.status, RunAction::Fail)
+            .map_err(|_| AppError::invalid_run_state(run_id, run.status, RunStatus::Failed))?;
+        let next_work = transition(work_status, WorkAction::Fail).map_err(|_| {
+            AppError::invalid_work_state(&run.work_id, work_status, WorkStatus::Failed)
+        })?;
+        let now = Utc::now();
+        let run_update = sqlx::query(
+            "UPDATE runs SET status = ?, updated_at = ?, completed_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(next_run)
+        .bind(now)
+        .bind(now)
+        .bind(run_id)
+        .bind(run.status)
+        .execute(&mut *transaction)
+        .await?;
+        if run_update.rows_affected() == 0 {
+            return Err(AppError::concurrent_run_modification(run_id));
+        }
+        let work_update =
+            sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(next_work)
+                .bind(now)
+                .bind(&run.work_id)
+                .bind(work_status)
+                .execute(&mut *transaction)
+                .await?;
+        if work_update.rows_affected() == 0 {
+            return Err(AppError::concurrent_work_modification(&run.work_id));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn set_work_status(&self, work_id: &str, status: WorkStatus) -> Result<(), AppError> {
         let current = self.validate_work_transition(work_id, status).await?;
         self.update_work_status(work_id, current, status).await
@@ -450,6 +712,12 @@ struct RunRow {
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(FromRow)]
+struct RunStateRow {
+    work_id: String,
+    status: RunStatus,
 }
 
 impl From<RunRow> for RunSummary {

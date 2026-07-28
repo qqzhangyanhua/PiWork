@@ -4,6 +4,7 @@ use tauri::Manager;
 
 pub mod app_state;
 pub mod domain;
+pub mod engine;
 pub mod error;
 pub mod paths;
 pub mod storage;
@@ -17,14 +18,28 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 paths.database_path(),
             ))?;
             let repository = work::repository::WorkRepository::new(database.pool().clone());
-            let service = Arc::new(work::service::WorkService::new(repository));
+            let engine = Arc::new(engine::fake::FakeEngineAdapter::new(
+                std::time::Duration::from_millis(120),
+            ));
+            let publisher = Arc::new(engine::publisher::TauriEventPublisher::new(
+                app.handle().clone(),
+            ));
+            let supervisor = Arc::new(engine::supervisor::EngineSupervisor::new(
+                repository.clone(),
+                engine,
+                publisher,
+            ));
+            let service = Arc::new(work::service::WorkService::with_supervisor(
+                repository, supervisor,
+            ));
             app.manage(app_state::AppState::new(service));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             work::commands::create_work,
             work::commands::list_works,
-            work::commands::get_work
+            work::commands::get_work,
+            work::commands::start_work
         ])
 }
 
