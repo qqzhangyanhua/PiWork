@@ -1,0 +1,23 @@
+.superpowers/
+
+# Tauri / Rust
+/target/
+**/target/
+
+# JavaScript
+/node_modules/
+**/node_modules/
+/dist/
+**/dist/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
