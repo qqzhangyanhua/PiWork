@@ -113,6 +113,35 @@ async fn create_rejects_a_missing_workspace_path() {
 }
 
 #[tokio::test]
+async fn create_rejects_a_regular_file_as_the_workspace_root() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let file_path = temporary_directory.path().join("not-a-directory.txt");
+    std::fs::write(&file_path, "content").unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let repository = WorkRepository::new(database.pool().clone());
+
+    let error = repository
+        .create(CreateWorkInput {
+            title: "Title".into(),
+            goal: "Goal".into(),
+            root_path: file_path.to_string_lossy().into_owned(),
+            permission_mode: PermissionMode::Balanced,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(error).unwrap(),
+        serde_json::json!({
+            "code": "invalid_input",
+            "message": "rootPath must be a directory",
+            "details": { "field": "rootPath" }
+        })
+    );
+    assert!(repository.list().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn list_orders_works_by_most_recent_update() {
     let temporary_directory = tempfile::tempdir().unwrap();
     let workspace_path = temporary_directory.path().join("workspace");
@@ -375,6 +404,112 @@ async fn setting_run_status_tracks_start_and_completion_times() {
     assert_eq!(completed.status, RunStatus::Completed);
     assert_eq!(completed.started_at, running.started_at);
     assert!(completed.completed_at.is_some());
+}
+
+#[tokio::test]
+async fn archived_work_rejects_running_without_changing_persisted_state() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let workspace_path = temporary_directory.path().join("workspace");
+    std::fs::create_dir(&workspace_path).unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let repository = WorkRepository::new(database.pool().clone());
+    let work = repository
+        .create(CreateWorkInput {
+            title: "Archived".into(),
+            goal: "Stay archived".into(),
+            root_path: workspace_path.to_string_lossy().into_owned(),
+            permission_mode: PermissionMode::Balanced,
+        })
+        .await
+        .unwrap();
+    repository
+        .set_work_status(&work.summary.id, WorkStatus::Archived)
+        .await
+        .unwrap();
+    let before = repository.get(&work.summary.id).await.unwrap().unwrap();
+
+    let error = repository
+        .set_work_status(&work.summary.id, WorkStatus::Running)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(error).unwrap(),
+        serde_json::json!({
+            "code": "invalid_work_state",
+            "message": "Work status transition is invalid",
+            "details": {
+                "workId": work.summary.id,
+                "from": "archived",
+                "to": "running"
+            }
+        })
+    );
+    let after = repository.get(&work.summary.id).await.unwrap().unwrap();
+    assert_eq!(after.summary, before.summary);
+}
+
+#[tokio::test]
+async fn completed_run_rejects_running_without_changing_persisted_state() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let workspace_path = temporary_directory.path().join("workspace");
+    std::fs::create_dir(&workspace_path).unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let repository = WorkRepository::new(database.pool().clone());
+    let work = repository
+        .create(CreateWorkInput {
+            title: "Completed run".into(),
+            goal: "Stay completed".into(),
+            root_path: workspace_path.to_string_lossy().into_owned(),
+            permission_mode: PermissionMode::Balanced,
+        })
+        .await
+        .unwrap();
+    let run = repository
+        .insert_run(&work.summary.id, "model")
+        .await
+        .unwrap();
+    repository
+        .set_run_status(&run.id, RunStatus::Running)
+        .await
+        .unwrap();
+    repository
+        .set_run_status(&run.id, RunStatus::Completed)
+        .await
+        .unwrap();
+    let before = repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .runs[0]
+        .clone();
+
+    let error = repository
+        .set_run_status(&run.id, RunStatus::Running)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        serde_json::to_value(error).unwrap(),
+        serde_json::json!({
+            "code": "invalid_work_state",
+            "message": "Run status transition is invalid",
+            "details": {
+                "runId": run.id,
+                "from": "completed",
+                "to": "running"
+            }
+        })
+    );
+    let after = repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .runs[0]
+        .clone();
+    assert_eq!(after, before);
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
@@ -12,6 +12,8 @@ use crate::{
     },
     error::AppError,
 };
+
+use super::state_machine::{RunAction, WorkAction, transition, transition_run};
 
 #[derive(Clone)]
 pub struct WorkRepository {
@@ -40,6 +42,18 @@ impl WorkRepository {
                 source,
             }
         })?;
+        let metadata = std::fs::metadata(&canonical_path).map_err(|source| {
+            AppError::WorkspacePathResolution {
+                path: input.root_path.clone().into(),
+                source,
+            }
+        })?;
+        if !metadata.is_dir() {
+            return Err(AppError::invalid_input(
+                "rootPath",
+                "rootPath must be a directory",
+            ));
+        }
         let now = Utc::now();
         let summary = WorkSummary {
             id: Uuid::new_v4().to_string(),
@@ -76,23 +90,62 @@ impl WorkRepository {
     }
 
     pub async fn get(&self, id: &str) -> Result<Option<WorkDetail>, AppError> {
-        let row = sqlx::query_as::<_, WorkRow>(
+        let mut transaction = self.pool.begin().await?;
+        let row = Self::load_work(&mut transaction, id).await?;
+        let detail = match row {
+            Some(row) => Some(Self::load_detail(&mut transaction, id, row).await?),
+            None => None,
+        };
+        transaction.commit().await?;
+        Ok(detail)
+    }
+
+    #[cfg(test)]
+    async fn get_after_work_loaded<F>(
+        &self,
+        id: &str,
+        after_work_loaded: F,
+    ) -> Result<Option<WorkDetail>, AppError>
+    where
+        F: FnOnce(),
+    {
+        let mut transaction = self.pool.begin().await?;
+        let row = Self::load_work(&mut transaction, id).await?;
+        let detail = match row {
+            Some(row) => {
+                after_work_loaded();
+                Some(Self::load_detail(&mut transaction, id, row).await?)
+            }
+            None => None,
+        };
+        transaction.commit().await?;
+        Ok(detail)
+    }
+
+    async fn load_work(
+        connection: &mut SqliteConnection,
+        id: &str,
+    ) -> Result<Option<WorkRow>, AppError> {
+        Ok(sqlx::query_as::<_, WorkRow>(
             "SELECT id, title, goal, root_path, permission_mode, status, created_at, updated_at \
              FROM works WHERE id = ?",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        .fetch_optional(&mut *connection)
+        .await?)
+    }
 
-        let Some(row) = row else {
-            return Ok(None);
-        };
+    async fn load_detail(
+        connection: &mut SqliteConnection,
+        id: &str,
+        row: WorkRow,
+    ) -> Result<WorkDetail, AppError> {
         let runs = sqlx::query_as::<_, RunRow>(
             "SELECT id, work_id, model_label, status, created_at, started_at, completed_at \
              FROM runs WHERE work_id = ? ORDER BY created_at ASC, id ASC",
         )
         .bind(id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?
         .into_iter()
         .map(RunSummary::from)
@@ -106,17 +159,17 @@ impl WorkRepository {
              ORDER BY runs.created_at ASC, runs.id ASC, events.sequence ASC, events.id ASC",
         )
         .bind(id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?
         .into_iter()
         .map(WorkEventEnvelope::try_from)
         .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Some(WorkDetail {
+        Ok(WorkDetail {
             summary: row.into(),
             runs,
             events,
-        }))
+        })
     }
 
     pub async fn list(&self) -> Result<Vec<WorkSummary>, AppError> {
@@ -174,20 +227,112 @@ impl WorkRepository {
     }
 
     pub async fn set_work_status(&self, work_id: &str, status: WorkStatus) -> Result<(), AppError> {
-        let result = sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(status)
-            .bind(Utc::now())
+        let current = self.validate_work_transition(work_id, status).await?;
+        self.update_work_status(work_id, current, status).await
+    }
+
+    #[cfg(test)]
+    async fn set_work_status_after_read<F>(
+        &self,
+        work_id: &str,
+        status: WorkStatus,
+        after_read: F,
+    ) -> Result<(), AppError>
+    where
+        F: FnOnce(),
+    {
+        let current = self.validate_work_transition(work_id, status).await?;
+        after_read();
+        self.update_work_status(work_id, current, status).await
+    }
+
+    async fn validate_work_transition(
+        &self,
+        work_id: &str,
+        status: WorkStatus,
+    ) -> Result<WorkStatus, AppError> {
+        let current = sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
             .bind(work_id)
-            .execute(&self.pool)
-            .await?;
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::work_not_found(work_id))?;
+        let transition_result = work_action_for_target(status)
+            .and_then(|action| transition(current, action).ok())
+            .filter(|next| *next == status);
+        if transition_result.is_none() {
+            return Err(AppError::invalid_work_state(work_id, current, status));
+        }
+
+        Ok(current)
+    }
+
+    async fn update_work_status(
+        &self,
+        work_id: &str,
+        current: WorkStatus,
+        status: WorkStatus,
+    ) -> Result<(), AppError> {
+        let result =
+            sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(status)
+                .bind(Utc::now())
+                .bind(work_id)
+                .bind(current)
+                .execute(&self.pool)
+                .await?;
         if result.rows_affected() == 0 {
-            return Err(AppError::work_not_found(work_id));
+            return Err(AppError::concurrent_work_modification(work_id));
         }
 
         Ok(())
     }
 
     pub async fn set_run_status(&self, run_id: &str, status: RunStatus) -> Result<(), AppError> {
+        let current = self.validate_run_transition(run_id, status).await?;
+        self.update_run_status(run_id, current, status).await
+    }
+
+    #[cfg(test)]
+    async fn set_run_status_after_read<F>(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+        after_read: F,
+    ) -> Result<(), AppError>
+    where
+        F: FnOnce(),
+    {
+        let current = self.validate_run_transition(run_id, status).await?;
+        after_read();
+        self.update_run_status(run_id, current, status).await
+    }
+
+    async fn validate_run_transition(
+        &self,
+        run_id: &str,
+        status: RunStatus,
+    ) -> Result<RunStatus, AppError> {
+        let current = sqlx::query_scalar::<_, RunStatus>("SELECT status FROM runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::run_not_found(run_id))?;
+        let transition_result = run_action_for_target(status)
+            .and_then(|action| transition_run(current, action).ok())
+            .filter(|next| *next == status);
+        if transition_result.is_none() {
+            return Err(AppError::invalid_run_state(run_id, current, status));
+        }
+
+        Ok(current)
+    }
+
+    async fn update_run_status(
+        &self,
+        run_id: &str,
+        current: RunStatus,
+        status: RunStatus,
+    ) -> Result<(), AppError> {
         let now = Utc::now();
         let result = match status {
             RunStatus::Running => {
@@ -195,12 +340,13 @@ impl WorkRepository {
                     "UPDATE runs \
                      SET status = ?, updated_at = ?, started_at = COALESCE(started_at, ?), \
                          completed_at = NULL \
-                     WHERE id = ?",
+                     WHERE id = ? AND status = ?",
                 )
                 .bind(status)
                 .bind(now)
                 .bind(now)
                 .bind(run_id)
+                .bind(current)
                 .execute(&self.pool)
                 .await?
             }
@@ -211,29 +357,60 @@ impl WorkRepository {
                 sqlx::query(
                     "UPDATE runs \
                      SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?) \
-                     WHERE id = ?",
+                     WHERE id = ? AND status = ?",
                 )
                 .bind(status)
                 .bind(now)
                 .bind(now)
                 .bind(run_id)
+                .bind(current)
                 .execute(&self.pool)
                 .await?
             }
             RunStatus::Queued | RunStatus::Waiting => {
-                sqlx::query("UPDATE runs SET status = ?, updated_at = ? WHERE id = ?")
-                    .bind(status)
-                    .bind(now)
-                    .bind(run_id)
-                    .execute(&self.pool)
-                    .await?
+                sqlx::query(
+                    "UPDATE runs SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                )
+                .bind(status)
+                .bind(now)
+                .bind(run_id)
+                .bind(current)
+                .execute(&self.pool)
+                .await?
             }
         };
         if result.rows_affected() == 0 {
-            return Err(AppError::run_not_found(run_id));
+            return Err(AppError::concurrent_run_modification(run_id));
         }
 
         Ok(())
+    }
+}
+
+fn work_action_for_target(status: WorkStatus) -> Option<WorkAction> {
+    match status {
+        WorkStatus::Draft => None,
+        WorkStatus::Queued => Some(WorkAction::Queue),
+        WorkStatus::Running => Some(WorkAction::Start),
+        WorkStatus::Waiting => Some(WorkAction::Wait),
+        WorkStatus::Idle => Some(WorkAction::Idle),
+        WorkStatus::Completed => Some(WorkAction::Complete),
+        WorkStatus::Failed => Some(WorkAction::Fail),
+        WorkStatus::Stopped => Some(WorkAction::Stop),
+        WorkStatus::Interrupted => Some(WorkAction::Interrupt),
+        WorkStatus::Archived => Some(WorkAction::Archive),
+    }
+}
+
+fn run_action_for_target(status: RunStatus) -> Option<RunAction> {
+    match status {
+        RunStatus::Queued => None,
+        RunStatus::Running => Some(RunAction::Start),
+        RunStatus::Waiting => Some(RunAction::Wait),
+        RunStatus::Completed => Some(RunAction::Complete),
+        RunStatus::Failed => Some(RunAction::Fail),
+        RunStatus::Stopped => Some(RunAction::Stop),
+        RunStatus::Interrupted => Some(RunAction::Interrupt),
     }
 }
 
@@ -318,5 +495,239 @@ impl TryFrom<EventRow> for WorkEventEnvelope {
             occurred_at: row.occurred_at,
             payload,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Barrier, mpsc},
+        time::Duration,
+    };
+
+    use chrono::Utc;
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
+
+    use crate::{
+        domain::work::{CreateWorkInput, PermissionMode, RunStatus, WorkStatus},
+        storage::sqlite::Database,
+    };
+
+    use super::WorkRepository;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detail_read_keeps_one_snapshot_during_concurrent_run_and_event_inserts() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("snapshot.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Snapshot".into(),
+                goal: "Read consistently".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+            })
+            .await
+            .unwrap();
+
+        let writer = repository.clone();
+        let work_id = work.summary.id.clone();
+        let (start_writer, writer_started) = oneshot::channel();
+        let (writer_finished, wait_for_writer) = mpsc::sync_channel(0);
+        let writer_task = tokio::spawn(async move {
+            writer_started.await.unwrap();
+            let run = writer
+                .insert_run(&work_id, "concurrent-model")
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO events \
+                 (id, work_id, run_id, sequence, version, occurred_at, payload) \
+                 VALUES (?, ?, ?, 1, 1, ?, ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&work_id)
+            .bind(&run.id)
+            .bind(Utc::now())
+            .bind(r#"{"type":"assistantDelta","text":"concurrent"}"#)
+            .execute(&writer.pool)
+            .await
+            .unwrap();
+            writer_finished.send(()).unwrap();
+            run
+        });
+
+        let detail = repository
+            .get_after_work_loaded(&work.summary.id, move || {
+                start_writer.send(()).unwrap();
+                wait_for_writer
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("concurrent writer did not finish");
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let inserted_run = writer_task.await.unwrap();
+
+        assert!(detail.runs.is_empty());
+        assert!(detail.events.is_empty());
+        let refreshed = repository.get(&work.summary.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.runs, vec![inserted_run]);
+        assert_eq!(refreshed.events.len(), 1);
+        assert_eq!(refreshed.events[0].run_id, refreshed.runs[0].id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_run_transitions_use_compare_and_swap() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("status-cas.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "CAS".into(),
+                goal: "Allow one transition".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+            })
+            .await
+            .unwrap();
+        let run = repository
+            .insert_run(&work.summary.id, "model")
+            .await
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let running_repository = repository.clone();
+        let running_id = run.id.clone();
+        let running_barrier = Arc::clone(&barrier);
+        let running = tokio::spawn(async move {
+            running_repository
+                .set_run_status_after_read(&running_id, RunStatus::Running, move || {
+                    running_barrier.wait();
+                })
+                .await
+        });
+        let stopped_repository = repository.clone();
+        let stopped_id = run.id.clone();
+        let stopped_barrier = Arc::clone(&barrier);
+        let stopped = tokio::spawn(async move {
+            stopped_repository
+                .set_run_status_after_read(&stopped_id, RunStatus::Stopped, move || {
+                    stopped_barrier.wait();
+                })
+                .await
+        });
+
+        let running_result = running.await.unwrap();
+        let stopped_result = stopped.await.unwrap();
+        let running_succeeded = running_result.is_ok();
+        let stopped_succeeded = stopped_result.is_ok();
+        assert_eq!(
+            usize::from(running_succeeded) + usize::from(stopped_succeeded),
+            1
+        );
+        let error = running_result
+            .err()
+            .or_else(|| stopped_result.err())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "concurrent_modification",
+                "message": "Run was modified concurrently",
+                "details": { "runId": run.id }
+            })
+        );
+
+        let persisted = repository
+            .get(&work.summary.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .runs[0]
+            .clone();
+        let expected = if running_succeeded {
+            RunStatus::Running
+        } else {
+            RunStatus::Stopped
+        };
+        assert_eq!(persisted.status, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_work_transitions_use_compare_and_swap() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("work-status-cas.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Work CAS".into(),
+                goal: "Allow one transition".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+            })
+            .await
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let queued_repository = repository.clone();
+        let queued_id = work.summary.id.clone();
+        let queued_barrier = Arc::clone(&barrier);
+        let queued = tokio::spawn(async move {
+            queued_repository
+                .set_work_status_after_read(&queued_id, WorkStatus::Queued, move || {
+                    queued_barrier.wait();
+                })
+                .await
+        });
+        let archived_repository = repository.clone();
+        let archived_id = work.summary.id.clone();
+        let archived_barrier = Arc::clone(&barrier);
+        let archived = tokio::spawn(async move {
+            archived_repository
+                .set_work_status_after_read(&archived_id, WorkStatus::Archived, move || {
+                    archived_barrier.wait();
+                })
+                .await
+        });
+
+        let queued_result = queued.await.unwrap();
+        let archived_result = archived.await.unwrap();
+        let queued_succeeded = queued_result.is_ok();
+        let archived_succeeded = archived_result.is_ok();
+        assert_eq!(
+            usize::from(queued_succeeded) + usize::from(archived_succeeded),
+            1
+        );
+        let error = queued_result
+            .err()
+            .or_else(|| archived_result.err())
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "concurrent_modification",
+                "message": "Work was modified concurrently",
+                "details": { "workId": work.summary.id }
+            })
+        );
+
+        let persisted = repository.get(&work.summary.id).await.unwrap().unwrap();
+        let expected = if queued_succeeded {
+            WorkStatus::Queued
+        } else {
+            WorkStatus::Archived
+        };
+        assert_eq!(persisted.summary.status, expected);
     }
 }

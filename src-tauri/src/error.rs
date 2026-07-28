@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Serialize, Serializer};
 use serde_json::{Value, json};
 
+use crate::domain::work::{RunStatus, WorkStatus};
+
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("invalid input for {field}: {message}")]
@@ -13,6 +15,26 @@ pub enum AppError {
 
     #[error("run not found: {run_id}")]
     RunNotFound { run_id: String },
+
+    #[error("invalid Work status transition for {work_id}: {from:?} -> {to:?}")]
+    InvalidWorkState {
+        work_id: String,
+        from: WorkStatus,
+        to: WorkStatus,
+    },
+
+    #[error("invalid Run status transition for {run_id}: {from:?} -> {to:?}")]
+    InvalidRunState {
+        run_id: String,
+        from: RunStatus,
+        to: RunStatus,
+    },
+
+    #[error("Run was modified concurrently: {run_id}")]
+    ConcurrentRunModification { run_id: String },
+
+    #[error("Work was modified concurrently: {work_id}")]
+    ConcurrentWorkModification { work_id: String },
 
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
@@ -58,6 +80,38 @@ impl AppError {
         }
     }
 
+    pub fn invalid_work_state(
+        work_id: impl Into<String>,
+        from: WorkStatus,
+        to: WorkStatus,
+    ) -> Self {
+        Self::InvalidWorkState {
+            work_id: work_id.into(),
+            from,
+            to,
+        }
+    }
+
+    pub fn invalid_run_state(run_id: impl Into<String>, from: RunStatus, to: RunStatus) -> Self {
+        Self::InvalidRunState {
+            run_id: run_id.into(),
+            from,
+            to,
+        }
+    }
+
+    pub fn concurrent_run_modification(run_id: impl Into<String>) -> Self {
+        Self::ConcurrentRunModification {
+            run_id: run_id.into(),
+        }
+    }
+
+    pub fn concurrent_work_modification(work_id: impl Into<String>) -> Self {
+        Self::ConcurrentWorkModification {
+            work_id: work_id.into(),
+        }
+    }
+
     fn wire_parts(&self) -> (&'static str, &str, Option<Value>) {
         match self {
             Self::InvalidInput { field, message } => {
@@ -72,6 +126,26 @@ impl AppError {
                 "not_found",
                 "Run not found",
                 Some(json!({ "runId": run_id })),
+            ),
+            Self::InvalidWorkState { work_id, from, to } => (
+                "invalid_work_state",
+                "Work status transition is invalid",
+                Some(json!({ "workId": work_id, "from": from, "to": to })),
+            ),
+            Self::InvalidRunState { run_id, from, to } => (
+                "invalid_work_state",
+                "Run status transition is invalid",
+                Some(json!({ "runId": run_id, "from": from, "to": to })),
+            ),
+            Self::ConcurrentRunModification { run_id } => (
+                "concurrent_modification",
+                "Run was modified concurrently",
+                Some(json!({ "runId": run_id })),
+            ),
+            Self::ConcurrentWorkModification { work_id } => (
+                "concurrent_modification",
+                "Work was modified concurrently",
+                Some(json!({ "workId": work_id })),
             ),
             Self::Database(_) => ("database_error", "Database operation failed", None),
             Self::Migration(_) => ("migration_error", "Database migration failed", None),
@@ -121,6 +195,8 @@ impl Serialize for AppError {
 mod tests {
     use serde_json::json;
 
+    use crate::domain::work::{RunStatus, WorkStatus};
+
     use super::AppError;
 
     #[test]
@@ -147,6 +223,46 @@ mod tests {
                 "code": "database_error",
                 "message": "Database operation failed"
             })
+        );
+    }
+
+    #[test]
+    fn invalid_state_constructor_has_a_stable_serialized_shape() {
+        let error =
+            AppError::invalid_work_state("work-id", WorkStatus::Archived, WorkStatus::Running);
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "invalid_work_state",
+                "message": "Work status transition is invalid",
+                "details": {
+                    "workId": "work-id",
+                    "from": "archived",
+                    "to": "running"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn concurrent_modification_constructor_has_a_stable_serialized_shape() {
+        let error = AppError::concurrent_run_modification("run-id");
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "concurrent_modification",
+                "message": "Run was modified concurrently",
+                "details": { "runId": "run-id" }
+            })
+        );
+
+        let invalid_run =
+            AppError::invalid_run_state("run-id", RunStatus::Completed, RunStatus::Running);
+        assert_eq!(
+            serde_json::to_value(invalid_run).unwrap()["code"],
+            "invalid_work_state"
         );
     }
 }
