@@ -28,8 +28,8 @@ async fn insert_work_with_permission_mode(
 async fn insert_run(database: &Database, id: &str, work_id: &str) {
     sqlx::query(
         "INSERT INTO runs \
-         (id, work_id, model_label, status, created_at, updated_at) \
-         VALUES (?, ?, 'test-model', 'queued', ?, ?)",
+         (id, work_id, engine_kind, model_label, status, created_at, updated_at) \
+         VALUES (?, ?, 'test-engine', 'test-model', 'queued', ?, ?)",
     )
     .bind(id)
     .bind(work_id)
@@ -87,6 +87,19 @@ async fn migration_creates_foundation_tables() {
     for expected in ["works", "runs", "messages", "events", "settings"] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+}
+
+#[tokio::test]
+async fn runs_persist_engine_execution_identity() {
+    let database = Database::open_in_memory().await.unwrap();
+
+    let columns = sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('runs')")
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+
+    assert!(columns.contains(&"engine_kind".to_string()));
+    assert!(columns.contains(&"engine_session_id".to_string()));
 }
 
 #[tokio::test]
@@ -208,8 +221,8 @@ async fn invalid_work_and_run_statuses_are_rejected() {
     insert_work(&database, "work-1").await;
     let invalid_run = sqlx::query(
         "INSERT INTO runs \
-         (id, work_id, model_label, status, created_at, updated_at) \
-         VALUES ('invalid-run', 'work-1', 'test-model', 'invalid', ?, ?)",
+         (id, work_id, engine_kind, model_label, status, created_at, updated_at) \
+         VALUES ('invalid-run', 'work-1', 'test-engine', 'test-model', 'invalid', ?, ?)",
     )
     .bind("2026-01-01T00:00:00Z")
     .bind("2026-01-01T00:00:00Z")

@@ -21,6 +21,8 @@ CREATE TABLE works (
 CREATE TABLE runs (
     id TEXT PRIMARY KEY NOT NULL,
     work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+    engine_kind TEXT NOT NULL,
+    engine_session_id TEXT,
     model_label TEXT NOT NULL,
     status TEXT NOT NULL CHECK (
         status IN (

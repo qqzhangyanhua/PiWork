@@ -9,7 +9,20 @@ use super::{EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSes
 #[derive(Clone)]
 pub struct FakeEngineAdapter {
     delay: Duration,
-    active: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    active: Arc<Mutex<HashMap<String, ActiveRun>>>,
+}
+
+struct ActiveRun {
+    generation: Uuid,
+    cancel: oneshot::Sender<()>,
+    completion: oneshot::Receiver<FakeTaskOutcome>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FakeTaskOutcome {
+    Completed,
+    Aborted,
+    ChannelClosed,
 }
 
 impl FakeEngineAdapter {
@@ -34,12 +47,21 @@ impl EngineAdapter for FakeEngineAdapter {
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         let (abort_sender, abort_receiver) = oneshot::channel();
+        let (completion_sender, completion_receiver) = oneshot::channel();
         let run_id = context.run_id.clone();
+        let generation = Uuid::new_v4();
         let mut active = self.active.lock().await;
         if active.contains_key(&run_id) {
             return Err(EngineError::Start("run is already active".into()));
         }
-        active.insert(run_id.clone(), abort_sender);
+        active.insert(
+            run_id.clone(),
+            ActiveRun {
+                generation,
+                cancel: abort_sender,
+                completion: completion_receiver,
+            },
+        );
         drop(active);
 
         let session = EngineSessionRef {
@@ -50,21 +72,40 @@ impl EngineAdapter for FakeEngineAdapter {
         let active = Arc::clone(&self.active);
         tokio::spawn(async move {
             let result = emit_run(context, prompt, sink, delay, abort_receiver).await;
-            active.lock().await.remove(&run_id);
-            result
+            let outcome = match result {
+                Ok(()) => FakeTaskOutcome::Completed,
+                Err(EngineError::Aborted) => FakeTaskOutcome::Aborted,
+                Err(EngineError::ChannelClosed) | Err(EngineError::Start(_)) => {
+                    FakeTaskOutcome::ChannelClosed
+                }
+            };
+            let _ = completion_sender.send(outcome);
+            let mut active = active.lock().await;
+            if active
+                .get(&run_id)
+                .is_some_and(|entry| entry.generation == generation)
+            {
+                active.remove(&run_id);
+            }
         });
 
         Ok(session)
     }
 
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {
-        let sender = self
+        let active = self
             .active
             .lock()
             .await
             .remove(run_id)
             .ok_or(EngineError::Aborted)?;
-        sender.send(()).map_err(|_| EngineError::Aborted)
+        let _ = active.cancel.send(());
+        match active.completion.await.map_err(|_| EngineError::Aborted)? {
+            FakeTaskOutcome::Aborted => Ok(()),
+            FakeTaskOutcome::Completed | FakeTaskOutcome::ChannelClosed => {
+                Err(EngineError::Aborted)
+            }
+        }
     }
 }
 
@@ -77,7 +118,7 @@ async fn emit_run(
 ) -> Result<(), EngineError> {
     let events = [
         EngineEvent::RunStarted {
-            model_label: "fake".into(),
+            model_label: "Fake model".into(),
         },
         EngineEvent::AssistantDelta {
             text: format!("Working on: {prompt}"),
@@ -106,10 +147,12 @@ async fn emit_run(
 
     for event in events {
         tokio::select! {
+            biased;
             _ = &mut abort => return Err(EngineError::Aborted),
             _ = tokio::time::sleep(delay) => {}
         }
         tokio::select! {
+            biased;
             _ = &mut abort => return Err(EngineError::Aborted),
             result = sink.send(event) => result.map_err(|_| EngineError::ChannelClosed)?,
         }
@@ -157,5 +200,33 @@ mod tests {
                 "run_completed",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn abort_waits_for_stop_and_old_cleanup_cannot_remove_a_restarted_run() {
+        let engine = FakeEngineAdapter::new(Duration::from_millis(40));
+        let context = EngineRunContext::test("work-1", "run-1");
+        let (first_sender, mut first_receiver) = mpsc::channel(16);
+        engine
+            .start(context.clone(), "First".into(), first_sender)
+            .await
+            .unwrap();
+        assert_eq!(first_receiver.recv().await.unwrap().kind(), "run_started");
+
+        engine.abort("run-1").await.unwrap();
+        assert!(first_receiver.is_closed());
+        while first_receiver.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        assert!(first_receiver.try_recv().is_err());
+
+        let (second_sender, _second_receiver) = mpsc::channel(16);
+        engine
+            .start(context, "Second".into(), second_sender)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.abort("run-1").await.unwrap();
+
+        assert!(engine.abort("unknown-run").await.is_err());
     }
 }

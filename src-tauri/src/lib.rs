@@ -28,6 +28,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 repository.clone(),
                 engine,
                 publisher,
+                "Fake model",
             ));
             let service = Arc::new(work::service::WorkService::with_supervisor(
                 repository, supervisor,

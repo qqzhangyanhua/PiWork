@@ -39,6 +39,9 @@ pub enum AppError {
     #[error("Work already has an active Run: {work_id}")]
     WorkAlreadyRunning { work_id: String },
 
+    #[error("Work engine lifecycle is faulted: {work_id}")]
+    EngineFaulted { work_id: String },
+
     #[error("engine operation failed: {message}")]
     Engine { message: String },
 
@@ -127,6 +130,12 @@ impl AppError {
         }
     }
 
+    pub fn engine_faulted(work_id: impl Into<String>) -> Self {
+        Self::EngineFaulted {
+            work_id: work_id.into(),
+        }
+    }
+
     pub fn engine(message: impl Into<String>) -> Self {
         Self::Engine {
             message: message.into(),
@@ -177,6 +186,11 @@ impl AppError {
             Self::WorkAlreadyRunning { work_id } => (
                 "work_already_running",
                 "Work already has an active Run",
+                Some(json!({ "workId": work_id })),
+            ),
+            Self::EngineFaulted { work_id } => (
+                "engine_faulted",
+                "Work engine lifecycle is faulted",
                 Some(json!({ "workId": work_id })),
             ),
             Self::Engine { .. } => ("engine_error", "Engine operation failed", None),

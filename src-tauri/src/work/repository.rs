@@ -141,7 +141,8 @@ impl WorkRepository {
         row: WorkRow,
     ) -> Result<WorkDetail, AppError> {
         let runs = sqlx::query_as::<_, RunRow>(
-            "SELECT id, work_id, model_label, status, created_at, started_at, completed_at \
+            "SELECT id, work_id, engine_kind, engine_session_id, model_label, status, \
+                    created_at, started_at, completed_at \
              FROM runs WHERE work_id = ? ORDER BY created_at ASC, id ASC",
         )
         .bind(id)
@@ -192,6 +193,8 @@ impl WorkRepository {
         let run = RunSummary {
             id: Uuid::new_v4().to_string(),
             work_id: work_id.to_owned(),
+            engine_kind: "manual".into(),
+            engine_session_id: None,
             model_label: model_label.to_owned(),
             status: RunStatus::Queued,
             created_at: now,
@@ -210,11 +213,13 @@ impl WorkRepository {
 
         sqlx::query(
             "INSERT INTO runs \
-             (id, work_id, model_label, status, created_at, updated_at, started_at, completed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
+             (id, work_id, engine_kind, engine_session_id, model_label, status, created_at, \
+              updated_at, started_at, completed_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL)",
         )
         .bind(&run.id)
         .bind(&run.work_id)
+        .bind(&run.engine_kind)
         .bind(&run.model_label)
         .bind(run.status)
         .bind(run.created_at)
@@ -230,6 +235,7 @@ impl WorkRepository {
         &self,
         work_id: &str,
         prompt: &str,
+        engine_kind: &str,
         model_label: &str,
     ) -> Result<RunSummary, AppError> {
         let prompt = prompt.trim();
@@ -258,6 +264,8 @@ impl WorkRepository {
         let run = RunSummary {
             id: Uuid::new_v4().to_string(),
             work_id: work_id.to_owned(),
+            engine_kind: engine_kind.to_owned(),
+            engine_session_id: None,
             model_label: model_label.to_owned(),
             status: RunStatus::Running,
             created_at: now,
@@ -278,11 +286,13 @@ impl WorkRepository {
         }
         sqlx::query(
             "INSERT INTO runs \
-             (id, work_id, model_label, status, created_at, updated_at, started_at, completed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+             (id, work_id, engine_kind, engine_session_id, model_label, status, created_at, \
+              updated_at, started_at, completed_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL)",
         )
         .bind(&run.id)
         .bind(&run.work_id)
+        .bind(&run.engine_kind)
         .bind(&run.model_label)
         .bind(run.status)
         .bind(run.created_at)
@@ -332,6 +342,20 @@ impl WorkRepository {
                 .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or_else(|| AppError::work_not_found(&envelope.work_id))?;
+        if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
+            return Err(AppError::invalid_run_state(
+                &envelope.run_id,
+                run.status,
+                RunStatus::Running,
+            ));
+        }
+        if !matches!(work_status, WorkStatus::Running | WorkStatus::Waiting) {
+            return Err(AppError::invalid_work_state(
+                &envelope.work_id,
+                work_status,
+                WorkStatus::Running,
+            ));
+        }
         let current_sequence = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT MAX(sequence) FROM events WHERE run_id = ?",
         )
@@ -441,23 +465,128 @@ impl WorkRepository {
         .collect()
     }
 
-    pub async fn fail_run(&self, run_id: &str) -> Result<(), AppError> {
+    pub async fn attach_engine_session(
+        &self,
+        run_id: &str,
+        engine_kind: &str,
+        session_id: &str,
+    ) -> Result<RunSummary, AppError> {
+        let mut transaction = self.pool.begin().await?;
+        let mut run = sqlx::query_as::<_, RunRow>(
+            "SELECT id, work_id, engine_kind, engine_session_id, model_label, status, \
+                    created_at, started_at, completed_at FROM runs WHERE id = ?",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AppError::run_not_found(run_id))?;
+        if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
+            return Err(AppError::invalid_run_state(
+                run_id,
+                run.status,
+                RunStatus::Running,
+            ));
+        }
+        if run.engine_kind != engine_kind {
+            return Err(AppError::invalid_input(
+                "engineKind",
+                "engine session kind does not match the Run",
+            ));
+        }
+        let updated = sqlx::query(
+            "UPDATE runs SET engine_session_id = ?, updated_at = ? \
+             WHERE id = ? AND status IN ('running', 'waiting') AND engine_session_id IS NULL",
+        )
+        .bind(session_id)
+        .bind(Utc::now())
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() == 0 {
+            return Err(AppError::concurrent_run_modification(run_id));
+        }
+        transaction.commit().await?;
+        run.engine_session_id = Some(session_id.to_owned());
+        Ok(run.into())
+    }
+
+    pub async fn finalize_run_failure(
+        &self,
+        run_id: &str,
+        work_id: &str,
+        reason: &str,
+    ) -> Result<WorkEventEnvelope, AppError> {
         let mut transaction = self.pool.begin().await?;
         let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
             .bind(run_id)
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or_else(|| AppError::run_not_found(run_id))?;
+        if run.work_id != work_id {
+            return Err(AppError::run_not_found(run_id));
+        }
         let work_status =
             sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
-                .bind(&run.work_id)
-                .fetch_one(&mut *transaction)
-                .await?;
+                .bind(work_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| AppError::work_not_found(work_id))?;
+        if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
+            return Err(AppError::invalid_run_state(
+                run_id,
+                run.status,
+                RunStatus::Failed,
+            ));
+        }
+        if !matches!(work_status, WorkStatus::Running | WorkStatus::Waiting) {
+            return Err(AppError::invalid_work_state(
+                work_id,
+                work_status,
+                WorkStatus::Failed,
+            ));
+        }
         let next_run = transition_run(run.status, RunAction::Fail)
             .map_err(|_| AppError::invalid_run_state(run_id, run.status, RunStatus::Failed))?;
-        let next_work = transition(work_status, WorkAction::Fail).map_err(|_| {
-            AppError::invalid_work_state(&run.work_id, work_status, WorkStatus::Failed)
-        })?;
+        let next_work = transition(work_status, WorkAction::Fail)
+            .map_err(|_| AppError::invalid_work_state(work_id, work_status, WorkStatus::Failed))?;
+        let current_sequence = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM events WHERE run_id = ?",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *transaction)
+        .await?
+        .unwrap_or(0);
+        let next_sequence = current_sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= i64::from(u32::MAX))
+            .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
+        let envelope = WorkEventEnvelope {
+            version: 1,
+            work_id: work_id.to_owned(),
+            run_id: run_id.to_owned(),
+            sequence: u32::try_from(next_sequence)
+                .map_err(|error| AppError::Database(sqlx::Error::Decode(Box::new(error))))?,
+            occurred_at: Utc::now(),
+            payload: WorkEventPayload::RunFailed {
+                message: reason.to_owned(),
+            },
+        };
+        let payload = serde_json::to_string(&envelope.payload)
+            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
+        sqlx::query(
+            "INSERT INTO events \
+             (id, work_id, run_id, sequence, version, occurred_at, payload) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(work_id)
+        .bind(run_id)
+        .bind(next_sequence)
+        .bind(i64::from(envelope.version))
+        .bind(envelope.occurred_at)
+        .bind(payload)
+        .execute(&mut *transaction)
+        .await?;
         let now = Utc::now();
         let run_update = sqlx::query(
             "UPDATE runs SET status = ?, updated_at = ?, completed_at = ? \
@@ -477,15 +606,15 @@ impl WorkRepository {
             sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
                 .bind(next_work)
                 .bind(now)
-                .bind(&run.work_id)
+                .bind(work_id)
                 .bind(work_status)
                 .execute(&mut *transaction)
                 .await?;
         if work_update.rows_affected() == 0 {
-            return Err(AppError::concurrent_work_modification(&run.work_id));
+            return Err(AppError::concurrent_work_modification(work_id));
         }
         transaction.commit().await?;
-        Ok(())
+        Ok(envelope)
     }
 
     pub async fn set_work_status(&self, work_id: &str, status: WorkStatus) -> Result<(), AppError> {
@@ -707,6 +836,8 @@ impl From<WorkRow> for WorkSummary {
 struct RunRow {
     id: String,
     work_id: String,
+    engine_kind: String,
+    engine_session_id: Option<String>,
     model_label: String,
     status: RunStatus,
     created_at: DateTime<Utc>,
@@ -725,6 +856,8 @@ impl From<RunRow> for RunSummary {
         Self {
             id: row.id,
             work_id: row.work_id,
+            engine_kind: row.engine_kind,
+            engine_session_id: row.engine_session_id,
             model_label: row.model_label,
             status: row.status,
             created_at: row.created_at,

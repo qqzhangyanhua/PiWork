@@ -76,6 +76,8 @@ pub struct RunSummary {
     pub id: String,
     // Canonical UUID string of the owning Work.
     pub work_id: String,
+    pub engine_kind: String,
+    pub engine_session_id: Option<String>,
     pub model_label: String,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
@@ -169,6 +171,8 @@ mod tests {
         let run = RunSummary {
             id: "10000000-0000-0000-0000-000000000000".into(),
             work_id: "20000000-0000-0000-0000-000000000000".into(),
+            engine_kind: "test-engine".into(),
+            engine_session_id: Some("session-1".into()),
             model_label: "test-model".into(),
             status: RunStatus::Queued,
             created_at: timestamp,
