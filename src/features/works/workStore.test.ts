@@ -12,10 +12,12 @@ import { createWorkStore } from "./workStore";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 };
 
 const work: WorkSummary = {
@@ -376,5 +378,198 @@ describe("createWorkStore", () => {
       updatedAt: queuedRun.createdAt,
     });
     expect(store.getState().timelines.w1).toBeUndefined();
+  });
+
+  it("does not leak loading after create invalidates a deferred selection", async () => {
+    const selectionResult = deferred<WorkDetail>();
+    const createdWork: WorkSummary = { ...work, id: "w2" };
+    const createdDetail: WorkDetail = {
+      summary: createdWork,
+      runs: [],
+      events: [],
+    };
+    let detailCalls = 0;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      createWork: async () => createdDetail,
+      listWorks: async () => [createdWork],
+      getWork: () => {
+        detailCalls += 1;
+        return detailCalls === 1
+          ? selectionResult.promise
+          : Promise.resolve(createdDetail);
+      },
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    store.getState().selectWork("w1");
+    await store.getState().createWork({
+      title: createdWork.title,
+      goal: createdWork.goal,
+      rootPath: createdWork.rootPath,
+      permissionMode: createdWork.permissionMode,
+    });
+    expect(store.getState().loading).toBe(true);
+
+    selectionResult.resolve({ summary: work, runs: [], events: [] });
+    await Promise.resolve();
+    await store.getState().hydrate();
+
+    expect(store.getState().selectedWorkId).toBe("w2");
+    expect(store.getState().loading).toBe(false);
+  });
+
+  it("ignores an old hydrate error after a newer selection succeeds", async () => {
+    const hydrateResult = deferred<WorkDetail>();
+    const secondWork: WorkSummary = { ...work, id: "w2" };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: (workId) =>
+        workId === "w1"
+          ? hydrateResult.promise
+          : Promise.resolve({ summary: secondWork, runs: [], events: [] }),
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+    await Promise.resolve();
+
+    store.getState().selectWork("w2");
+    await Promise.resolve();
+    hydrateResult.reject({ code: "stale", message: "stale hydrate" });
+    await hydration;
+
+    expect(store.getState().selectedWorkId).toBe("w2");
+    expect(store.getState().error).toBeNull();
+    expect(store.getState().loading).toBe(false);
+  });
+
+  it("keeps loading until concurrent selection and start operations finish", async () => {
+    const selectionResult = deferred<WorkDetail>();
+    const startResult = deferred<RunSummary>();
+    const client: PiWorkClient = {
+      ...unusedClient,
+      getWork: () => selectionResult.promise,
+      startWork: () => startResult.promise,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    store.getState().selectWork("w1");
+    const starting = store.getState().startWork("w1", "go");
+    startResult.resolve(run);
+    await starting;
+
+    expect(store.getState().loading).toBe(true);
+
+    selectionResult.resolve({ summary: work, runs: [], events: [] });
+    await Promise.resolve();
+    expect(store.getState().loading).toBe(false);
+  });
+
+  it("does not let a late start response overwrite a terminal event", async () => {
+    const startResult = deferred<RunSummary>();
+    const client: PiWorkClient = {
+      ...unusedClient,
+      startWork: () => startResult.promise,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    const starting = store.getState().startWork("w1", "go");
+    store.getState().applyEvent(
+      event(1, {
+        type: "runCompleted",
+        summary: "finished first",
+        artifacts: [],
+        validation: [],
+        limitations: [],
+      }),
+    );
+    startResult.resolve(run);
+    await starting;
+
+    expect(store.getState().works.w1).toMatchObject({
+      status: "completed",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+  });
+
+  it("does not let a late event from an old run change the current run", () => {
+    const store = createWorkStore(unusedClient);
+    store.getState().upsertWork(work);
+
+    store
+      .getState()
+      .applyEvent(event(1, { type: "runStarted", modelLabel: "old" }));
+    store.getState().applyEvent({
+      ...event(1, { type: "runStarted", modelLabel: "new" }),
+      runId: "r2",
+      occurredAt: "2026-07-28T09:00:02.000Z",
+    });
+    store.getState().applyEvent({
+      ...event(2, {
+        type: "runCompleted",
+        summary: "new run done",
+        artifacts: [],
+        validation: [],
+        limitations: [],
+      }),
+      runId: "r2",
+      occurredAt: "2026-07-28T09:00:03.000Z",
+    });
+    store.getState().applyEvent({
+      ...event(2, { type: "runFailed", message: "old run was late" }),
+      occurredAt: "2026-07-28T09:00:04.000Z",
+    });
+
+    expect(store.getState().works.w1).toMatchObject({
+      status: "completed",
+      updatedAt: "2026-07-28T09:00:03.000Z",
+    });
+  });
+
+  it("keeps live run order stable before and after detail hydration", async () => {
+    const detailResult = deferred<WorkDetail>();
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: () => detailResult.promise,
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+    await Promise.resolve();
+
+    store.getState().applyEvent({
+      ...event(1, { type: "runStarted", modelLabel: "second" }),
+      runId: "r2",
+      occurredAt: "2026-07-28T09:00:02.000Z",
+    });
+    store
+      .getState()
+      .applyEvent(event(1, { type: "runStarted", modelLabel: "first" }));
+    const beforeHydration = store
+      .getState()
+      .timelines.w1?.map(({ runId }) => runId);
+    expect(beforeHydration).toEqual(["r1", "r2"]);
+
+    detailResult.resolve({
+      summary: work,
+      runs: [
+        { ...run, createdAt: "2026-07-28T09:00:03.000Z" },
+        {
+          ...run,
+          id: "r2",
+          createdAt: "2026-07-28T09:00:00.000Z",
+        },
+      ],
+      events: [],
+    });
+    await hydration;
+
+    expect(store.getState().timelines.w1?.map(({ runId }) => runId)).toEqual(
+      beforeHydration,
+    );
   });
 });

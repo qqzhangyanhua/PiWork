@@ -17,10 +17,12 @@ const event: WorkEventEnvelope = {
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 };
 
 const makeClient = (
@@ -49,6 +51,16 @@ function ErrorSubscriber() {
   useWorkEvents();
   const message = useWorkStore((state) => state.error?.message ?? "none");
   return <output>{message}</output>;
+}
+
+function Listener() {
+  useWorkEvents();
+  return null;
+}
+
+function TimelineProbe() {
+  const count = useWorkStore((state) => state.timelines.w1?.length ?? 0);
+  return <output>{count}</output>;
 }
 
 describe("useWorkEvents", () => {
@@ -98,6 +110,31 @@ describe("useWorkEvents", () => {
     await act(async () => listenResult.resolve(unlisten));
 
     await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1));
+  });
+
+  it("ignores a saved handler after disposal while listen is unresolved", async () => {
+    const listenResult = deferred<() => void>();
+    const unlisten = vi.fn();
+    let handler: ((workEvent: WorkEventEnvelope) => void) | undefined;
+    const client = makeClient((receivedHandler) => {
+      handler = receivedHandler;
+      return listenResult.promise;
+    });
+    const tree = (listening: boolean) => (
+      <WorkStoreProvider client={client}>
+        <TimelineProbe />
+        {listening ? <Listener /> : null}
+      </WorkStoreProvider>
+    );
+    const view = render(tree(true));
+    await waitFor(() => expect(handler).toBeDefined());
+
+    view.rerender(tree(false));
+    act(() => handler?.(event));
+
+    expect(screen.getByText("0")).toBeInTheDocument();
+    await act(async () => listenResult.resolve(unlisten));
+    expect(unlisten).toHaveBeenCalledTimes(1);
   });
 
   it("records a listen rejection without an unhandled rejection", async () => {

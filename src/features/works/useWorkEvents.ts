@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 
+import { normalizeAppError } from "../../domain/work";
 import { useWorkStoreContext } from "./WorkStoreProvider";
 
 export const useWorkEvents = () => {
@@ -10,6 +11,9 @@ export const useWorkEvents = () => {
     let unlisten: (() => void) | undefined;
     void client
       .listenToWorkEvents((event) => {
+        if (disposed) {
+          return;
+        }
         store.getState().applyEvent(event);
       })
       .then((stopListening) => {
@@ -22,10 +26,7 @@ export const useWorkEvents = () => {
       .catch((error: unknown) => {
         if (!disposed) {
           store.setState({
-            error: {
-              code: "event_subscription_failed",
-              message: error instanceof Error ? error.message : String(error),
-            },
+            error: normalizeAppError(error),
           });
         }
       });
