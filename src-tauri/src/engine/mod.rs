@@ -54,9 +54,14 @@ impl EngineRunContext {
         root_path: PathBuf,
         permission_mode: PermissionMode,
     ) -> Result<Self, EngineError> {
-        if !root_path.is_absolute() || !root_path.is_dir() {
+        if !root_path.is_absolute() {
+            return Err(EngineError::Start("workspace root must be absolute".into()));
+        }
+        let root_path = dunce::canonicalize(root_path)
+            .map_err(|_| EngineError::Start("workspace root could not be canonicalized".into()))?;
+        if !root_path.is_dir() {
             return Err(EngineError::Start(
-                "workspace root must be an absolute directory".into(),
+                "workspace root must be a directory".into(),
             ));
         }
 
@@ -123,5 +128,63 @@ impl EngineEvent {
 
     pub fn is_terminal(&self) -> bool {
         matches!(self, Self::RunCompleted { .. } | Self::RunFailed { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::domain::work::PermissionMode;
+
+    use super::EngineRunContext;
+
+    #[test]
+    fn run_context_stores_the_canonical_workspace_directory() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let child = temporary_directory.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let non_canonical = child.join("..").join("child");
+
+        let context = EngineRunContext::new(
+            "work-1".into(),
+            "run-1".into(),
+            non_canonical,
+            PermissionMode::Balanced,
+        )
+        .unwrap();
+
+        assert_eq!(context.root_path, dunce::canonicalize(child).unwrap());
+    }
+
+    #[test]
+    fn run_context_rejects_relative_missing_and_file_workspace_paths() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let missing = temporary_directory.path().join("missing");
+        let file = temporary_directory.path().join("file.txt");
+        std::fs::write(&file, "not a directory").unwrap();
+
+        for (root_path, expected_message) in [
+            (
+                std::path::PathBuf::from("relative-workspace"),
+                "engine failed to start: workspace root must be absolute",
+            ),
+            (
+                missing,
+                "engine failed to start: workspace root could not be canonicalized",
+            ),
+            (
+                file,
+                "engine failed to start: workspace root must be a directory",
+            ),
+        ] {
+            let error = EngineRunContext::new(
+                "work-1".into(),
+                "run-1".into(),
+                root_path,
+                PermissionMode::Balanced,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.to_string(), expected_message);
+        }
     }
 }
