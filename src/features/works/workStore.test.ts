@@ -11,7 +11,10 @@ import type {
   WorkSummary,
 } from "../../bindings";
 import { isWorkEventTimelineItem } from "../../domain/work";
-import { createWorkStore } from "./workStore";
+import {
+  createWorkStore,
+  didPersistStartInstruction,
+} from "./workStore";
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -468,6 +471,151 @@ describe("createWorkStore", () => {
       output.userMessage,
     ]);
     expect(timeline).toHaveLength(2);
+  });
+
+  it("reconciles a persisted failed start by new message ID and keeps the original error", async () => {
+    const originalError = {
+      code: "engine_start_failed",
+      message: "Raw engine startup failure",
+      details: { workId: "w1" },
+    };
+    const previousRun: RunSummary = {
+      ...run,
+      id: "r0",
+      status: "failed",
+      completedAt: "2026-07-28T09:00:00.500Z",
+    };
+    const previousMessage = userMessage({
+      id: "m0",
+      runId: "r0",
+      content: "Repeatable prompt",
+      createdAt: previousRun.createdAt,
+    });
+    const failedRun: RunSummary = {
+      ...run,
+      status: "failed",
+      completedAt: "2026-07-28T09:00:02.000Z",
+    };
+    const failedMessage = userMessage({ content: "Repeatable prompt" });
+    const initialDetail: WorkDetail = {
+      summary: { ...work, status: "failed" },
+      runs: [previousRun],
+      messages: [previousMessage],
+      events: [],
+    };
+    let detail = initialDetail;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [detail.summary],
+      getWork: async () => detail,
+      startWork: async () => {
+        detail = {
+          summary: {
+            ...work,
+            status: "failed",
+            updatedAt: failedRun.completedAt!,
+          },
+          runs: [previousRun, failedRun],
+          messages: [previousMessage, failedMessage],
+          events: [],
+        };
+        throw originalError;
+      },
+    };
+    const store = createWorkStore(client);
+    await store.getState().hydrate();
+
+    let rejected: unknown;
+    try {
+      await store.getState().startWork("w1", "Repeatable prompt");
+    } catch (error) {
+      rejected = error;
+    }
+
+    expect(didPersistStartInstruction(rejected)).toBe(true);
+    expect(store.getState().error).toEqual(originalError);
+    expect(
+      store.getState().timelines.w1?.filter((item) => "role" in item).map(({ id }) => id),
+    ).toEqual(["m0", "m1"]);
+
+    await store.getState().hydrate();
+    store.getState().applyEvent(event(1, { type: "runStarted", modelLabel: "gpt-5" }));
+    expect(
+      store.getState().timelines.w1?.filter((item) => "role" in item).map(({ id }) => id),
+    ).toEqual(["m0", "m1"]);
+  });
+
+  it("does not let a late failed-start refresh change a newer selection intent", async () => {
+    const refresh = deferred<WorkDetail>();
+    const secondWork: WorkSummary = { ...work, id: "w2", title: "Second" };
+    const secondDetail: WorkDetail = {
+      summary: secondWork,
+      runs: [],
+      messages: [],
+      events: [],
+    };
+    const failedDetail: WorkDetail = {
+      summary: { ...work, status: "failed", updatedAt: run.createdAt },
+      runs: [{ ...run, status: "failed", completedAt: run.createdAt }],
+      messages: [userMessage({ content: "Persisted before failure" })],
+      events: [],
+    };
+    let firstWorkReads = 0;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: (workId) => {
+        if (workId === "w2") return Promise.resolve(secondDetail);
+        firstWorkReads += 1;
+        return firstWorkReads === 1
+          ? Promise.resolve({ summary: work, runs: [], messages: [], events: [] })
+          : refresh.promise;
+      },
+      startWork: async () => {
+        throw { code: "engine_start_failed", message: "original start error" };
+      },
+    };
+    const store = createWorkStore(client);
+    await store.getState().hydrate();
+    store.getState().upsertWork(secondWork);
+
+    const starting = store.getState().startWork("w1", "Persisted before failure");
+    await Promise.resolve();
+    store.getState().selectWork("w2");
+    await Promise.resolve();
+    refresh.resolve(failedDetail);
+    await expect(starting).rejects.toSatisfy(didPersistStartInstruction);
+
+    expect(store.getState().selectedWorkId).toBe("w2");
+    expect(store.getState().timelines.w1).toContainEqual(failedDetail.messages[0]);
+  });
+
+  it("keeps the original start error when failed-start refresh also fails", async () => {
+    const originalError = {
+      code: "engine_start_failed",
+      message: "original start error",
+    };
+    let refreshCalls = 0;
+    const client: PiWorkClient = {
+      ...unusedClient,
+      getWork: async () => {
+        refreshCalls += 1;
+        throw { code: "database_error", message: "refresh error" };
+      },
+      startWork: async () => {
+        throw originalError;
+      },
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    await expect(store.getState().startWork("w1", "Try again")).rejects.toBe(
+      originalError,
+    );
+
+    expect(store.getState().error).toEqual(originalError);
+    expect(store.getState().timelines.w1).toBeUndefined();
+    expect(refreshCalls).toBe(1);
   });
 
   it("hydrates two Run prompts in chronological order without engine prompt echoes", async () => {

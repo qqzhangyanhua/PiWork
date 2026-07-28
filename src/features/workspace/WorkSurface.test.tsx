@@ -140,6 +140,59 @@ describe("WorkSurface", () => {
     await waitFor(() => expect(composer).toHaveValue(""));
   });
 
+  it("启动已持久化后拒绝时刷新权威消息、清空输入且保留产品错误", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const detail = seededDetail();
+    const instruction = "故障前已持久化的指令";
+    const failedRun: RunSummary = {
+      id: "run-1",
+      workId: "work-1",
+      engineKind: "fake",
+      engineSessionId: null,
+      modelLabel: "Fake model",
+      status: "failed",
+      createdAt: "2026-07-28T08:00:10.000Z",
+      startedAt: "2026-07-28T08:00:10.000Z",
+      completedAt: "2026-07-28T08:00:11.000Z",
+    };
+    client.seed(detail);
+    client.startWork.mockImplementationOnce(async () => {
+      detail.runs.push(failedRun);
+      detail.messages.push({
+        id: "message-1",
+        workId: "work-1",
+        runId: "run-1",
+        role: "user",
+        content: instruction,
+        createdAt: failedRun.createdAt,
+      });
+      detail.summary.status = "failed";
+      detail.summary.updatedAt = failedRun.completedAt!;
+      throw {
+        code: "engine_start_failed",
+        message: "Raw engine startup failure",
+        details: { workId: "work-1" },
+      };
+    });
+    render(<WorkSurface client={client} />);
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    await user.type(composer, instruction);
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("无法启动 Run，请重试。")).toBeInTheDocument();
+    await waitFor(() => expect(composer).toHaveValue(""));
+    expect(screen.getAllByText(instruction)).toHaveLength(1);
+    expect(screen.queryByText(/Raw engine startup failure/)).not.toBeInTheDocument();
+
+    client.emit(event(1, {
+      type: "runFailed",
+      message: "Engine failed during startup",
+    }));
+    expect(screen.getAllByText(instruction)).toHaveLength(1);
+  });
+
   it("启动拒绝时显示产品错误且不产生未处理 rejection", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
@@ -160,6 +213,7 @@ describe("WorkSurface", () => {
     expect(screen.queryByText(/work_already_running/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开诊断" }));
     expect(screen.getByText(/work_already_running/)).toBeInTheDocument();
+    expect(client.getWork).toHaveBeenCalledTimes(2);
     expect(composer).toHaveValue("开始");
   });
 

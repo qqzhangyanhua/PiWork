@@ -41,6 +41,21 @@ type InternalWorkState = WorkState & {
   setSubscriptionError(error: AppError | null): void;
 };
 
+const persistedStartInstruction = Symbol("persistedStartInstruction");
+
+class PersistedStartInstructionError extends Error {
+  readonly [persistedStartInstruction] = true;
+
+  constructor(readonly cause: unknown) {
+    super("Start failed after the instruction was persisted");
+    this.name = "PersistedStartInstructionError";
+  }
+}
+
+export const didPersistStartInstruction = (
+  error: unknown,
+): boolean => error instanceof PersistedStartInstructionError;
+
 const statusForEvent = (
   currentStatus: WorkSummary["status"],
   event: WorkEventEnvelope,
@@ -478,6 +493,14 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       },
       startWork: async (workId, prompt) => {
         const operation = beginOperation();
+        const knownUserMessageIds = new Set(
+          (get().timelines[workId] ?? [])
+            .filter(
+              (item): item is MessageSummary =>
+                !isWorkEventTimelineItem(item) && item.role === "user",
+            )
+            .map(({ id }) => id),
+        );
         try {
           const output = await client.startWork(workId, prompt);
           set((state) => reduceWork(state, { type: "startResponse", output }));
@@ -485,6 +508,21 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           return output;
         } catch (error) {
           failOperation(operation, error);
+          let instructionPersisted = false;
+          try {
+            const detail = await client.getWork(workId);
+            instructionPersisted = detail.messages.some(
+              (message) =>
+                message.role === "user" &&
+                !knownUserMessageIds.has(message.id),
+            );
+            set((state) => reduceWork(state, { type: "detail", detail }));
+          } catch {
+            // The original start failure remains the product error and retry signal.
+          }
+          if (instructionPersisted) {
+            throw new PersistedStartInstructionError(error);
+          }
           throw error;
         } finally {
           endOperation();

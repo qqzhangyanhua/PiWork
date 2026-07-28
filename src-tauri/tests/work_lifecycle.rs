@@ -5,7 +5,7 @@ use piwork_lib::{
     app_state::AppState,
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
-        work::{CreateWorkInput, MessageRole, PermissionMode, RunStatus, WorkStatus},
+        work::{CreateWorkInput, MessageRole, PermissionMode, RunStatus, WorkDetail, WorkStatus},
     },
     engine::{
         EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef,
@@ -29,6 +29,10 @@ struct StartCountingEngine {
     start_count: std::sync::atomic::AtomicUsize,
 }
 
+struct PreReturnEventEngine {
+    abort_calls: std::sync::atomic::AtomicUsize,
+}
+
 impl StartCountingEngine {
     fn new() -> Self {
         Self {
@@ -38,6 +42,18 @@ impl StartCountingEngine {
 
     fn start_count(&self) -> usize {
         self.start_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl PreReturnEventEngine {
+    fn new() -> Self {
+        Self {
+            abort_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn abort_calls(&self) -> usize {
+        self.abort_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -60,6 +76,33 @@ impl EngineAdapter for StartCountingEngine {
 
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
         Err(EngineError::NotRunning)
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for PreReturnEventEngine {
+    fn kind(&self) -> &'static str {
+        "pre-return-event"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _prompt: String,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        sink.send(EngineEvent::RunStarted {
+            model_label: "Pre-return model".into(),
+        })
+        .await
+        .map_err(|_| EngineError::ChannelClosed)?;
+        std::future::pending().await
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        self.abort_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -90,6 +133,27 @@ impl TestHarness {
             .await
             .unwrap()
     }
+}
+
+fn assert_authoritative_prompt(detail: &WorkDetail, prompt: &str, expected_run_status: RunStatus) {
+    let matching_messages = detail
+        .messages
+        .iter()
+        .filter(|message| message.content == prompt)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_messages.len(),
+        1,
+        "expected exactly one authoritative user message for {prompt:?}"
+    );
+    let message = matching_messages[0];
+    assert_eq!(message.role, MessageRole::User);
+    let run = detail
+        .runs
+        .iter()
+        .find(|run| run.id == message.run_id)
+        .expect("authoritative user message must reference its persisted Run");
+    assert_eq!(run.status, expected_run_status);
 }
 
 struct PersistAssertingPublisher {
@@ -644,6 +708,37 @@ async fn cancelling_the_start_caller_does_not_cancel_engine_startup() {
 }
 
 #[tokio::test]
+async fn context_failure_keeps_the_authoritative_prompt_and_failed_run() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Lose workspace before context").await;
+    std::fs::remove_dir(&harness.workspace_path).unwrap();
+    let engine = Arc::new(StartCountingEngine::new());
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(publisher),
+        "Context model",
+    );
+
+    let error = supervisor
+        .start(&work.summary.id, "Context prompt")
+        .await
+        .unwrap_err();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(serde_json::to_value(error).unwrap()["code"], "engine_error");
+    assert_eq!(engine.start_count(), 0);
+    assert_eq!(detail.summary.status, WorkStatus::Failed);
+    assert_authoritative_prompt(&detail, "Context prompt", RunStatus::Failed);
+}
+
+#[tokio::test]
 async fn supervisor_times_out_and_terminates_an_engine_start_that_never_returns() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Timeout engine start").await;
@@ -678,9 +773,42 @@ async fn supervisor_times_out_and_terminates_an_engine_start_that_never_returns(
     );
     assert_eq!(detail.summary.status, WorkStatus::Failed);
     assert_eq!(detail.runs[0].status, RunStatus::Failed);
+    assert_authoritative_prompt(&detail, "Build it", RunStatus::Failed);
     assert_eq!(engine.abort_calls(), 1);
     assert_eq!(engine.dropped_starts(), 1);
     wait_for_no_controlled_producers(&engine).await;
+}
+
+#[tokio::test]
+async fn consumer_failure_before_start_returns_keeps_the_authoritative_prompt() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Fail consumer during startup").await;
+    let engine = Arc::new(PreReturnEventEngine::new());
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(PanickingPublisher::new()),
+        "Pre-return model",
+    );
+
+    let error = supervisor
+        .start(&work.summary.id, "Consumer prompt")
+        .await
+        .unwrap_err();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        serde_json::to_value(error).unwrap()["code"],
+        "engine_start_failed"
+    );
+    assert_eq!(engine.abort_calls(), 1);
+    assert_eq!(detail.summary.status, WorkStatus::Failed);
+    assert_authoritative_prompt(&detail, "Consumer prompt", RunStatus::Failed);
 }
 
 struct FloodingStartEngine;
@@ -800,6 +928,7 @@ async fn partial_engine_start_failure_aborts_once_before_clearing_active() {
     );
     assert_eq!(after_first.summary.status, WorkStatus::Failed);
     assert_eq!(after_first.runs[0].status, RunStatus::Failed);
+    assert_authoritative_prompt(&after_first, "Build it", RunStatus::Failed);
     assert!(after_first.runs[0].completed_at.is_some());
     assert_eq!(engine.abort_calls(), 1);
     assert_eq!(engine.dropped_starts(), 1);
@@ -815,6 +944,14 @@ async fn partial_engine_start_failure_aborts_once_before_clearing_active() {
     );
     assert_eq!(engine.abort_calls(), 2);
     wait_for_no_controlled_producers(&engine).await;
+    let after_second = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_authoritative_prompt(&after_second, "Build it", RunStatus::Failed);
+    assert_authoritative_prompt(&after_second, "Try again", RunStatus::Failed);
 }
 
 #[tokio::test]
@@ -844,6 +981,12 @@ async fn start_failure_without_an_engine_resource_is_confirmed_safe() {
         .start(&work.summary.id, "Retry")
         .await
         .unwrap_err();
+    let after_retry = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(
         serde_json::to_value(first).unwrap()["code"],
@@ -851,11 +994,14 @@ async fn start_failure_without_an_engine_resource_is_confirmed_safe() {
     );
     assert_eq!(after_first.summary.status, WorkStatus::Failed);
     assert_eq!(after_first.runs[0].status, RunStatus::Failed);
+    assert_authoritative_prompt(&after_first, "First", RunStatus::Failed);
     assert_eq!(
         serde_json::to_value(retry).unwrap()["code"],
         "engine_start_failed"
     );
     assert_eq!(engine.abort_calls(), 2);
+    assert_authoritative_prompt(&after_retry, "First", RunStatus::Failed);
+    assert_authoritative_prompt(&after_retry, "Retry", RunStatus::Failed);
 }
 
 #[tokio::test]
@@ -897,6 +1043,7 @@ async fn abort_panic_becomes_unconfirmed_without_stranding_waiters() {
     );
     assert_eq!(detail.summary.status, WorkStatus::Failed);
     assert_eq!(detail.runs[0].status, RunStatus::Failed);
+    assert_authoritative_prompt(&detail, "First", RunStatus::Failed);
     assert_eq!(
         serde_json::to_value(retry).unwrap()["code"],
         "engine_faulted"
@@ -1415,6 +1562,12 @@ async fn attach_failure_aborts_idle_engine_once_and_keeps_the_active_slot_faulte
         .execute(&harness.pool)
         .await
         .unwrap();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert_eq!(
         serde_json::to_value(error).unwrap(),
@@ -1424,6 +1577,8 @@ async fn attach_failure_aborts_idle_engine_once_and_keeps_the_active_slot_faulte
             "details": { "workId": work.summary.id }
         })
     );
+    assert_eq!(detail.summary.status, WorkStatus::Running);
+    assert_authoritative_prompt(&detail, "Build it", RunStatus::Running);
 }
 
 #[tokio::test]

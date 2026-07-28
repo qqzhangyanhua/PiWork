@@ -3,6 +3,7 @@ import { type Ref, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkSummary } from "../../bindings";
+import { didPersistStartInstruction } from "../works/workStore";
 import { useWorkStore } from "../works/WorkStoreProvider";
 
 const queueStatuses: WorkSummary["status"][] = ["queued", "running", "waiting"];
@@ -44,7 +45,10 @@ export function WorkComposer({ promptRef, work }: WorkComposerProps) {
     try {
       await startWork(work.id, instruction);
       setPrompt("");
-    } catch {
+    } catch (error) {
+      if (didPersistStartInstruction(error)) {
+        setPrompt("");
+      }
       // The store normalizes and exposes the error in the product UI.
     } finally {
       submittingRef.current = false;
