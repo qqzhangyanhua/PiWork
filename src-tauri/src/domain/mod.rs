@@ -10,8 +10,8 @@ mod tests {
     use super::{
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{
-            CreateWorkInput, PermissionMode, RunStatus, RunSummary, WorkDetail, WorkStatus,
-            WorkSummary,
+            CreateWorkInput, MessageRole, MessageSummary, PermissionMode, RunStatus, RunSummary,
+            StartWorkOutput, WorkDetail, WorkStatus, WorkSummary,
         },
     };
 
@@ -19,10 +19,13 @@ mod tests {
     fn export_bindings() {
         WorkStatus::export().unwrap();
         RunStatus::export().unwrap();
+        MessageRole::export().unwrap();
         PermissionMode::export().unwrap();
         WorkSummary::export().unwrap();
         WorkDetail::export().unwrap();
         RunSummary::export().unwrap();
+        MessageSummary::export().unwrap();
+        StartWorkOutput::export().unwrap();
         CreateWorkInput::export().unwrap();
         WorkEventEnvelope::export().unwrap();
         WorkEventPayload::export().unwrap();
@@ -31,10 +34,13 @@ mod tests {
         for type_name in [
             "WorkStatus",
             "RunStatus",
+            "MessageRole",
             "PermissionMode",
             "WorkSummary",
             "WorkDetail",
             "RunSummary",
+            "MessageSummary",
+            "StartWorkOutput",
             "CreateWorkInput",
             "WorkEventEnvelope",
             "WorkEventPayload",

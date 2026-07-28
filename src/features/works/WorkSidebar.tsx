@@ -1,8 +1,9 @@
 import { Clock3, Plus, X } from "lucide-react";
-import { type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
+import { appErrorMessageKey } from "../../domain/appError";
 import { useWorkStore } from "./WorkStoreProvider";
 
 type WorkSidebarProps = {
@@ -30,6 +31,8 @@ export function WorkSidebar({ createOpen, onCreateRequest, onCreateClose }: Work
   const [goal, setGoal] = useState("");
   const [rootPath, setRootPath] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const goalRef = useRef<HTMLTextAreaElement>(null);
 
@@ -45,16 +48,24 @@ export function WorkSidebar({ createOpen, onCreateRequest, onCreateClose }: Work
     goalRef.current?.focus();
   }, [createOpen]);
 
+  useLayoutEffect(() => {
+    if (createOpen && submitted && !submitting && error) {
+      goalRef.current?.focus();
+    }
+  }, [createOpen, error, submitted, submitting]);
+
   const sortedWorks = Object.values(works).sort((left, right) =>
     right.updatedAt.localeCompare(left.updatedAt),
   );
   const close = () => {
+    if (submittingRef.current) return;
     onCreateClose();
     setSubmitted(false);
   };
   const handleDialogKeyDown = (event: KeyboardEvent<HTMLDialogElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      if (submittingRef.current) return;
       close();
       return;
     }
@@ -76,10 +87,13 @@ export function WorkSidebar({ createOpen, onCreateRequest, onCreateClose }: Work
   };
   const submit = async (submitEvent: FormEvent) => {
     submitEvent.preventDefault();
+    if (submittingRef.current) return;
     setSubmitted(true);
     const trimmedGoal = goal.trim();
     const trimmedPath = rootPath.trim();
     if (!trimmedGoal || !trimmedPath) return;
+    submittingRef.current = true;
+    setSubmitting(true);
     const firstLine = trimmedGoal.split(/\r?\n/, 1)[0] ?? trimmedGoal;
     try {
       await createWork({
@@ -90,9 +104,13 @@ export function WorkSidebar({ createOpen, onCreateRequest, onCreateClose }: Work
       });
       setGoal("");
       setRootPath("");
+      submittingRef.current = false;
+      setSubmitting(false);
       close();
     } catch {
       // The store exposes the normalized error next to the form.
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
@@ -132,29 +150,31 @@ export function WorkSidebar({ createOpen, onCreateRequest, onCreateClose }: Work
             ref={dialogRef}
             className="create-dialog"
             aria-labelledby="create-work-title"
+            aria-busy={submitting}
             onCancel={(event) => {
               event.preventDefault();
+              if (submittingRef.current) return;
               close();
             }}
             onKeyDown={handleDialogKeyDown}
           >
             <header className="create-dialog__header">
               <h2 id="create-work-title">{t("work.new")}</h2>
-              <button className="icon-button" type="button" aria-label={t("common.close")} onClick={close}>
+              <button className="icon-button" type="button" aria-label={t("common.close")} onClick={close} disabled={submitting}>
                 <X aria-hidden="true" size={18} />
               </button>
             </header>
             <form onSubmit={submit} noValidate>
               <label htmlFor="work-goal">{t("create.goal")}</label>
-              <textarea ref={goalRef} id="work-goal" value={goal} onChange={(event) => setGoal(event.target.value)} />
+              <textarea ref={goalRef} id="work-goal" value={goal} onChange={(event) => setGoal(event.target.value)} disabled={submitting} />
               {submitted && !goal.trim() && <p className="field-error">{t("create.goalRequired")}</p>}
               <label htmlFor="work-root">{t("create.rootPath")}</label>
-              <input id="work-root" value={rootPath} onChange={(event) => setRootPath(event.target.value)} />
+              <input id="work-root" value={rootPath} onChange={(event) => setRootPath(event.target.value)} disabled={submitting} />
               {submitted && !rootPath.trim() && <p className="field-error">{t("create.rootRequired")}</p>}
-              {error && <p className="field-error" role="alert">{error.message}</p>}
+              {error && <p className="field-error" role="alert">{t(appErrorMessageKey(error))}</p>}
               <footer className="create-dialog__actions">
-                <button className="button" type="button" onClick={close}>{t("common.cancel")}</button>
-                <button className="button button--primary" type="submit">{t("common.create")}</button>
+                <button className="button" type="button" onClick={close} disabled={submitting}>{t("common.cancel")}</button>
+                <button className="button button--primary" type="submit" disabled={submitting}>{submitting ? t("common.creating") : t("common.create")}</button>
               </footer>
             </form>
           </dialog>

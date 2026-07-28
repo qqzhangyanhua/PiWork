@@ -6,8 +6,8 @@ use crate::{
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{
-            CreateWorkInput, PermissionMode, RunStatus, RunSummary, WorkDetail, WorkStatus,
-            WorkSummary,
+            CreateWorkInput, MessageRole, MessageSummary, PermissionMode, RunStatus, RunSummary,
+            StartWorkOutput, WorkDetail, WorkStatus, WorkSummary,
         },
     },
     error::AppError,
@@ -85,6 +85,7 @@ impl WorkRepository {
         Ok(WorkDetail {
             summary,
             runs: Vec::new(),
+            messages: Vec::new(),
             events: Vec::new(),
         })
     }
@@ -165,10 +166,26 @@ impl WorkRepository {
         .into_iter()
         .map(WorkEventEnvelope::try_from)
         .collect::<Result<Vec<_>, _>>()?;
+        let messages = sqlx::query_as::<_, MessageRow>(
+            "SELECT messages.id, messages.work_id, messages.run_id, messages.role, \
+                    messages.content, messages.created_at \
+             FROM messages \
+             INNER JOIN runs \
+                ON runs.id = messages.run_id AND runs.work_id = messages.work_id \
+             WHERE messages.work_id = ? \
+             ORDER BY messages.created_at ASC, messages.id ASC",
+        )
+        .bind(id)
+        .fetch_all(&mut *connection)
+        .await?
+        .into_iter()
+        .map(MessageSummary::from)
+        .collect();
 
         Ok(WorkDetail {
             summary: row.into(),
             runs,
+            messages,
             events,
         })
     }
@@ -273,7 +290,7 @@ impl WorkRepository {
         prompt: &str,
         engine_kind: &str,
         model_label: &str,
-    ) -> Result<RunSummary, AppError> {
+    ) -> Result<StartWorkOutput, AppError> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return Err(AppError::invalid_input(
@@ -308,6 +325,14 @@ impl WorkRepository {
             started_at: Some(now),
             completed_at: None,
         };
+        let user_message = MessageSummary {
+            id: Uuid::new_v4().to_string(),
+            work_id: work_id.to_owned(),
+            run_id: run.id.clone(),
+            role: MessageRole::User,
+            content: prompt.to_owned(),
+            created_at: now,
+        };
 
         let updated =
             sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
@@ -340,16 +365,16 @@ impl WorkRepository {
             "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
              VALUES (?, ?, ?, 'user', ?, ?)",
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(work_id)
-        .bind(&run.id)
-        .bind(prompt)
-        .bind(now)
+        .bind(&user_message.id)
+        .bind(&user_message.work_id)
+        .bind(&user_message.run_id)
+        .bind(&user_message.content)
+        .bind(user_message.created_at)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
 
-        Ok(run)
+        Ok(StartWorkOutput { run, user_message })
     }
 
     pub async fn append_event_and_transition(
@@ -885,6 +910,29 @@ struct RunRow {
 struct RunStateRow {
     work_id: String,
     status: RunStatus,
+}
+
+#[derive(FromRow)]
+struct MessageRow {
+    id: String,
+    work_id: String,
+    run_id: String,
+    role: MessageRole,
+    content: String,
+    created_at: DateTime<Utc>,
+}
+
+impl From<MessageRow> for MessageSummary {
+    fn from(row: MessageRow) -> Self {
+        Self {
+            id: row.id,
+            work_id: row.work_id,
+            run_id: row.run_id,
+            role: row.role,
+            content: row.content,
+            created_at: row.created_at,
+        }
+    }
 }
 
 impl From<RunRow> for RunSummary {

@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunSummary, WorkDetail, WorkEventEnvelope } from "../../bindings";
+import type { RunSummary, StartWorkOutput, WorkDetail, WorkEventEnvelope } from "../../bindings";
 import { i18n } from "../../i18n";
 import {
   createMockTauriClient,
@@ -32,6 +32,7 @@ const seededDetail = (status: WorkDetail["summary"]["status"] = "draft"): WorkDe
     updatedAt: "2026-07-28T08:00:00.000Z",
   },
   runs: [],
+  messages: [],
   events: [],
 });
 
@@ -105,7 +106,7 @@ describe("WorkSurface", () => {
   it("连续 Enter 只启动一个 Run", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
-    const pendingRun = deferred<RunSummary>();
+    const pendingRun = deferred<StartWorkOutput>();
     client.seed(seededDetail());
     client.startWork.mockImplementation(() => pendingRun.promise);
     render(<WorkSurface client={client} />);
@@ -116,15 +117,25 @@ describe("WorkSurface", () => {
 
     expect(client.startWork).toHaveBeenCalledTimes(1);
     pendingRun.resolve({
-      id: "run-1",
-      workId: "work-1",
-      engineKind: "fake",
-      engineSessionId: "session-1",
-      modelLabel: "Fake model",
-      status: "running",
-      createdAt: "2026-07-28T08:00:10.000Z",
-      startedAt: "2026-07-28T08:00:10.000Z",
-      completedAt: null,
+      run: {
+        id: "run-1",
+        workId: "work-1",
+        engineKind: "fake",
+        engineSessionId: "session-1",
+        modelLabel: "Fake model",
+        status: "running",
+        createdAt: "2026-07-28T08:00:10.000Z",
+        startedAt: "2026-07-28T08:00:10.000Z",
+        completedAt: null,
+      },
+      userMessage: {
+        id: "message-1",
+        workId: "work-1",
+        runId: "run-1",
+        role: "user",
+        content: "只执行一次",
+        createdAt: "2026-07-28T08:00:10.000Z",
+      },
     });
     await waitFor(() => expect(composer).toHaveValue(""));
   });
@@ -134,8 +145,9 @@ describe("WorkSurface", () => {
     const client = createMockTauriClient();
     client.seed(seededDetail());
     client.startWork.mockRejectedValueOnce({
-      code: "engine_unavailable",
-      message: "无法启动 Run",
+      code: "work_already_running",
+      message: "Raw Work already has an active Run",
+      details: { workId: "work-1" },
     });
     render(<WorkSurface client={client} />);
 
@@ -143,7 +155,11 @@ describe("WorkSurface", () => {
     await user.type(composer, "开始");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(await screen.findByText("无法启动 Run")).toBeInTheDocument();
+    expect(await screen.findByText("此 Work 已有正在运行的 Run。")).toBeInTheDocument();
+    expect(screen.queryByText(/Raw Work already/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/work_already_running/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "打开诊断" }));
+    expect(screen.getByText(/work_already_running/)).toBeInTheDocument();
     expect(composer).toHaveValue("开始");
   });
 
@@ -197,6 +213,70 @@ describe("WorkSurface", () => {
     expect(screen.queryByText(/"type"/)).not.toBeInTheDocument();
   });
 
+  it("重启 hydration 后独立渲染两个 Run 的持久用户指令且不依赖引擎复述", async () => {
+    const client = createMockTauriClient();
+    const detail = seededDetail("completed");
+    detail.runs = [
+      {
+        id: "run-1",
+        workId: "work-1",
+        engineKind: "fake",
+        engineSessionId: "session-1",
+        modelLabel: "Fake model",
+        status: "completed",
+        createdAt: "2026-07-28T08:00:01.000Z",
+        startedAt: "2026-07-28T08:00:01.000Z",
+        completedAt: "2026-07-28T08:00:02.000Z",
+      },
+      {
+        id: "run-2",
+        workId: "work-1",
+        engineKind: "fake",
+        engineSessionId: "session-2",
+        modelLabel: "Fake model",
+        status: "completed",
+        createdAt: "2026-07-28T08:00:03.000Z",
+        startedAt: "2026-07-28T08:00:03.000Z",
+        completedAt: "2026-07-28T08:00:04.000Z",
+      },
+    ];
+    detail.messages = [
+      {
+        id: "message-2",
+        workId: "work-1",
+        runId: "run-2",
+        role: "user",
+        content: "第二次用户指令",
+        createdAt: "2026-07-28T08:00:03.000Z",
+      },
+      {
+        id: "message-1",
+        workId: "work-1",
+        runId: "run-1",
+        role: "user",
+        content: "第一次用户指令",
+        createdAt: "2026-07-28T08:00:01.000Z",
+      },
+    ];
+    detail.events = [
+      event(1, { type: "runStarted", modelLabel: "Fake model" }),
+      {
+        ...event(1, { type: "runStarted", modelLabel: "Fake model" }),
+        runId: "run-2",
+        occurredAt: "2026-07-28T08:00:04.000Z",
+      },
+    ];
+    client.seed(detail);
+
+    render(<WorkSurface client={client} />);
+
+    const first = await screen.findByText("第一次用户指令");
+    const second = screen.getByText("第二次用户指令");
+    expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(first.closest("article")!).getByText("你")).toBeInTheDocument();
+    expect(screen.queryByText("引擎复述 prompt")).not.toBeInTheDocument();
+  });
+
   it("提供可访问的检查器标签页与真实空状态", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
@@ -233,12 +313,21 @@ describe("WorkSurface", () => {
     );
     render(<WorkSurface client={client} />);
     expect(screen.getByRole("status", { name: "正在加载 Work" })).toBeInTheDocument();
-    rejectList({ code: "db_unavailable", message: "数据库不可用", details: { path: "safe.db" } });
+    rejectList({
+      code: "database_error",
+      message: "Database operation failed",
+      details: { path: "C:\\Users\\private\\piwork.sqlite3", token: "secret-token" },
+    });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("数据库不可用");
+    expect(await screen.findByRole("alert")).toHaveTextContent("本地数据库暂时不可用，请重试。");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("Database operation failed");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("database_error");
     await user.click(screen.getByRole("button", { name: "打开诊断" }));
-    expect(screen.getByText(/db_unavailable/)).toBeInTheDocument();
-    expect(screen.getByText(/safe.db/)).toBeInTheDocument();
+    expect(screen.getByText(/database_error/)).toBeInTheDocument();
+    expect(screen.getByText(/Database operation failed/)).toBeInTheDocument();
+    expect(screen.queryByText(/private\\piwork/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/secret-token/)).not.toBeInTheDocument();
+    expect(screen.getByText(/\[redacted\]/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(client.listWorks).toHaveBeenCalledTimes(2));
   });
@@ -247,14 +336,15 @@ describe("WorkSurface", () => {
     const client = createMockTauriClient();
     client.seed(seededDetail());
     client.getWork.mockRejectedValueOnce({
-      code: "detail_unavailable",
-      message: "Work 详情不可用",
+      code: "database_error",
+      message: "Raw detail database failure",
     });
 
     render(<WorkSurface client={client} />);
 
     const errorPage = await screen.findByRole("alert");
-    expect(errorPage).toHaveTextContent("Work 详情不可用");
+    expect(errorPage).toHaveTextContent("本地数据库暂时不可用，请重试。");
+    expect(errorPage).not.toHaveTextContent("Raw detail database failure");
     expect(within(errorPage).getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(within(errorPage).getByRole("button", { name: "打开诊断" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "营收看板" })).not.toBeInTheDocument();
@@ -334,6 +424,105 @@ describe("WorkSurface", () => {
     await user.click(within(dialog).getByRole("button", { name: "创建" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument());
     expect(trigger).toHaveFocus();
+  });
+
+  it("创建 pending 时同步单飞、禁用控件且成功后关闭并归还焦点", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const pendingCreate = deferred<WorkDetail>();
+    client.createWork.mockImplementationOnce(() => pendingCreate.promise);
+    render(<WorkSurface client={client} />);
+    const sidebar = screen.getByRole("complementary", { name: "Work 导航" });
+    const trigger = within(sidebar).getByRole("button", { name: "新建 Work" });
+
+    await user.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
+    const goal = within(dialog).getByLabelText("目标");
+    const rootPath = within(dialog).getByLabelText("工作目录");
+    const create = within(dialog).getByRole("button", { name: "创建" });
+    const cancel = within(dialog).getByRole("button", { name: "取消" });
+    const close = within(dialog).getByRole("button", { name: "关闭" });
+    await user.type(goal, "只创建一次");
+    await user.type(rootPath, "D:\\workspace\\single-flight");
+
+    fireEvent.click(create);
+    fireEvent.click(create);
+    fireEvent.submit(create.closest("form")!);
+
+    expect(client.createWork).toHaveBeenCalledTimes(1);
+    expect(goal).toBeDisabled();
+    expect(rootPath).toBeDisabled();
+    expect(cancel).toBeDisabled();
+    expect(close).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "正在创建" })).toBeDisabled();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "新建 Work" })).toBeInTheDocument();
+
+    pendingCreate.resolve(seededDetail());
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument(),
+    );
+    expect(trigger).toHaveFocus();
+  });
+
+  it("创建失败后解除 pending、保留输入、显示本地化错误并聚焦目标", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const pendingCreate = deferred<WorkDetail>();
+    client.createWork.mockImplementationOnce(() => pendingCreate.promise);
+    render(<WorkSurface client={client} />);
+
+    await user.click(screen.getAllByRole("button", { name: "新建 Work" })[0]!);
+    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
+    const goal = within(dialog).getByLabelText("目标");
+    const rootPath = within(dialog).getByLabelText("工作目录");
+    await user.type(goal, "保留这条目标");
+    await user.type(rootPath, "D:\\workspace\\keep-input");
+    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+
+    pendingCreate.reject({
+      code: "database_error",
+      message: "raw database failure must stay hidden",
+    });
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "本地数据库暂时不可用，请重试。",
+    );
+    expect(dialog).not.toHaveTextContent("raw database failure must stay hidden");
+    expect(goal).toHaveValue("保留这条目标");
+    expect(rootPath).toHaveValue("D:\\workspace\\keep-input");
+    expect(goal).toBeEnabled();
+    expect(rootPath).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "创建" })).toBeEnabled();
+    expect(goal).toHaveFocus();
+  });
+
+  it.each([
+    ["zh-CN", "所选工作目录不存在或无法访问。"],
+    ["en", "The selected working directory does not exist or cannot be accessed."],
+  ] as const)("%s 创建不存在路径时只显示本地化产品错误", async (language, expected) => {
+    await i18n.changeLanguage(language);
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.createWork.mockRejectedValueOnce({
+      code: "path_resolution_error",
+      message: "Raw workspace path could not be resolved",
+      details: {
+        field: "rootPath",
+        path: "C:\\Users\\private\\missing-workspace",
+      },
+    });
+    render(<WorkSurface client={client} />);
+
+    await user.click(screen.getAllByRole("button", { name: language === "en" ? "New Work" : "新建 Work" })[0]!);
+    const dialog = screen.getByRole("dialog");
+    await user.type(within(dialog).getByLabelText(language === "en" ? "Goal" : "目标"), "Test path error");
+    await user.type(within(dialog).getByLabelText(language === "en" ? "Working directory" : "工作目录"), "C:\\missing");
+    await user.click(within(dialog).getByRole("button", { name: language === "en" ? "Create" : "创建" }));
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(expected);
+    expect(dialog).not.toHaveTextContent("Raw workspace path could not be resolved");
+    expect(dialog).not.toHaveTextContent("private\\missing-workspace");
   });
 
   it("中央空态创建成功后将焦点移入新工作台", async () => {

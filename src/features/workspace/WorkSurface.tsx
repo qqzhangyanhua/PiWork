@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PiWorkClient } from "../../app/tauriClient";
+import { appErrorMessageKey, formatAppErrorDiagnostics } from "../../domain/appError";
 import { WorkSidebar } from "../works/WorkSidebar";
 import { useWorkEvents } from "../works/useWorkEvents";
 import { WorkStoreProvider, useWorkStore } from "../works/WorkStoreProvider";
@@ -10,18 +11,6 @@ import { WorkHeader } from "./WorkHeader";
 import { WorkInspector } from "./WorkInspector";
 import { WorkTimeline } from "./WorkTimeline";
 import "../../styles/workspace.css";
-
-const formatDiagnostics = (
-  error: { code: string; message: string; details?: Record<string, unknown> },
-  fallback: string,
-) => {
-  if (!error.details) return `${error.code}\n${error.message}`;
-  try {
-    return `${error.code}\n${error.message}\n${JSON.stringify(error.details, null, 2)}`;
-  } catch {
-    return `${error.code}\n${error.message}\n${fallback}`;
-  }
-};
 
 function SurfaceContent() {
   const { t } = useTranslation();
@@ -55,6 +44,7 @@ function SurfaceContent() {
   const timeline = selectedWork ? timelines[selectedWork.id] ?? [] : [];
   const hasWorks = Object.keys(works).length > 0;
   const pageError = hydrationError ?? (!hasWorks ? error : null);
+  useEffect(() => setDiagnosticsOpen(false), [pageError]);
   const closeInspector = () => {
     setInspectorOpen(false);
     queueMicrotask(() => inspectorToggleRef.current?.focus());
@@ -84,9 +74,9 @@ function SurfaceContent() {
         <section className="surface-state surface-state--loading" role="status" aria-label={t("state.loading")}><div className="loading-line" /><div className="loading-line loading-line--short" /></section>
       ) : pageError ? (
         <section className="surface-state" role="alert">
-          <h1>{t("state.errorTitle")}</h1><p>{pageError.message}</p>
+          <h1>{t("state.errorTitle")}</h1><p>{t(appErrorMessageKey(pageError))}</p>
           <div className="surface-state__actions"><button className="button button--primary" type="button" onClick={() => void hydrate()}>{t("common.retry")}</button><button className="button" type="button" onClick={() => setDiagnosticsOpen((open) => !open)}>{t("diagnostics.open")}</button></div>
-          {diagnosticsOpen && <pre className="diagnostics">{formatDiagnostics(pageError, t("diagnostics.unavailable"))}</pre>}
+          {diagnosticsOpen && <pre className="diagnostics">{formatAppErrorDiagnostics(pageError, t("diagnostics.unavailable"))}</pre>}
         </section>
       ) : !selectedWork ? (
         <section className="surface-state surface-state--empty"><h1>{t("work.empty")}</h1><p>{t("state.emptyBody")}</p><button className="button button--primary" type="button" onClick={(event) => openCreate(event.currentTarget)}>{t("work.new")}</button></section>

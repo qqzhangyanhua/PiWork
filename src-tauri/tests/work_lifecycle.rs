@@ -5,7 +5,7 @@ use piwork_lib::{
     app_state::AppState,
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
-        work::{CreateWorkInput, PermissionMode, RunStatus, WorkStatus},
+        work::{CreateWorkInput, MessageRole, PermissionMode, RunStatus, WorkStatus},
     },
     engine::{
         EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef,
@@ -1094,6 +1094,101 @@ async fn completed_work_can_start_a_second_run_with_fresh_sequence_numbers() {
 }
 
 #[tokio::test]
+async fn begin_run_returns_the_authoritative_user_message_and_get_replays_it() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Persist prompt").await;
+    assert!(work.messages.is_empty());
+
+    let started = harness
+        .repository
+        .begin_run(
+            &work.summary.id,
+            "  Keep this user instruction  ",
+            "fake",
+            "Fake model",
+        )
+        .await
+        .unwrap();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(started.user_message.work_id, work.summary.id);
+    assert_eq!(started.user_message.run_id, started.run.id);
+    assert_eq!(started.user_message.role, MessageRole::User);
+    assert_eq!(started.user_message.content, "Keep this user instruction");
+    assert_eq!(detail.messages, vec![started.user_message]);
+}
+
+#[tokio::test]
+async fn two_run_prompts_survive_database_reopen_in_stable_order() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let database_path = temporary_directory.path().join("messages.sqlite3");
+    let workspace_path = temporary_directory.path().join("workspace");
+    std::fs::create_dir(&workspace_path).unwrap();
+    let database = Database::open(&database_path).await.unwrap();
+    let repository = WorkRepository::new(database.pool().clone());
+    let work = repository
+        .create(CreateWorkInput {
+            title: "Two prompts".into(),
+            goal: "Persist user instructions".into(),
+            root_path: workspace_path.to_string_lossy().into_owned(),
+            permission_mode: PermissionMode::Balanced,
+        })
+        .await
+        .unwrap();
+
+    let first = repository
+        .begin_run(&work.summary.id, "First prompt", "fake", "Fake model")
+        .await
+        .unwrap();
+    repository
+        .append_event_and_transition(&WorkEventEnvelope {
+            version: 1,
+            work_id: work.summary.id.clone(),
+            run_id: first.run.id.clone(),
+            sequence: 1,
+            occurred_at: chrono::Utc::now(),
+            payload: WorkEventPayload::RunCompleted {
+                summary: "First run finished without repeating the prompt".into(),
+                artifacts: Vec::new(),
+                validation: Vec::new(),
+                limitations: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+    let second = repository
+        .begin_run(&work.summary.id, "Second prompt", "fake", "Fake model")
+        .await
+        .unwrap();
+    drop(repository);
+    drop(database);
+
+    let reopened = Database::open(&database_path).await.unwrap();
+    let detail = WorkRepository::new(reopened.pool().clone())
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        detail
+            .messages
+            .iter()
+            .map(|message| (&message.run_id, message.content.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (&first.run.id, "First prompt"),
+            (&second.run.id, "Second prompt"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn engine_execution_identity_survives_database_reopen() {
     let temporary_directory = tempfile::tempdir().unwrap();
     let database_path = temporary_directory.path().join("identity.sqlite3");
@@ -1551,7 +1646,10 @@ async fn create_rejects_a_missing_workspace_path() {
         serde_json::json!({
             "code": "path_resolution_error",
             "message": "Workspace path could not be resolved",
-            "details": { "path": missing_path.to_string_lossy() }
+            "details": {
+                "field": "rootPath",
+                "path": missing_path.to_string_lossy()
+            }
         })
     );
 }

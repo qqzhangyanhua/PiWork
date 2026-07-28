@@ -235,18 +235,29 @@ describe("useWorkEvents", () => {
             updatedAt: "2026-07-28T09:00:00.000Z",
           },
           runs: [],
+          messages: [],
           events: [],
         }),
         startWork: async () => ({
-          id: "r1",
-          workId: "w1",
-          engineKind: "codex",
-          engineSessionId: null,
-          modelLabel: "gpt-5",
-          status: "running",
-          createdAt: "2026-07-28T09:00:01.000Z",
-          startedAt: "2026-07-28T09:00:01.000Z",
-          completedAt: null,
+          run: {
+            id: "r1",
+            workId: "w1",
+            engineKind: "codex",
+            engineSessionId: null,
+            modelLabel: "gpt-5",
+            status: "running",
+            createdAt: "2026-07-28T09:00:01.000Z",
+            startedAt: "2026-07-28T09:00:01.000Z",
+            completedAt: null,
+          },
+          userMessage: {
+            id: "m1",
+            workId: "w1",
+            runId: "r1",
+            role: "user",
+            content: "go",
+            createdAt: "2026-07-28T09:00:01.000Z",
+          },
         }),
       };
       render(
@@ -279,15 +290,25 @@ describe("useWorkEvents", () => {
         return starts === 1
           ? firstStart.promise
           : Promise.resolve({
-              id: "r2",
-              workId: "w1",
-              engineKind: "codex",
-              engineSessionId: null,
-              modelLabel: "gpt-5",
-              status: "running",
-              createdAt: "2026-07-28T09:00:02.000Z",
-              startedAt: "2026-07-28T09:00:02.000Z",
-              completedAt: null,
+              run: {
+                id: "r2",
+                workId: "w1",
+                engineKind: "codex",
+                engineSessionId: null,
+                modelLabel: "gpt-5",
+                status: "running",
+                createdAt: "2026-07-28T09:00:02.000Z",
+                startedAt: "2026-07-28T09:00:02.000Z",
+                completedAt: null,
+              },
+              userMessage: {
+                id: "m2",
+                workId: "w1",
+                runId: "r2",
+                role: "user",
+                content: "go",
+                createdAt: "2026-07-28T09:00:02.000Z",
+              },
             });
       },
     };

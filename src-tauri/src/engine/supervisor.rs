@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
-        work::RunSummary,
+        work::StartWorkOutput,
     },
     engine::{EngineAdapter, EngineEvent, EngineRunContext, EngineSessionRef},
     error::AppError,
@@ -185,7 +185,7 @@ impl EngineSupervisor {
         }
     }
 
-    pub async fn start(&self, work_id: &str, prompt: &str) -> Result<RunSummary, AppError> {
+    pub async fn start(&self, work_id: &str, prompt: &str) -> Result<StartWorkOutput, AppError> {
         let generation = Uuid::new_v4();
         {
             let mut active = self.active.lock().await;
@@ -257,7 +257,7 @@ async fn run_lifecycle(
     model_label: String,
     startup_timeout: Duration,
     abort_timeout: Duration,
-    result_sender: oneshot::Sender<Result<RunSummary, AppError>>,
+    result_sender: oneshot::Sender<Result<StartWorkOutput, AppError>>,
 ) {
     let work = match repository.get(&work_id).await {
         Ok(Some(work)) => work,
@@ -272,7 +272,7 @@ async fn run_lifecycle(
             return;
         }
     };
-    let run = match repository
+    let started = match repository
         .begin_run(&work_id, &prompt, engine.kind(), &model_label)
         .await
     {
@@ -283,6 +283,8 @@ async fn run_lifecycle(
             return;
         }
     };
+    let run = started.run;
+    let user_message = started.user_message;
     set_run_id(&active, &work_id, generation, &run.id).await;
 
     let context = match EngineRunContext::new(
@@ -418,7 +420,10 @@ async fn run_lifecycle(
     };
     set_running(&active, &work_id, generation, session).await;
     let _ = signal_sender.send(StartSignal::Ready);
-    let _ = result_sender.send(Ok(attached));
+    let _ = result_sender.send(Ok(StartWorkOutput {
+        run: attached,
+        user_message,
+    }));
 
     match consumer.await {
         Ok(ConsumerOutcome::Terminal) => {}

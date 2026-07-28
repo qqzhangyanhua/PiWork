@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::{
     app_state::AppState,
-    domain::work::{CreateWorkInput, RunSummary, WorkDetail, WorkSummary},
+    domain::work::{CreateWorkInput, StartWorkOutput, WorkDetail, WorkSummary},
     error::AppError,
 };
 
@@ -29,7 +29,7 @@ pub async fn start_work(
     state: State<'_, AppState>,
     work_id: String,
     prompt: String,
-) -> Result<RunSummary, AppError> {
+) -> Result<StartWorkOutput, AppError> {
     state.work_service().start_work(&work_id, &prompt).await
 }
 

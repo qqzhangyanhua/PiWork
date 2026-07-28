@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { PiWorkClient } from "../../app/tauriClient";
 import type {
   CreateWorkInput,
+  MessageSummary,
   RunSummary,
+  StartWorkOutput,
   WorkDetail,
   WorkEventEnvelope,
   WorkSummary,
 } from "../../bindings";
+import { isWorkEventTimelineItem } from "../../domain/work";
 import { createWorkStore } from "./workStore";
 
 const deferred = <T,>() => {
@@ -69,6 +72,18 @@ const run: RunSummary = {
   completedAt: null,
 };
 
+const userMessage = (
+  overrides: Partial<MessageSummary> = {},
+): MessageSummary => ({
+  id: "m1",
+  workId: "w1",
+  runId: "r1",
+  role: "user",
+  content: "Ship it",
+  createdAt: "2026-07-28T09:00:01.000Z",
+  ...overrides,
+});
+
 describe("createWorkStore", () => {
   it("queues trimmed instructions per Work without creating events", () => {
     const store = createWorkStore(unusedClient);
@@ -115,6 +130,7 @@ describe("createWorkStore", () => {
     const detail: WorkDetail = {
       summary: newest,
       runs: [run],
+      messages: [],
       events: [
         event(2, { type: "assistantDelta", text: "second" }),
         event(1, { type: "runStarted", modelLabel: "gpt-5" }),
@@ -131,7 +147,7 @@ describe("createWorkStore", () => {
 
     expect(store.getState().selectedWorkId).toBe("w1");
     expect(
-      store.getState().timelines.w1?.map(({ sequence }) => sequence),
+      store.getState().timelines.w1?.filter(isWorkEventTimelineItem).map(({ sequence }) => sequence),
     ).toEqual([1, 2]);
   });
 
@@ -148,6 +164,7 @@ describe("createWorkStore", () => {
       getWork: async () => ({
         summary: work,
         runs: [newerRun, run],
+        messages: [],
         events: [],
       }),
     };
@@ -184,7 +201,7 @@ describe("createWorkStore", () => {
       }),
       occurredAt: "2026-07-28T11:00:00.000Z",
     });
-    detailResult.resolve({ summary: staleSummary, runs: [run], events: [] });
+    detailResult.resolve({ summary: staleSummary, runs: [run], messages: [], events: [] });
     await hydration;
 
     expect(store.getState().works.w1).toMatchObject({
@@ -216,6 +233,7 @@ describe("createWorkStore", () => {
     detailResult.resolve({
       summary: work,
       runs: [run],
+      messages: [],
       events: [
         event(1, { type: "runStarted", modelLabel: "gpt-5" }),
         event(2, { type: "runFailed", message: "persisted failure" }),
@@ -224,7 +242,7 @@ describe("createWorkStore", () => {
     await hydration;
 
     expect(
-      store.getState().timelines.w1?.map(({ sequence }) => sequence),
+      store.getState().timelines.w1?.filter(isWorkEventTimelineItem).map(({ sequence }) => sequence),
     ).toEqual([1, 2, 3]);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
@@ -254,6 +272,7 @@ describe("createWorkStore", () => {
     secondResult.resolve({
       summary: secondWork,
       runs: [{ ...run, id: "r2", workId: "w2" }],
+      messages: [],
       events: [
         {
           ...event(1, { type: "runStarted", modelLabel: "gpt-5" }),
@@ -266,6 +285,7 @@ describe("createWorkStore", () => {
     firstResult.resolve({
       summary: work,
       runs: [run],
+      messages: [],
       events: [event(1, { type: "runStarted", modelLabel: "gpt-5" })],
     });
     await Promise.resolve();
@@ -299,6 +319,7 @@ describe("createWorkStore", () => {
     detailResult.resolve({
       summary: work,
       runs: [run],
+      messages: [],
       events: [
         event(1, { type: "runStarted", modelLabel: "gpt-5" }),
         event(2, { type: "runFailed", message: "persisted failure" }),
@@ -314,7 +335,7 @@ describe("createWorkStore", () => {
     await Promise.resolve();
 
     expect(
-      store.getState().timelines.w1?.map(({ sequence }) => sequence),
+      store.getState().timelines.w1?.filter(isWorkEventTimelineItem).map(({ sequence }) => sequence),
     ).toEqual([1, 2, 3]);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
@@ -341,6 +362,7 @@ describe("createWorkStore", () => {
     hydrateResult.resolve({
       summary: work,
       runs: [run],
+      messages: [],
       events: [event(1, { type: "runStarted", modelLabel: "gpt-5" })],
     });
     await hydration;
@@ -349,7 +371,7 @@ describe("createWorkStore", () => {
     expect(store.getState().timelines.w1).toBeUndefined();
     expect(store.getState().loading).toBe(true);
 
-    selectionResult.resolve({ summary: secondWork, runs: [], events: [] });
+    selectionResult.resolve({ summary: secondWork, runs: [], messages: [], events: [] });
     await Promise.resolve();
     expect(store.getState().loading).toBe(false);
   });
@@ -364,6 +386,7 @@ describe("createWorkStore", () => {
     const detail: WorkDetail = {
       summary: work,
       runs: [run],
+      messages: [],
       events: [event(1, { type: "runStarted", modelLabel: "gpt-5" })],
     };
     const received: CreateWorkInput[] = [];
@@ -389,18 +412,22 @@ describe("createWorkStore", () => {
     expect(store.getState().timelines.w1).toHaveLength(1);
   });
 
-  it("starts a work without inventing a timeline event", async () => {
+  it("starts a work and immediately adds the authoritative user message", async () => {
     const calls: Array<{ workId: string; prompt: string }> = [];
     const queuedRun: RunSummary = {
       ...run,
       status: "queued",
       startedAt: null,
     };
+    const output: StartWorkOutput = {
+      run: queuedRun,
+      userMessage: userMessage(),
+    };
     const client: PiWorkClient = {
       ...unusedClient,
       startWork: async (workId, prompt) => {
         calls.push({ workId, prompt });
-        return queuedRun;
+        return output;
       },
     };
     const store = createWorkStore(client);
@@ -409,12 +436,85 @@ describe("createWorkStore", () => {
     const result = await store.getState().startWork("w1", "Ship it");
 
     expect(calls).toEqual([{ workId: "w1", prompt: "Ship it" }]);
-    expect(result).toBe(queuedRun);
+    expect(result).toBe(output);
     expect(store.getState().works.w1).toMatchObject({
       status: "running",
       updatedAt: queuedRun.createdAt,
     });
-    expect(store.getState().timelines.w1).toBeUndefined();
+    expect(store.getState().timelines.w1).toEqual([output.userMessage]);
+  });
+
+  it("deduplicates the same authoritative message across live start and hydration", async () => {
+    const output: StartWorkOutput = { run, userMessage: userMessage() };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      startWork: async () => output,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [run],
+        messages: [output.userMessage],
+        events: [event(1, { type: "runStarted", modelLabel: "gpt-5" })],
+      }),
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    await store.getState().startWork("w1", "Ship it");
+    await store.getState().hydrate();
+
+    const timeline = store.getState().timelines.w1 ?? [];
+    expect(timeline.filter((item) => "role" in item)).toEqual([
+      output.userMessage,
+    ]);
+    expect(timeline).toHaveLength(2);
+  });
+
+  it("hydrates two Run prompts in chronological order without engine prompt echoes", async () => {
+    const first = userMessage({
+      id: "m-first",
+      content: "First persisted prompt",
+      createdAt: "2026-07-28T09:00:01.000Z",
+    });
+    const second = userMessage({
+      id: "m-second",
+      runId: "r2",
+      content: "Second persisted prompt",
+      createdAt: "2026-07-28T09:00:03.000Z",
+    });
+    const secondRun: RunSummary = {
+      ...run,
+      id: "r2",
+      createdAt: "2026-07-28T09:00:03.000Z",
+      startedAt: "2026-07-28T09:00:03.000Z",
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [run, secondRun],
+        messages: [second, first],
+        events: [
+          event(1, { type: "runStarted", modelLabel: "gpt-5" }),
+          {
+            ...event(1, { type: "runStarted", modelLabel: "gpt-5" }),
+            runId: "r2",
+            occurredAt: "2026-07-28T09:00:04.000Z",
+          },
+        ],
+      }),
+    };
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+
+    expect(
+      store
+        .getState()
+        .timelines.w1?.filter((item) => "role" in item)
+        .map((item) => ("content" in item ? item.content : null)),
+    ).toEqual(["First persisted prompt", "Second persisted prompt"]);
   });
 
   it("does not leak loading after create invalidates a deferred selection", async () => {
@@ -423,6 +523,7 @@ describe("createWorkStore", () => {
     const createdDetail: WorkDetail = {
       summary: createdWork,
       runs: [],
+      messages: [],
       events: [],
     };
     let detailCalls = 0;
@@ -449,7 +550,7 @@ describe("createWorkStore", () => {
     });
     expect(store.getState().loading).toBe(true);
 
-    selectionResult.resolve({ summary: work, runs: [], events: [] });
+    selectionResult.resolve({ summary: work, runs: [], messages: [], events: [] });
     await Promise.resolve();
     await store.getState().hydrate();
 
@@ -466,7 +567,7 @@ describe("createWorkStore", () => {
       getWork: (workId) =>
         workId === "w1"
           ? hydrateResult.promise
-          : Promise.resolve({ summary: secondWork, runs: [], events: [] }),
+          : Promise.resolve({ summary: secondWork, runs: [], messages: [], events: [] }),
     };
     const store = createWorkStore(client);
     const hydration = store.getState().hydrate();
@@ -484,7 +585,7 @@ describe("createWorkStore", () => {
 
   it("keeps loading until concurrent selection and start operations finish", async () => {
     const selectionResult = deferred<WorkDetail>();
-    const startResult = deferred<RunSummary>();
+    const startResult = deferred<StartWorkOutput>();
     const client: PiWorkClient = {
       ...unusedClient,
       getWork: () => selectionResult.promise,
@@ -495,18 +596,18 @@ describe("createWorkStore", () => {
 
     store.getState().selectWork("w1");
     const starting = store.getState().startWork("w1", "go");
-    startResult.resolve(run);
+    startResult.resolve({ run, userMessage: userMessage({ content: "go" }) });
     await starting;
 
     expect(store.getState().loading).toBe(true);
 
-    selectionResult.resolve({ summary: work, runs: [], events: [] });
+    selectionResult.resolve({ summary: work, runs: [], messages: [], events: [] });
     await Promise.resolve();
     expect(store.getState().loading).toBe(false);
   });
 
   it("does not let a late start response overwrite a terminal event", async () => {
-    const startResult = deferred<RunSummary>();
+    const startResult = deferred<StartWorkOutput>();
     const client: PiWorkClient = {
       ...unusedClient,
       startWork: () => startResult.promise,
@@ -524,7 +625,7 @@ describe("createWorkStore", () => {
         limitations: [],
       }),
     );
-    startResult.resolve(run);
+    startResult.resolve({ run, userMessage: userMessage({ content: "go" }) });
     await starting;
 
     expect(store.getState().works.w1).toMatchObject({
@@ -601,6 +702,7 @@ describe("createWorkStore", () => {
           createdAt: "2026-07-28T09:00:00.000Z",
         },
       ],
+      messages: [],
       events: [],
     });
     await hydration;
@@ -616,7 +718,7 @@ describe("createWorkStore", () => {
     const client: PiWorkClient = {
       ...unusedClient,
       createWork: () => createResult.promise,
-      getWork: async () => ({ summary: work, runs: [], events: [] }),
+      getWork: async () => ({ summary: work, runs: [], messages: [], events: [] }),
     };
     const store = createWorkStore(client);
     const creating = store.getState().createWork({
@@ -628,7 +730,7 @@ describe("createWorkStore", () => {
 
     store.getState().selectWork("w1");
     await Promise.resolve();
-    createResult.resolve({ summary: createdWork, runs: [], events: [] });
+    createResult.resolve({ summary: createdWork, runs: [], messages: [], events: [] });
     await creating;
 
     expect(store.getState().selectedWorkId).toBe("w1");
@@ -658,9 +760,9 @@ describe("createWorkStore", () => {
 
     const firstCreate = store.getState().createWork(input);
     const secondCreate = store.getState().createWork(input);
-    secondResult.resolve({ summary: secondWork, runs: [], events: [] });
+    secondResult.resolve({ summary: secondWork, runs: [], messages: [], events: [] });
     await secondCreate;
-    firstResult.resolve({ summary: firstWork, runs: [], events: [] });
+    firstResult.resolve({ summary: firstWork, runs: [], messages: [], events: [] });
     await firstCreate;
 
     expect(store.getState().selectedWorkId).toBe("second");
@@ -678,6 +780,7 @@ describe("createWorkStore", () => {
       createWork: async () => ({
         summary: createdWork,
         runs: [],
+        messages: [],
         events: [],
       }),
       getWork: () => selectionResult.promise,
@@ -695,6 +798,7 @@ describe("createWorkStore", () => {
     selectionResult.resolve({
       summary: work,
       runs: [run],
+      messages: [],
       events: [event(1, { type: "runStarted", modelLabel: "stale" })],
     });
     await Promise.resolve();
@@ -712,7 +816,7 @@ describe("createWorkStore", () => {
       ...unusedClient,
       listWorks: () => listResult.promise,
       createWork: () => createResult.promise,
-      getWork: async () => ({ summary: listedWork, runs: [], events: [] }),
+      getWork: async () => ({ summary: listedWork, runs: [], messages: [], events: [] }),
     };
     const store = createWorkStore(client);
     const hydration = store.getState().hydrate();
@@ -727,7 +831,7 @@ describe("createWorkStore", () => {
     await hydration;
     expect(store.getState().selectedWorkId).toBeNull();
 
-    createResult.resolve({ summary: createdWork, runs: [], events: [] });
+    createResult.resolve({ summary: createdWork, runs: [], messages: [], events: [] });
     await creating;
     expect(store.getState().selectedWorkId).toBe("created");
   });
@@ -741,6 +845,7 @@ describe("createWorkStore", () => {
       getWork: async (workId) => ({
         summary: workId === "w1" ? work : listedWork,
         runs: [],
+        messages: [],
         events: [],
       }),
     };
@@ -775,6 +880,7 @@ describe("createWorkStore", () => {
     selectionResult.resolve({
       summary: work,
       runs: [run],
+      messages: [],
       events: [event(1, { type: "runStarted", modelLabel: "selected" })],
     });
     await hydration;

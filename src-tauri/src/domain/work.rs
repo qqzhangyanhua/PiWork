@@ -42,6 +42,15 @@ pub enum RunStatus {
     Interrupted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, TS)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+#[ts(rename_all = "snake_case", export_to = binding_path!())]
+pub enum MessageRole {
+    User,
+    Assistant,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, TS)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
@@ -88,9 +97,41 @@ pub struct RunSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = binding_path!())]
+pub struct MessageSummary {
+    // Canonical UUID string.
+    pub id: String,
+    // Canonical UUID string of the owning Work.
+    pub work_id: String,
+    // Canonical UUID string of the owning Run.
+    pub run_id: String,
+    pub role: MessageRole,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = binding_path!())]
+pub struct StartWorkOutput {
+    pub run: RunSummary,
+    pub user_message: MessageSummary,
+}
+
+impl std::ops::Deref for StartWorkOutput {
+    type Target = RunSummary;
+
+    fn deref(&self) -> &Self::Target {
+        &self.run
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = binding_path!())]
 pub struct WorkDetail {
     pub summary: WorkSummary,
     pub runs: Vec<RunSummary>,
+    pub messages: Vec<MessageSummary>,
     pub events: Vec<WorkEventEnvelope>,
 }
 

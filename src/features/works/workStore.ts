@@ -3,13 +3,17 @@ import { createStore } from "zustand/vanilla";
 import { tauriClient, type PiWorkClient } from "../../app/tauriClient";
 import type {
   CreateWorkInput,
+  MessageSummary,
   RunSummary,
+  StartWorkOutput,
   WorkDetail,
   WorkEventEnvelope,
   WorkSummary,
 } from "../../bindings";
 import {
   normalizeAppError,
+  isWorkEventTimelineItem,
+  timelineItemKey,
   type AppError,
   type TimelineItem,
 } from "../../domain/work";
@@ -26,7 +30,7 @@ export type WorkState = {
   hydrationError: AppError | null;
   hydrate(): Promise<void>;
   createWork(input: CreateWorkInput): Promise<WorkDetail>;
-  startWork(workId: string, prompt: string): Promise<RunSummary>;
+  startWork(workId: string, prompt: string): Promise<StartWorkOutput>;
   queueInstruction(workId: string, prompt: string): void;
   selectWork(workId: string): void;
   upsertWork(work: WorkSummary): void;
@@ -56,7 +60,7 @@ const statusForEvent = (
 type WorkMutation =
   | { type: "upsert"; work: WorkSummary }
   | { type: "liveEvent"; event: WorkEventEnvelope }
-  | { type: "startResponse"; run: RunSummary }
+  | { type: "startResponse"; output: StartWorkOutput }
   | { type: "detail"; detail: WorkDetail };
 
 const isTerminalStatus = (status: WorkSummary["status"]) =>
@@ -105,17 +109,23 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       (left?.id ?? leftRunId).localeCompare(right?.id ?? rightRunId)
     );
   };
-  const sortTimeline = (
-    workId: string,
-    events: WorkEventEnvelope[],
-  ): WorkEventEnvelope[] =>
-    [...events].sort(
+  const timelineTime = (item: TimelineItem) =>
+    isWorkEventTimelineItem(item) ? item.occurredAt : item.createdAt;
+  const sortTimeline = (items: TimelineItem[]): TimelineItem[] =>
+    [...items].sort(
       (left, right) =>
-        compareRuns(workId, left.runId, right.runId) ||
-        left.sequence - right.sequence ||
-        left.occurredAt.localeCompare(right.occurredAt) ||
-        left.version - right.version,
+        timelineTime(left).localeCompare(timelineTime(right)) ||
+        timelineItemKey(left).localeCompare(timelineItemKey(right)),
     );
+  const mergeTimeline = (...groups: TimelineItem[][]) => {
+    const byIdentity = new Map<string, TimelineItem>();
+    for (const group of groups) {
+      for (const item of group) {
+        byIdentity.set(timelineItemKey(item), item);
+      }
+    }
+    return sortTimeline([...byIdentity.values()]);
+  };
   const newestRun = (workId: string, runIds: Iterable<string>) => {
     let newest: string | undefined;
     for (const runId of runIds) {
@@ -140,8 +150,16 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
     }
 
     if (mutation.type === "startResponse") {
-      const { run } = mutation;
+      const { run, userMessage } = mutation.output;
       registerRun(run.workId, run.id, run.createdAt);
+      registerRun(userMessage.workId, userMessage.runId, userMessage.createdAt);
+      const timelines = {
+        ...state.timelines,
+        [run.workId]: mergeTimeline(
+          state.timelines[run.workId] ?? [],
+          [userMessage],
+        ),
+      };
       const previousLatestRun = state.latestRuns[run.workId];
       const latestRun =
         !previousLatestRun ||
@@ -176,10 +194,11 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         run.createdAt < currentWork.updatedAt ||
         protectsSameRunTerminal
       ) {
-        return latestRun === previousLatestRun ? state : { latestRuns };
+        return { latestRuns, timelines };
       }
       return {
         latestRuns,
+        timelines,
         works: {
           ...state.works,
           [run.workId]: {
@@ -225,7 +244,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           : state.works,
         timelines: {
           ...state.timelines,
-          [event.workId]: sortTimeline(event.workId, [
+          [event.workId]: sortTimeline([
             ...(state.timelines[event.workId] ?? []),
             event,
           ]),
@@ -241,34 +260,36 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
     for (const run of detail.runs) {
       registerRun(detail.summary.id, run.id, run.createdAt);
     }
-    const eventBySequence = new Map<string, WorkEventEnvelope>();
+    for (const message of detail.messages) {
+      registerRun(message.workId, message.runId, message.createdAt);
+    }
     for (const persistedEvent of detail.events) {
       registerRun(
         persistedEvent.workId,
         persistedEvent.runId,
         persistedEvent.occurredAt,
       );
-      eventBySequence.set(
-        `${persistedEvent.runId}\u0000${persistedEvent.sequence}`,
-        persistedEvent,
+    }
+    for (const liveItem of state.timelines[detail.summary.id] ?? []) {
+      registerRun(
+        liveItem.workId,
+        liveItem.runId,
+        isWorkEventTimelineItem(liveItem)
+          ? liveItem.occurredAt
+          : liveItem.createdAt,
       );
     }
-    for (const liveEvent of state.timelines[detail.summary.id] ?? []) {
-      registerRun(liveEvent.workId, liveEvent.runId, liveEvent.occurredAt);
-      eventBySequence.set(
-        `${liveEvent.runId}\u0000${liveEvent.sequence}`,
-        liveEvent,
-      );
-    }
-    const mergedEvents = sortTimeline(
-      detail.summary.id,
-      [...eventBySequence.values()],
+    const mergedTimeline = mergeTimeline(
+      detail.messages,
+      detail.events,
+      state.timelines[detail.summary.id] ?? [],
     );
+    const mergedEvents = mergedTimeline.filter(isWorkEventTimelineItem);
     const candidateCurrentRun = newestRun(
       detail.summary.id,
       new Set([
         ...detail.runs.map((run) => run.id),
-        ...mergedEvents.map((event) => event.runId),
+        ...mergedTimeline.map((item) => item.runId),
       ]),
     );
     const latestRun = detail.runs.reduce<RunSummary | undefined>(
@@ -328,7 +349,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       works: { ...state.works, [detail.summary.id]: mergedSummary },
       timelines: {
         ...state.timelines,
-        [detail.summary.id]: mergedEvents,
+        [detail.summary.id]: mergedTimeline,
       },
       lastSequenceByRun,
     };
@@ -458,10 +479,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       startWork: async (workId, prompt) => {
         const operation = beginOperation();
         try {
-          const run = await client.startWork(workId, prompt);
-          set((state) => reduceWork(state, { type: "startResponse", run }));
+          const output = await client.startWork(workId, prompt);
+          set((state) => reduceWork(state, { type: "startResponse", output }));
           succeedOperation(operation);
-          return run;
+          return output;
         } catch (error) {
           failOperation(operation, error);
           throw error;

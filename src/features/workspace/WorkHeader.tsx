@@ -1,8 +1,9 @@
 import { PanelRightOpen } from "lucide-react";
-import type { Ref } from "react";
+import { useEffect, useState, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { TimelineItem, AppError } from "../../domain/work";
+import { isWorkEventTimelineItem, type TimelineItem, type AppError } from "../../domain/work";
+import { appErrorMessageKey, formatAppErrorDiagnostics } from "../../domain/appError";
 import type { RunSummary, WorkSummary } from "../../bindings";
 
 type WorkHeaderProps = {
@@ -17,14 +18,17 @@ type WorkHeaderProps = {
 
 export function WorkHeader({ work, timeline, error, latestRun, inspectorOpen, inspectorToggleRef, onInspectorToggle }: WorkHeaderProps) {
   const { t } = useTranslation();
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  useEffect(() => setDiagnosticsOpen(false), [error]);
   const model = [...timeline]
     .reverse()
+    .filter(isWorkEventTimelineItem)
     .find(({ payload }) => payload.type === "runStarted")?.payload;
   const modelLabel = latestRun?.modelLabel ?? (model?.type === "runStarted" ? model.modelLabel : "Fake model");
 
   return (
     <div className="work-header-region">
-      {error && <div className="workspace-banner" role="status">{error.message}</div>}
+      {error && <div className="workspace-banner" role="status"><p>{t(appErrorMessageKey(error))}</p><button className="button" type="button" onClick={() => setDiagnosticsOpen((open) => !open)}>{t("diagnostics.open")}</button>{diagnosticsOpen && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}</div>}
       <header className="work-header">
         <div className="work-header__identity">
           <h1>{work.title}</h1>

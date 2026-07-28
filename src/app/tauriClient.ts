@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   CreateWorkInput,
-  RunSummary,
+  StartWorkOutput,
   WorkDetail,
   WorkEventEnvelope,
   WorkSummary,
@@ -13,7 +13,7 @@ export type PiWorkClient = {
   createWork(input: CreateWorkInput): Promise<WorkDetail>;
   listWorks(): Promise<WorkSummary[]>;
   getWork(workId: string): Promise<WorkDetail>;
-  startWork(workId: string, prompt: string): Promise<RunSummary>;
+  startWork(workId: string, prompt: string): Promise<StartWorkOutput>;
   listenToWorkEvents(
     handler: (event: WorkEventEnvelope) => void,
   ): Promise<UnlistenFn>;
@@ -24,7 +24,7 @@ export const tauriClient: PiWorkClient = {
   listWorks: () => invoke<WorkSummary[]>("list_works"),
   getWork: (workId) => invoke<WorkDetail>("get_work", { workId }),
   startWork: (workId, prompt) =>
-    invoke<RunSummary>("start_work", { workId, prompt }),
+    invoke<StartWorkOutput>("start_work", { workId, prompt }),
   listenToWorkEvents: (handler) =>
     listen<WorkEventEnvelope>("piwork://work-event", ({ payload }) =>
       handler(payload),

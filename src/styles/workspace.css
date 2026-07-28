@@ -65,6 +65,7 @@
 .timeline-event strong { font-size: 12px; }
 .timeline-event p { margin: 3px 0 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
 .timeline-event--assistant { border-color: transparent; box-shadow: none; }
+.timeline-event--user { background: var(--pw-surface-subtle); }
 .timeline-event--completed { border-color: #c4dfd5; }
 .timeline-event--completed > svg, .timeline-event--success > svg { color: var(--pw-success-500); }
 .timeline-event--failure { border-color: #ebc9d0; }

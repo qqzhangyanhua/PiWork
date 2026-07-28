@@ -3,7 +3,9 @@ import { vi, type Mock } from "vitest";
 import type { PiWorkClient } from "../app/tauriClient";
 import type {
   CreateWorkInput,
+  MessageSummary,
   RunSummary,
+  StartWorkOutput,
   WorkDetail,
   WorkEventEnvelope,
   WorkSummary,
@@ -60,7 +62,7 @@ export const createMockTauriClient = (): MockTauriClient => {
       createdAt: now(workSequence),
       updatedAt: now(workSequence),
     };
-    const detail: WorkDetail = { summary, runs: [], events: [] };
+    const detail: WorkDetail = { summary, runs: [], messages: [], events: [] };
     details.set(id, detail);
     return detail;
   });
@@ -72,7 +74,7 @@ export const createMockTauriClient = (): MockTauriClient => {
     if (!detail) throw new Error(`Work not found: ${workId}`);
     return detail;
   });
-  const startWork = vi.fn(async (workId: string, _prompt: string) => {
+  const startWork = vi.fn(async (workId: string, prompt: string) => {
     const detail = details.get(workId);
     if (!detail) throw new Error(`Work not found: ${workId}`);
     const id = `run-${++runSequence}`;
@@ -87,10 +89,19 @@ export const createMockTauriClient = (): MockTauriClient => {
       startedAt: now(10 + runSequence),
       completedAt: null,
     };
+    const userMessage: MessageSummary = {
+      id: `message-${runSequence}`,
+      workId,
+      runId: id,
+      role: "user",
+      content: prompt.trim(),
+      createdAt: run.createdAt,
+    };
     detail.runs.push(run);
+    detail.messages.push(userMessage);
     detail.summary.status = "running";
     detail.summary.updatedAt = run.createdAt;
-    return run;
+    return { run, userMessage } satisfies StartWorkOutput;
   });
   const listenToWorkEvents = vi.fn(
     async (handler: (event: WorkEventEnvelope) => void) => {

@@ -1,7 +1,10 @@
 export type { CreateWorkInput } from "./CreateWorkInput";
+export type { MessageRole } from "./MessageRole";
+export type { MessageSummary } from "./MessageSummary";
 export type { PermissionMode } from "./PermissionMode";
 export type { RunStatus } from "./RunStatus";
 export type { RunSummary } from "./RunSummary";
+export type { StartWorkOutput } from "./StartWorkOutput";
 export type { WorkDetail } from "./WorkDetail";
 export type { WorkEventEnvelope } from "./WorkEventEnvelope";
 export type { WorkEventPayload } from "./WorkEventPayload";

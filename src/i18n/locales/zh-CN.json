@@ -1,13 +1,14 @@
 {
   "app": { "name": "PiWork" },
-  "common": { "cancel": "取消", "close": "关闭", "create": "创建", "retry": "重试" },
+  "common": { "cancel": "取消", "close": "关闭", "create": "创建", "creating": "正在创建", "retry": "重试" },
   "work": { "new": "新建 Work", "empty": "创建第一个 Work" },
   "sidebar": { "label": "Work 导航", "works": "全部 Work" },
   "create": {
     "goal": "目标",
     "rootPath": "工作目录",
     "goalRequired": "请输入目标",
-    "rootRequired": "请输入工作目录"
+    "rootRequired": "请输入工作目录",
+    "failed": "无法创建 Work，请重试。"
   },
   "state": {
     "loading": "正在加载 Work",
@@ -15,6 +16,26 @@
     "emptyBody": "从一个持续目标开始，PiWork 会保留每次 Run 的协作脉络。"
   },
   "diagnostics": { "open": "打开诊断", "unavailable": "诊断详情无法安全显示" },
+  "errors": {
+    "generic": "操作失败，请重试。",
+    "database": "本地数据库暂时不可用，请重试。",
+    "workspacePath": "所选工作目录不存在或无法访问。",
+    "pathResolution": "无法访问 PiWork 的本地数据目录。",
+    "invalidInput": {
+      "title": "请输入有效标题。",
+      "goal": "请输入有效目标。",
+      "rootPath": "请选择有效的工作目录。",
+      "prompt": "请输入有效指令。"
+    },
+    "invalidWorkState": "当前 Work 状态不允许此操作。",
+    "workAlreadyRunning": "此 Work 已有正在运行的 Run。",
+    "notFound": "请求的 Work 或 Run 不存在。",
+    "concurrentModification": "Work 已在其他操作中更新，请重试。",
+    "engine": "执行引擎暂时不可用。",
+    "engineStart": "无法启动 Run，请重试。",
+    "eventPublish": "无法更新 Work 进度，请重试。",
+    "io": "本地文件操作失败，请重试。"
+  },
   "header": { "workStatus": "Work 状态" },
   "status": {
     "draft": "草稿", "queued": "排队中", "running": "运行中", "waiting": "等待中",
@@ -25,6 +46,7 @@
     "label": "Work 时间线",
     "emptyTitle": "准备开始这个 Work",
     "emptyBody": "输入第一条指令，后续 Run 会持续沉淀在这里。",
+    "you": "你",
     "runStarted": "Run 已开始",
     "succeeded": "成功",
     "failed": "失败",

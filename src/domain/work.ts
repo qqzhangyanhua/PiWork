@@ -1,4 +1,4 @@
-import type { WorkEventEnvelope } from "../bindings";
+import type { MessageSummary, WorkEventEnvelope } from "../bindings";
 
 export type AppError = {
   code: string;
@@ -6,7 +6,16 @@ export type AppError = {
   details?: Record<string, unknown>;
 };
 
-export type TimelineItem = WorkEventEnvelope;
+export type TimelineItem = MessageSummary | WorkEventEnvelope;
+
+export const isWorkEventTimelineItem = (
+  item: TimelineItem,
+): item is WorkEventEnvelope => "payload" in item;
+
+export const timelineItemKey = (item: TimelineItem) =>
+  isWorkEventTimelineItem(item)
+    ? `event:${item.runId}:${item.sequence}`
+    : `message:${item.id}`;
 
 const unknownError = (): AppError => ({
   code: "unknown",

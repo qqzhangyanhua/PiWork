@@ -223,7 +223,10 @@ impl AppError {
             Self::WorkspacePathResolution { path, .. } => (
                 "path_resolution_error",
                 "Workspace path could not be resolved",
-                Some(json!({ "path": path.to_string_lossy() })),
+                Some(json!({
+                    "field": "rootPath",
+                    "path": path.to_string_lossy()
+                })),
             ),
             Self::PathResolution(_) => (
                 "path_resolution_error",
@@ -289,6 +292,30 @@ mod tests {
                 "code": "database_error",
                 "message": "Database operation failed"
             })
+        );
+    }
+
+    #[test]
+    fn workspace_path_error_identifies_the_root_path_field_without_raw_io_text() {
+        let error = AppError::WorkspacePathResolution {
+            path: "C:/missing/private-workspace".into(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "raw operating system path diagnostic",
+            ),
+        };
+        let serialized = serde_json::to_value(error).unwrap();
+
+        assert_eq!(serialized["code"], "path_resolution_error");
+        assert_eq!(serialized["details"]["field"], "rootPath");
+        assert_eq!(
+            serialized["details"]["path"],
+            "C:/missing/private-workspace"
+        );
+        assert!(
+            !serialized
+                .to_string()
+                .contains("raw operating system path diagnostic")
         );
     }
 

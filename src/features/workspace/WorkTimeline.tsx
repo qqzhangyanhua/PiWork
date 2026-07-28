@@ -1,7 +1,7 @@
-import { Bot, CheckCircle2, CircleAlert, Play, Wrench } from "lucide-react";
+import { Bot, CheckCircle2, CircleAlert, Play, UserRound, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type { TimelineItem } from "../../domain/work";
+import { isWorkEventTimelineItem, timelineItemKey, type TimelineItem } from "../../domain/work";
 
 const DetailList = ({ label, values }: { label: string; values: string[] }) =>
   values.length ? (
@@ -10,6 +10,9 @@ const DetailList = ({ label, values }: { label: string; values: string[] }) =>
 
 function TimelineEvent({ item }: { item: TimelineItem }) {
   const { t } = useTranslation();
+  if (!isWorkEventTimelineItem(item)) {
+    return <article className="timeline-event timeline-event--user"><UserRound aria-hidden="true" /><div><strong>{t("timeline.you")}</strong><p>{item.content}</p></div></article>;
+  }
   const payload = item.payload;
   if (payload.type === "runStarted") return <article className="timeline-event"><Play aria-hidden="true" /><div><strong>{t("timeline.runStarted")}</strong><p>{payload.modelLabel}</p></div></article>;
   if (payload.type === "assistantDelta") return <article className="timeline-event timeline-event--assistant"><Bot aria-hidden="true" /><p>{payload.text}</p></article>;
@@ -34,7 +37,7 @@ export function WorkTimeline({ timeline }: { timeline: TimelineItem[] }) {
     <section className="work-timeline" aria-label={t("timeline.label")}>
       {timeline.length === 0 ? (
         <div className="timeline-empty"><Bot aria-hidden="true" size={24} /><h2>{t("timeline.emptyTitle")}</h2><p>{t("timeline.emptyBody")}</p></div>
-      ) : timeline.map((item) => <TimelineEvent item={item} key={`${item.runId}-${item.sequence}`} />)}
+      ) : timeline.map((item) => <TimelineEvent item={item} key={timelineItemKey(item)} />)}
     </section>
   );
 }

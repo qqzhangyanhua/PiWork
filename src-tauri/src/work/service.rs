@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    domain::work::{CreateWorkInput, RunSummary, WorkDetail, WorkSummary},
+    domain::work::{CreateWorkInput, StartWorkOutput, WorkDetail, WorkSummary},
     engine::supervisor::EngineSupervisor,
     error::AppError,
 };
@@ -54,7 +54,11 @@ impl WorkService {
         self.repository.recover_interrupted_runs().await
     }
 
-    pub async fn start_work(&self, work_id: &str, prompt: &str) -> Result<RunSummary, AppError> {
+    pub async fn start_work(
+        &self,
+        work_id: &str,
+        prompt: &str,
+    ) -> Result<StartWorkOutput, AppError> {
         match &self.execution {
             Execution::Supervisor(supervisor) => supervisor.start(work_id, prompt).await,
             Execution::RepositoryOnly => Err(AppError::engine(

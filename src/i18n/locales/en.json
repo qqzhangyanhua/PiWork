@@ -1,13 +1,14 @@
 {
   "app": { "name": "PiWork" },
-  "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "retry": "Retry" },
+  "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "creating": "Creating", "retry": "Retry" },
   "work": { "new": "New Work", "empty": "Create your first Work" },
   "sidebar": { "label": "Work navigation", "works": "All Works" },
   "create": {
     "goal": "Goal",
     "rootPath": "Working directory",
     "goalRequired": "Enter a goal",
-    "rootRequired": "Enter a working directory"
+    "rootRequired": "Enter a working directory",
+    "failed": "Unable to create Work. Try again."
   },
   "state": {
     "loading": "Loading Works",
@@ -15,6 +16,26 @@
     "emptyBody": "Start with a lasting goal. PiWork keeps the collaboration context across every Run."
   },
   "diagnostics": { "open": "Open diagnostics", "unavailable": "Diagnostic details cannot be displayed safely" },
+  "errors": {
+    "generic": "The operation failed. Try again.",
+    "database": "The local database is temporarily unavailable. Try again.",
+    "workspacePath": "The selected working directory does not exist or cannot be accessed.",
+    "pathResolution": "PiWork cannot access its local data directory.",
+    "invalidInput": {
+      "title": "Enter a valid title.",
+      "goal": "Enter a valid goal.",
+      "rootPath": "Select a valid working directory.",
+      "prompt": "Enter a valid instruction."
+    },
+    "invalidWorkState": "This operation is not available in the current Work state.",
+    "workAlreadyRunning": "This Work already has a running Run.",
+    "notFound": "The requested Work or Run was not found.",
+    "concurrentModification": "The Work changed during another operation. Try again.",
+    "engine": "The execution engine is temporarily unavailable.",
+    "engineStart": "Unable to start the Run. Try again.",
+    "eventPublish": "Unable to update Work progress. Try again.",
+    "io": "The local file operation failed. Try again."
+  },
   "header": { "workStatus": "Work status" },
   "status": {
     "draft": "Draft", "queued": "Queued", "running": "Running", "waiting": "Waiting",
@@ -25,6 +46,7 @@
     "label": "Work timeline",
     "emptyTitle": "Ready to start this Work",
     "emptyBody": "Send the first instruction. Future Runs will keep accumulating here.",
+    "you": "You",
     "runStarted": "Run started",
     "succeeded": "Succeeded",
     "failed": "Failed",
