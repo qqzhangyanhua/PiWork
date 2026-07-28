@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
-use uuid::Uuid;
 
 use super::event::WorkEventEnvelope;
 
@@ -20,6 +19,7 @@ pub enum WorkStatus {
     Queued,
     Running,
     Waiting,
+    /// A Work checkpoint with no active execution; its current Run is terminal or absent.
     Idle,
     Completed,
     Failed,
@@ -47,17 +47,18 @@ pub enum RunStatus {
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 #[ts(rename_all = "snake_case", export_to = binding_path!())]
 pub enum PermissionMode {
+    AskEveryStep,
     #[default]
     Balanced,
-    Strict,
-    FullAccess,
+    AutoExecute,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = binding_path!())]
 pub struct WorkSummary {
-    pub id: Uuid,
+    // Canonical UUID string.
+    pub id: String,
     pub title: String,
     pub goal: String,
     pub root_path: String,
@@ -71,8 +72,10 @@ pub struct WorkSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = binding_path!())]
 pub struct RunSummary {
-    pub id: Uuid,
-    pub work_id: Uuid,
+    // Canonical UUID string.
+    pub id: String,
+    // Canonical UUID string of the owning Work.
+    pub work_id: String,
     pub model_label: String,
     pub status: RunStatus,
     pub created_at: DateTime<Utc>,
@@ -103,9 +106,10 @@ pub struct CreateWorkInput {
 mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
-    use uuid::Uuid;
 
-    use super::{CreateWorkInput, PermissionMode, WorkStatus, WorkSummary};
+    use super::{CreateWorkInput, PermissionMode, RunStatus, RunSummary, WorkStatus, WorkSummary};
+
+    fn assert_string(_: &String) {}
 
     #[test]
     fn permission_mode_defaults_to_balanced() {
@@ -113,19 +117,36 @@ mod tests {
     }
 
     #[test]
+    fn permission_modes_use_the_approved_wire_values() {
+        for (mode, wire_value) in [
+            (PermissionMode::AskEveryStep, "ask_every_step"),
+            (PermissionMode::Balanced, "balanced"),
+            (PermissionMode::AutoExecute, "auto_execute"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), wire_value);
+            assert_eq!(
+                serde_json::from_value::<PermissionMode>(json!(wire_value)).unwrap(),
+                mode
+            );
+        }
+    }
+
+    #[test]
     fn work_dto_uses_camel_case_fields_and_snake_case_values() {
-        let id = Uuid::nil();
+        let id = "00000000-0000-0000-0000-000000000000".to_string();
         let timestamp = Utc.with_ymd_and_hms(2026, 7, 28, 7, 0, 0).unwrap();
         let summary = WorkSummary {
-            id,
+            id: id.clone(),
             title: "Ship PiWork".into(),
             goal: "Build the foundation".into(),
             root_path: "D:/dev/PiWork".into(),
-            permission_mode: PermissionMode::FullAccess,
+            permission_mode: PermissionMode::Balanced,
             status: WorkStatus::Waiting,
             created_at: timestamp,
             updated_at: timestamp,
         };
+
+        assert_string(&summary.id);
 
         assert_eq!(
             serde_json::to_value(summary).unwrap(),
@@ -134,12 +155,33 @@ mod tests {
                 "title": "Ship PiWork",
                 "goal": "Build the foundation",
                 "rootPath": "D:/dev/PiWork",
-                "permissionMode": "full_access",
+                "permissionMode": "balanced",
                 "status": "waiting",
                 "createdAt": "2026-07-28T07:00:00Z",
                 "updatedAt": "2026-07-28T07:00:00Z"
             })
         );
+    }
+
+    #[test]
+    fn run_ids_round_trip_as_strings() {
+        let timestamp = Utc.with_ymd_and_hms(2026, 7, 28, 7, 0, 0).unwrap();
+        let run = RunSummary {
+            id: "10000000-0000-0000-0000-000000000000".into(),
+            work_id: "20000000-0000-0000-0000-000000000000".into(),
+            model_label: "test-model".into(),
+            status: RunStatus::Queued,
+            created_at: timestamp,
+            started_at: None,
+            completed_at: None,
+        };
+
+        let serialized = serde_json::to_string(&run).unwrap();
+        let round_trip: RunSummary = serde_json::from_str(&serialized).unwrap();
+
+        assert_string(&round_trip.id);
+        assert_string(&round_trip.work_id);
+        assert_eq!(round_trip, run);
     }
 
     #[test]

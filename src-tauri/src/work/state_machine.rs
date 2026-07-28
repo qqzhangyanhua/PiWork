@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::domain::work::WorkStatus;
+use crate::domain::work::{RunStatus, WorkStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkAction {
@@ -20,6 +20,23 @@ pub enum WorkAction {
 pub struct InvalidTransition {
     pub from: WorkStatus,
     pub action: WorkAction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunAction {
+    Start,
+    Wait,
+    Complete,
+    Fail,
+    Stop,
+    Interrupt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid Run transition from {from:?} using {action:?}")]
+pub struct InvalidRunTransition {
+    pub from: RunStatus,
+    pub action: RunAction,
 }
 
 pub fn transition(
@@ -72,11 +89,40 @@ pub fn transition(
     Ok(next)
 }
 
+pub fn transition_run(
+    current: RunStatus,
+    action: RunAction,
+) -> Result<RunStatus, InvalidRunTransition> {
+    let next = match (current, action) {
+        (RunStatus::Queued, RunAction::Start) => RunStatus::Running,
+        (RunStatus::Queued, RunAction::Stop) => RunStatus::Stopped,
+        (RunStatus::Queued, RunAction::Interrupt) => RunStatus::Interrupted,
+        (RunStatus::Running, RunAction::Wait) => RunStatus::Waiting,
+        (RunStatus::Running, RunAction::Complete) => RunStatus::Completed,
+        (RunStatus::Running, RunAction::Fail) => RunStatus::Failed,
+        (RunStatus::Running, RunAction::Stop) => RunStatus::Stopped,
+        (RunStatus::Running, RunAction::Interrupt) => RunStatus::Interrupted,
+        (RunStatus::Waiting, RunAction::Start) => RunStatus::Running,
+        (RunStatus::Waiting, RunAction::Complete) => RunStatus::Completed,
+        (RunStatus::Waiting, RunAction::Fail) => RunStatus::Failed,
+        (RunStatus::Waiting, RunAction::Stop) => RunStatus::Stopped,
+        (RunStatus::Waiting, RunAction::Interrupt) => RunStatus::Interrupted,
+        _ => {
+            return Err(InvalidRunTransition {
+                from: current,
+                action,
+            });
+        }
+    };
+
+    Ok(next)
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::domain::work::WorkStatus;
+    use crate::domain::work::{RunStatus, WorkStatus};
 
-    use super::{WorkAction, transition};
+    use super::{RunAction, WorkAction, transition, transition_run};
 
     #[test]
     fn completed_work_can_start_a_new_run() {
@@ -154,6 +200,104 @@ mod tests {
     fn active_work_cannot_be_archived() {
         for status in [WorkStatus::Queued, WorkStatus::Running, WorkStatus::Waiting] {
             assert!(transition(status, WorkAction::Archive).is_err());
+        }
+    }
+
+    #[test]
+    fn run_transition_matrix_allows_only_execution_lifecycle_edges() {
+        let allowed = [
+            (RunStatus::Queued, RunAction::Start, RunStatus::Running),
+            (RunStatus::Queued, RunAction::Stop, RunStatus::Stopped),
+            (
+                RunStatus::Queued,
+                RunAction::Interrupt,
+                RunStatus::Interrupted,
+            ),
+            (RunStatus::Running, RunAction::Wait, RunStatus::Waiting),
+            (
+                RunStatus::Running,
+                RunAction::Complete,
+                RunStatus::Completed,
+            ),
+            (RunStatus::Running, RunAction::Fail, RunStatus::Failed),
+            (RunStatus::Running, RunAction::Stop, RunStatus::Stopped),
+            (
+                RunStatus::Running,
+                RunAction::Interrupt,
+                RunStatus::Interrupted,
+            ),
+            (RunStatus::Waiting, RunAction::Start, RunStatus::Running),
+            (
+                RunStatus::Waiting,
+                RunAction::Complete,
+                RunStatus::Completed,
+            ),
+            (RunStatus::Waiting, RunAction::Fail, RunStatus::Failed),
+            (RunStatus::Waiting, RunAction::Stop, RunStatus::Stopped),
+            (
+                RunStatus::Waiting,
+                RunAction::Interrupt,
+                RunStatus::Interrupted,
+            ),
+        ];
+
+        let statuses = [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::Waiting,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Stopped,
+            RunStatus::Interrupted,
+        ];
+        let actions = [
+            RunAction::Start,
+            RunAction::Wait,
+            RunAction::Complete,
+            RunAction::Fail,
+            RunAction::Stop,
+            RunAction::Interrupt,
+        ];
+
+        for from in statuses {
+            for action in actions {
+                let expected = allowed.iter().find_map(|(candidate, event, next)| {
+                    (*candidate == from && *event == action).then_some(*next)
+                });
+
+                match (transition_run(from, action), expected) {
+                    (Ok(actual), Some(expected)) => assert_eq!(actual, expected),
+                    (Err(_), None) => {}
+                    (actual, expected) => panic!(
+                        "unexpected Run transition result for {from:?} + {action:?}: \
+                         actual={actual:?}, expected={expected:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_runs_reject_every_action() {
+        let terminal = [
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Stopped,
+            RunStatus::Interrupted,
+        ];
+        let actions = [
+            RunAction::Start,
+            RunAction::Wait,
+            RunAction::Complete,
+            RunAction::Fail,
+            RunAction::Stop,
+            RunAction::Interrupt,
+        ];
+
+        for status in terminal {
+            for action in actions {
+                assert!(transition_run(status, action).is_err());
+            }
         }
     }
 }

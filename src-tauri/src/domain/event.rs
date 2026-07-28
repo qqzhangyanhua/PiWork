@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use ts_rs::TS;
-use uuid::Uuid;
 
 macro_rules! binding_path {
     () => {
@@ -9,16 +8,50 @@ macro_rules! binding_path {
     };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = binding_path!())]
 pub struct WorkEventEnvelope {
     pub version: u32,
-    pub work_id: Uuid,
-    pub run_id: Uuid,
+    // Canonical UUID string of the owning Work.
+    pub work_id: String,
+    // Canonical UUID string of the owning Run.
+    pub run_id: String,
     pub sequence: u32,
     pub occurred_at: DateTime<Utc>,
     pub payload: WorkEventPayload,
+}
+
+impl<'de> Deserialize<'de> for WorkEventEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireEnvelope {
+            version: u32,
+            work_id: String,
+            run_id: String,
+            sequence: u32,
+            occurred_at: DateTime<Utc>,
+            payload: WorkEventPayload,
+        }
+
+        let wire = WireEnvelope::deserialize(deserializer)?;
+        if wire.sequence == 0 {
+            return Err(de::Error::custom("event sequence must be at least 1"));
+        }
+
+        Ok(Self {
+            version: wire.version,
+            work_id: wire.work_id,
+            run_id: wire.run_id,
+            sequence: wire.sequence,
+            occurred_at: wire.occurred_at,
+            payload: wire.payload,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -64,9 +97,62 @@ pub enum WorkEventPayload {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use serde_json::json;
 
-    use super::WorkEventPayload;
+    use super::{WorkEventEnvelope, WorkEventPayload};
+
+    fn assert_string(_: &String) {}
+
+    #[test]
+    fn envelope_ids_round_trip_as_strings() {
+        let envelope = WorkEventEnvelope {
+            version: 1,
+            work_id: "10000000-0000-0000-0000-000000000000".into(),
+            run_id: "20000000-0000-0000-0000-000000000000".into(),
+            sequence: 1,
+            occurred_at: Utc.with_ymd_and_hms(2026, 7, 28, 7, 0, 0).unwrap(),
+            payload: WorkEventPayload::AssistantDelta {
+                text: "hello".into(),
+            },
+        };
+
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        let round_trip: WorkEventEnvelope = serde_json::from_str(&serialized).unwrap();
+
+        assert_string(&round_trip.work_id);
+        assert_string(&round_trip.run_id);
+        assert_eq!(round_trip, envelope);
+    }
+
+    #[test]
+    fn envelope_rejects_zero_sequence_during_deserialization() {
+        let serialized = json!({
+            "version": 1,
+            "workId": "10000000-0000-0000-0000-000000000000",
+            "runId": "20000000-0000-0000-0000-000000000000",
+            "sequence": 0,
+            "occurredAt": "2026-07-28T07:00:00Z",
+            "payload": { "type": "assistantDelta", "text": "hello" }
+        });
+
+        assert!(serde_json::from_value::<WorkEventEnvelope>(serialized).is_err());
+    }
+
+    #[test]
+    fn envelope_accepts_first_sequence_during_deserialization() {
+        let serialized = json!({
+            "version": 1,
+            "workId": "10000000-0000-0000-0000-000000000000",
+            "runId": "20000000-0000-0000-0000-000000000000",
+            "sequence": 1,
+            "occurredAt": "2026-07-28T07:00:00Z",
+            "payload": { "type": "assistantDelta", "text": "hello" }
+        });
+
+        let envelope: WorkEventEnvelope = serde_json::from_value(serialized).unwrap();
+        assert_eq!(envelope.sequence, 1);
+    }
 
     #[test]
     fn assistant_delta_has_a_camel_case_discriminator() {

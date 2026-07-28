@@ -5,7 +5,9 @@ CREATE TABLE works (
     title TEXT NOT NULL,
     goal TEXT NOT NULL,
     root_path TEXT NOT NULL,
-    permission_mode TEXT NOT NULL,
+    permission_mode TEXT NOT NULL CHECK (
+        permission_mode IN ('ask_every_step', 'balanced', 'auto_execute')
+    ),
     status TEXT NOT NULL CHECK (
         status IN (
             'draft', 'queued', 'running', 'waiting', 'idle', 'completed',
@@ -51,7 +53,7 @@ CREATE TABLE events (
     id TEXT PRIMARY KEY NOT NULL,
     work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL,
-    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+    sequence INTEGER NOT NULL CHECK (sequence BETWEEN 1 AND 4294967295),
     version INTEGER NOT NULL CHECK (version > 0),
     occurred_at TEXT NOT NULL,
     payload TEXT NOT NULL CHECK (json_valid(payload)),

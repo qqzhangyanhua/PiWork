@@ -47,8 +47,19 @@ mod tests {
 
         let envelope = std::fs::read_to_string(output_dir.join("WorkEventEnvelope.ts")).unwrap();
         assert!(
-            envelope.contains("sequence: number"),
-            "event sequence must be JSON-safe in TypeScript"
+            envelope.contains("workId: string")
+                && envelope.contains("runId: string")
+                && envelope.contains("sequence: number"),
+            "event identifiers and sequence must be JSON-safe in TypeScript"
         );
+
+        let work = std::fs::read_to_string(output_dir.join("WorkSummary.ts")).unwrap();
+        assert!(work.contains("id: string"));
+
+        let run = std::fs::read_to_string(output_dir.join("RunSummary.ts")).unwrap();
+        assert!(run.contains("id: string") && run.contains("workId: string"));
+
+        let permission = std::fs::read_to_string(output_dir.join("PermissionMode.ts")).unwrap();
+        assert!(permission.contains("\"ask_every_step\" | \"balanced\" | \"auto_execute\""));
     }
 }

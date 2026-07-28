@@ -2,17 +2,27 @@ use piwork_lib::storage::sqlite::Database;
 use sqlx::sqlite::SqliteQueryResult;
 
 async fn insert_work(database: &Database, id: &str) {
+    insert_work_with_permission_mode(database, id, "balanced")
+        .await
+        .unwrap();
+}
+
+async fn insert_work_with_permission_mode(
+    database: &Database,
+    id: &str,
+    permission_mode: &str,
+) -> Result<SqliteQueryResult, sqlx::Error> {
     sqlx::query(
         "INSERT INTO works \
          (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
-         VALUES (?, 'Work', 'Goal', '/workspace', 'workspace-write', 'draft', ?, ?)",
+         VALUES (?, 'Work', 'Goal', '/workspace', ?, 'draft', ?, ?)",
     )
     .bind(id)
+    .bind(permission_mode)
     .bind("2026-01-01T00:00:00Z")
     .bind("2026-01-01T00:00:00Z")
     .execute(database.pool())
     .await
-    .unwrap();
 }
 
 async fn insert_run(database: &Database, id: &str, work_id: &str) {
@@ -31,6 +41,18 @@ async fn insert_run(database: &Database, id: &str, work_id: &str) {
 }
 
 async fn insert_event(database: &Database, id: &str, work_id: &str, run_id: &str, sequence: i64) {
+    try_insert_event(database, id, work_id, run_id, sequence)
+        .await
+        .unwrap();
+}
+
+async fn try_insert_event(
+    database: &Database,
+    id: &str,
+    work_id: &str,
+    run_id: &str,
+    sequence: i64,
+) -> Result<SqliteQueryResult, sqlx::Error> {
     sqlx::query(
         "INSERT INTO events \
          (id, work_id, run_id, sequence, version, occurred_at, payload) \
@@ -43,7 +65,6 @@ async fn insert_event(database: &Database, id: &str, work_id: &str, run_id: &str
     .bind("2026-01-01T00:00:00Z")
     .execute(database.pool())
     .await
-    .unwrap();
 }
 
 fn assert_database_error_contains(result: Result<SqliteQueryResult, sqlx::Error>, expected: &str) {
@@ -129,7 +150,7 @@ async fn cross_work_event_association_is_rejected() {
     let result = sqlx::query(
         "INSERT INTO events \
          (id, work_id, run_id, sequence, version, occurred_at, payload) \
-         VALUES ('event-1', 'work-1', 'run-2', 0, 1, ?, '{}')",
+         VALUES ('event-1', 'work-1', 'run-2', 1, 1, ?, '{}')",
     )
     .bind("2026-01-01T00:00:00Z")
     .execute(database.pool())
@@ -175,7 +196,7 @@ async fn invalid_work_and_run_statuses_are_rejected() {
     let invalid_work = sqlx::query(
         "INSERT INTO works \
          (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
-         VALUES ('invalid-work', 'Work', 'Goal', '/workspace', 'workspace-write', \
+         VALUES ('invalid-work', 'Work', 'Goal', '/workspace', 'balanced', \
          'invalid', ?, ?)",
     )
     .bind("2026-01-01T00:00:00Z")
@@ -198,6 +219,35 @@ async fn invalid_work_and_run_statuses_are_rejected() {
 }
 
 #[tokio::test]
+async fn permission_modes_are_constrained_to_approved_values() {
+    let database = Database::open_in_memory().await.unwrap();
+
+    for (index, permission_mode) in ["ask_every_step", "balanced", "auto_execute"]
+        .into_iter()
+        .enumerate()
+    {
+        insert_work_with_permission_mode(
+            &database,
+            &format!("valid-permission-{index}"),
+            permission_mode,
+        )
+        .await
+        .unwrap();
+
+        let stored: String = sqlx::query_scalar("SELECT permission_mode FROM works WHERE id = ?")
+            .bind(format!("valid-permission-{index}"))
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(stored, permission_mode);
+    }
+
+    let invalid =
+        insert_work_with_permission_mode(&database, "invalid-permission", "unrestricted").await;
+    assert_database_error_contains(invalid, "CHECK constraint failed");
+}
+
+#[tokio::test]
 async fn json_columns_reject_invalid_json() {
     let database = Database::open_in_memory().await.unwrap();
     insert_work(&database, "work-1").await;
@@ -206,7 +256,7 @@ async fn json_columns_reject_invalid_json() {
     let invalid_event = sqlx::query(
         "INSERT INTO events \
          (id, work_id, run_id, sequence, version, occurred_at, payload) \
-         VALUES ('event-1', 'work-1', 'run-1', 0, 1, ?, 'not-json')",
+         VALUES ('event-1', 'work-1', 'run-1', 1, 1, ?, 'not-json')",
     )
     .bind("2026-01-01T00:00:00Z")
     .execute(database.pool())
@@ -227,12 +277,12 @@ async fn event_sequences_are_unique_within_a_run() {
     let database = Database::open_in_memory().await.unwrap();
     insert_work(&database, "work-1").await;
     insert_run(&database, "run-1", "work-1").await;
-    insert_event(&database, "event-1", "work-1", "run-1", 0).await;
+    insert_event(&database, "event-1", "work-1", "run-1", 1).await;
 
     let duplicate = sqlx::query(
         "INSERT INTO events \
          (id, work_id, run_id, sequence, version, occurred_at, payload) \
-         VALUES ('event-2', 'work-1', 'run-1', 0, 1, ?, '{}')",
+         VALUES ('event-2', 'work-1', 'run-1', 1, 1, ?, '{}')",
     )
     .bind("2026-01-01T00:00:00Z")
     .execute(database.pool())
@@ -241,11 +291,48 @@ async fn event_sequences_are_unique_within_a_run() {
 }
 
 #[tokio::test]
+async fn event_sequence_zero_is_rejected() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "work-1").await;
+    insert_run(&database, "run-1", "work-1").await;
+
+    let result = try_insert_event(&database, "event-zero", "work-1", "run-1", 0).await;
+    assert_database_error_contains(result, "CHECK constraint failed");
+}
+
+#[tokio::test]
+async fn event_sequence_above_u32_is_rejected() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "work-1").await;
+    insert_run(&database, "run-1", "work-1").await;
+
+    let result = try_insert_event(
+        &database,
+        "event-too-large",
+        "work-1",
+        "run-1",
+        4_294_967_296,
+    )
+    .await;
+    assert_database_error_contains(result, "CHECK constraint failed");
+}
+
+#[tokio::test]
+async fn event_sequence_u32_boundaries_are_accepted() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "work-1").await;
+    insert_run(&database, "run-1", "work-1").await;
+
+    insert_event(&database, "event-first", "work-1", "run-1", 1).await;
+    insert_event(&database, "event-last", "work-1", "run-1", 4_294_967_295).await;
+}
+
+#[tokio::test]
 async fn deleting_a_work_cascades_to_its_run_messages_and_events() {
     let database = Database::open_in_memory().await.unwrap();
     insert_work(&database, "work-1").await;
     insert_run(&database, "run-1", "work-1").await;
-    insert_event(&database, "event-1", "work-1", "run-1", 0).await;
+    insert_event(&database, "event-1", "work-1", "run-1", 1).await;
 
     for (id, run_id) in [("work-message", None), ("run-message", Some("run-1"))] {
         sqlx::query(
