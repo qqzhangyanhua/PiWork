@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./tokens.css";
 
 html,
 body,
@@ -8,5 +9,85 @@ body,
 }
 
 body {
+  background: var(--pw-surface-canvas);
+  color: var(--pw-text-primary);
   font-family: Inter, "Segoe UI Variable", "Segoe UI", sans-serif;
+}
+
+button {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+  background: var(--pw-surface-canvas);
+}
+
+.app-shell__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 64px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--pw-border-default);
+  background: var(--pw-surface-panel);
+}
+
+.app-shell__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-shell__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.app-shell__action {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--pw-accent-600);
+  border-radius: var(--pw-radius-md);
+  background: var(--pw-accent-500);
+  color: var(--pw-text-on-accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.app-shell__action:hover {
+  background: var(--pw-accent-600);
+}
+
+.app-shell__action:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--pw-accent-500) 28%, transparent);
+  outline-offset: 2px;
+}
+
+.app-shell__workspace {
+  min-height: calc(100vh - 65px);
+}
+
+.continuous-loop-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--pw-accent-500);
+}
+
+.continuous-loop-logo__mark {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 5.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.continuous-loop-logo__wordmark {
+  color: var(--pw-text-primary);
+  font-weight: 650;
+  letter-spacing: -0.02em;
 }

@@ -1,0 +1,14 @@
+{
+  "app": {
+    "name": "PiWork"
+  },
+  "work": {
+    "new": "New Work",
+    "empty": "Create your first Work"
+  },
+  "status": {
+    "draft": "Draft",
+    "running": "Running",
+    "completed": "Completed"
+  }
+}

@@ -1,0 +1,23 @@
+:root {
+  --pw-accent-500: #6b50ef;
+  --pw-accent-600: #5940dc;
+
+  --pw-surface-canvas: #f7f7f8;
+  --pw-surface-panel: #ffffff;
+  --pw-surface-subtle: #f1f1f3;
+  --pw-border-default: #dedee3;
+  --pw-border-strong: #c8c8cf;
+  --pw-text-primary: #18181b;
+  --pw-text-secondary: #68686f;
+  --pw-text-on-accent: #ffffff;
+
+  --pw-success-500: #238262;
+  --pw-waiting-500: #a66b18;
+  --pw-failure-500: #c2475d;
+
+  --pw-radius-sm: 6px;
+  --pw-radius-md: 10px;
+  --pw-radius-lg: 14px;
+  --pw-shadow-panel: 0 1px 2px rgb(24 24 27 / 6%),
+    0 8px 24px rgb(24 24 27 / 5%);
+}
