@@ -15,8 +15,19 @@ pub struct Database {
 
 impl Database {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, AppError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|source| AppError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
         let options = SqliteConnectOptions::new()
-            .filename(path)
+            .filename(&path)
             .create_if_missing(true)
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)

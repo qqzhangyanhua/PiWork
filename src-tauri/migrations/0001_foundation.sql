@@ -29,7 +29,8 @@ CREATE TABLE runs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     started_at TEXT,
-    completed_at TEXT
+    completed_at TEXT,
+    UNIQUE (work_id, id)
 );
 
 CREATE INDEX idx_runs_work_id ON runs(work_id);
@@ -37,10 +38,11 @@ CREATE INDEX idx_runs_work_id ON runs(work_id);
 CREATE TABLE messages (
     id TEXT PRIMARY KEY NOT NULL,
     work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
-    run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,
+    run_id TEXT,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (work_id, run_id) REFERENCES runs(work_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_messages_work_id ON messages(work_id);
@@ -48,11 +50,12 @@ CREATE INDEX idx_messages_work_id ON messages(work_id);
 CREATE TABLE events (
     id TEXT PRIMARY KEY NOT NULL,
     work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK (sequence >= 0),
     version INTEGER NOT NULL CHECK (version > 0),
     occurred_at TEXT NOT NULL,
     payload TEXT NOT NULL CHECK (json_valid(payload)),
+    FOREIGN KEY (work_id, run_id) REFERENCES runs(work_id, id) ON DELETE CASCADE,
     UNIQUE (run_id, sequence)
 );
 
