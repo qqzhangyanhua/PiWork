@@ -106,6 +106,7 @@ pub struct MessageSummary {
     pub run_id: String,
     pub role: MessageRole,
     pub content: String,
+    pub resource_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -143,6 +144,23 @@ pub struct CreateWorkInput {
     pub goal: String,
     pub root_path: String,
     pub permission_mode: PermissionMode,
+    pub resource_draft_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = binding_path!())]
+pub struct StartWorkInput {
+    pub prompt: String,
+    pub referenced_files: Vec<String>,
+    pub resource_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = binding_path!())]
+pub struct ProjectFileSummary {
+    pub relative_path: String,
 }
 
 #[cfg(test)]
@@ -150,7 +168,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
-    use super::{CreateWorkInput, PermissionMode, RunStatus, RunSummary, WorkStatus, WorkSummary};
+    use super::{
+        CreateWorkInput, PermissionMode, ProjectFileSummary, RunStatus, RunSummary, StartWorkInput,
+        WorkStatus, WorkSummary,
+    };
 
     fn assert_string(_: &String) {}
 
@@ -236,11 +257,42 @@ mod tests {
             goal: "Compare designs".into(),
             root_path: "D:/work".into(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         };
 
         assert_eq!(
             serde_json::to_value(input).unwrap()["permissionMode"],
             "balanced"
+        );
+    }
+
+    #[test]
+    fn start_work_input_uses_structured_references() {
+        let input = StartWorkInput {
+            prompt: "Review @{src/main.ts}".into(),
+            referenced_files: vec!["src/main.ts".into()],
+            resource_ids: Vec::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(input).unwrap(),
+            json!({
+                "prompt": "Review @{src/main.ts}",
+                "referencedFiles": ["src/main.ts"],
+                "resourceIds": []
+            })
+        );
+    }
+
+    #[test]
+    fn project_file_summary_uses_a_relative_path() {
+        let file = ProjectFileSummary {
+            relative_path: "src/main.ts".into(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(file).unwrap(),
+            json!({ "relativePath": "src/main.ts" })
         );
     }
 }

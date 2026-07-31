@@ -6,17 +6,43 @@ use tokio::sync::mpsc;
 use crate::domain::work::PermissionMode;
 
 pub mod fake;
+pub mod pi;
 pub mod publisher;
 pub mod supervisor;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineImage {
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineDocument {
+    pub name: String,
+    pub media_type: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineInput {
+    pub message: String,
+    pub images: Vec<EngineImage>,
+    pub documents: Vec<EngineDocument>,
+}
 
 #[async_trait]
 pub trait EngineAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
 
+    async fn model_label(&self, fallback: &str) -> Result<String, EngineError> {
+        Ok(fallback.to_owned())
+    }
+
     async fn start(
         &self,
         context: EngineRunContext,
-        prompt: String,
+        input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError>;
 

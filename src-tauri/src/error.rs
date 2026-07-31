@@ -16,6 +16,15 @@ pub enum AppError {
     #[error("run not found: {run_id}")]
     RunNotFound { run_id: String },
 
+    #[error("resource not found: {resource_id}")]
+    ResourceNotFound { resource_id: String },
+
+    #[error("resource import failed: {code}")]
+    ResourceImport { code: String },
+
+    #[error("resource storage operation failed")]
+    ResourceStorage,
+
     #[error("invalid Work status transition for {work_id}: {from:?} -> {to:?}")]
     InvalidWorkState {
         work_id: String,
@@ -43,13 +52,28 @@ pub enum AppError {
     EngineFaulted { work_id: String },
 
     #[error("Engine failed to start for Work: {work_id}")]
-    EngineStartFailed { work_id: String },
+    EngineStartFailed {
+        work_id: String,
+        reason: Option<String>,
+    },
 
     #[error("engine operation failed: {message}")]
     Engine { message: String },
 
     #[error("event publication failed: {message}")]
     EventPublish { message: String },
+
+    #[error("model configuration is required")]
+    ModelConfigurationRequired,
+
+    #[error("model connection failed: {message}")]
+    ModelConnection { message: String },
+
+    #[error("model configuration failed: {message}")]
+    ModelConfiguration { message: String },
+
+    #[error("credential operation failed: {message}")]
+    Credential { message: String },
 
     #[error("database operation failed: {0}")]
     Database(#[from] sqlx::Error),
@@ -70,6 +94,9 @@ pub enum AppError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("referenced file is unavailable: {path}: {message}")]
+    ReferencedFile { path: String, message: String },
 
     #[error("application path resolution failed: {0}")]
     PathResolution(#[from] tauri::Error),
@@ -142,11 +169,39 @@ impl AppError {
     pub fn engine_start_failed(work_id: impl Into<String>) -> Self {
         Self::EngineStartFailed {
             work_id: work_id.into(),
+            reason: None,
+        }
+    }
+
+    pub fn resource_not_found(resource_id: impl Into<String>) -> Self {
+        Self::ResourceNotFound {
+            resource_id: resource_id.into(),
+        }
+    }
+
+    pub fn resource_import(code: impl Into<String>) -> Self {
+        Self::ResourceImport { code: code.into() }
+    }
+
+    pub fn engine_start_failed_with_reason(
+        work_id: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::EngineStartFailed {
+            work_id: work_id.into(),
+            reason: Some(reason.into()),
         }
     }
 
     pub fn engine(message: impl Into<String>) -> Self {
         Self::Engine {
+            message: message.into(),
+        }
+    }
+
+    pub fn referenced_file(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::ReferencedFile {
+            path: path.into(),
             message: message.into(),
         }
     }
@@ -202,15 +257,56 @@ impl AppError {
                 "Work engine lifecycle is faulted",
                 Some(json!({ "workId": work_id })),
             ),
-            Self::EngineStartFailed { work_id } => (
-                "engine_start_failed",
-                "Engine failed to start",
-                Some(json!({ "workId": work_id })),
-            ),
+            Self::EngineStartFailed { work_id, reason } => {
+                let mut details = json!({ "workId": work_id });
+                if let Some(reason) = reason {
+                    details["reason"] = Value::String(reason.clone());
+                }
+                (
+                    "engine_start_failed",
+                    "Engine failed to start",
+                    Some(details),
+                )
+            }
             Self::Engine { .. } => ("engine_error", "Engine operation failed", None),
             Self::EventPublish { .. } => (
                 "event_publish_error",
                 "Work event could not be published",
+                None,
+            ),
+            Self::ResourceNotFound { resource_id } => (
+                "resource_not_found",
+                "Resource not found",
+                Some(json!({ "resourceId": resource_id })),
+            ),
+            Self::ResourceImport { code } => (
+                "resource_import",
+                "Resource import failed",
+                Some(json!({ "reason": code })),
+            ),
+            Self::ResourceStorage => (
+                "resource_storage",
+                "Resource storage operation failed",
+                None,
+            ),
+            Self::ModelConfigurationRequired => (
+                "model_configuration_required",
+                "A verified model configuration is required",
+                None,
+            ),
+            Self::ModelConnection { .. } => (
+                "model_connection_error",
+                "The model provider could not be verified",
+                None,
+            ),
+            Self::ModelConfiguration { .. } => (
+                "model_configuration_error",
+                "The model configuration is unavailable",
+                None,
+            ),
+            Self::Credential { .. } => (
+                "credential_error",
+                "The model credential could not be stored",
                 None,
             ),
             Self::Database(_) => ("database_error", "Database operation failed", None),
@@ -227,6 +323,11 @@ impl AppError {
                     "field": "rootPath",
                     "path": path.to_string_lossy()
                 })),
+            ),
+            Self::ReferencedFile { path, .. } => (
+                "referenced_file_error",
+                "A referenced project file is unavailable",
+                Some(json!({ "path": path })),
             ),
             Self::PathResolution(_) => (
                 "path_resolution_error",
@@ -291,6 +392,26 @@ mod tests {
             json!({
                 "code": "database_error",
                 "message": "Database operation failed"
+            })
+        );
+    }
+
+    #[test]
+    fn engine_start_failure_exposes_only_the_explicit_safe_diagnostic() {
+        let error = AppError::engine_start_failed_with_reason(
+            "work-id",
+            "pi_rpc_stdout_closed: sidecar exited with code 1",
+        );
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            json!({
+                "code": "engine_start_failed",
+                "message": "Engine failed to start",
+                "details": {
+                    "workId": "work-id",
+                    "reason": "pi_rpc_stdout_closed: sidecar exited with code 1"
+                }
             })
         );
     }

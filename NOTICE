@@ -17,8 +17,39 @@ Repository: https://github.com/earendil-works/pi
 License: MIT
 Upstream copyright: Copyright (c) 2025 Mario Zechner
 
-The current foundation build uses a PiWork fake engine. It does not package
-or distribute the pi coding agent source code or binary.
+PiWork packages pi coding agent 0.80.2 as a local RPC sidecar. Its MIT
+license is shipped as pi-sidecar/PI-LICENSE.txt.
+
+Node.js
+-------
+
+Repository: https://github.com/nodejs/node
+License: MIT and bundled third-party notices
+
+PiWork packages a Node.js runtime for the local Pi sidecar. The complete
+Node.js license and bundled third-party notices are shipped as
+pi-sidecar/NODE-LICENSE.txt.
+
+Xberg
+-----
+
+Repository: https://github.com/xberg-io/xberg
+License: MIT
+
+PiWork uses Xberg 1.0.5 in an isolated local document-runtime process to
+extract bounded Markdown from PDF, Word, and spreadsheet attachments.
+
+Tesseract OCR and Leptonica
+--------------------------
+
+Tesseract repository: https://github.com/tesseract-ocr/tesseract
+Tesseract license: Apache License 2.0
+Leptonica repository: https://github.com/DanBloomberg/leptonica
+Leptonica license: BSD 2-Clause
+
+Xberg's OCR feature builds Tesseract and Leptonica for local scanned-PDF
+recognition. The bundled English trained data originates from the Tesseract
+tessdata_fast project and is distributed under the Apache License 2.0.
 
 Onyx
 ----

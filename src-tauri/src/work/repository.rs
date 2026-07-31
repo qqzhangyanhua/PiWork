@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -26,6 +28,7 @@ impl WorkRepository {
     }
 
     pub async fn create(&self, input: CreateWorkInput) -> Result<WorkDetail, AppError> {
+        let resource_draft_id = input.resource_draft_id.clone();
         let title = input.title.trim();
         if title.is_empty() {
             return Err(AppError::invalid_input("title", "title must not be empty"));
@@ -66,6 +69,7 @@ impl WorkRepository {
             updated_at: now,
         };
 
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO works \
              (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
@@ -79,8 +83,20 @@ impl WorkRepository {
         .bind(summary.status)
         .bind(summary.created_at)
         .bind(summary.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
+
+        if let Some(draft_id) = resource_draft_id {
+            sqlx::query(
+                "UPDATE resource_links SET work_id = ?, draft_id = NULL \
+                 WHERE draft_id = ? AND work_id IS NULL",
+            )
+            .bind(&summary.id)
+            .bind(draft_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
 
         Ok(WorkDetail {
             summary,
@@ -166,7 +182,7 @@ impl WorkRepository {
         .into_iter()
         .map(WorkEventEnvelope::try_from)
         .collect::<Result<Vec<_>, _>>()?;
-        let messages = sqlx::query_as::<_, MessageRow>(
+        let mut messages = sqlx::query_as::<_, MessageRow>(
             "SELECT messages.id, messages.work_id, messages.run_id, messages.role, \
                     messages.content, messages.created_at \
              FROM messages \
@@ -180,7 +196,29 @@ impl WorkRepository {
         .await?
         .into_iter()
         .map(MessageSummary::from)
-        .collect();
+        .collect::<Vec<_>>();
+        let mut resources_by_message = HashMap::<String, Vec<String>>::new();
+        for (message_id, resource_id) in sqlx::query_as::<_, (String, String)>(
+            "SELECT resource_links.message_id, resource_links.resource_id \
+             FROM resource_links \
+             INNER JOIN messages \
+                ON messages.id = resource_links.message_id \
+               AND messages.work_id = resource_links.work_id \
+             WHERE resource_links.work_id = ? AND resource_links.message_id IS NOT NULL \
+             ORDER BY resource_links.created_at ASC, resource_links.id ASC",
+        )
+        .bind(id)
+        .fetch_all(&mut *connection)
+        .await?
+        {
+            resources_by_message
+                .entry(message_id)
+                .or_default()
+                .push(resource_id);
+        }
+        for message in &mut messages {
+            message.resource_ids = resources_by_message.remove(&message.id).unwrap_or_default();
+        }
 
         Ok(WorkDetail {
             summary: row.into(),
@@ -203,7 +241,7 @@ impl WorkRepository {
 
     pub async fn recover_interrupted_runs(&self) -> Result<u64, AppError> {
         let now = Utc::now();
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "UPDATE works SET status = ?, updated_at = ? \
              WHERE id IN (\
@@ -254,7 +292,7 @@ impl WorkRepository {
             started_at: None,
             completed_at: None,
         };
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let updated = sqlx::query("UPDATE works SET updated_at = ? WHERE id = ?")
             .bind(now)
             .bind(work_id)
@@ -288,18 +326,25 @@ impl WorkRepository {
         &self,
         work_id: &str,
         prompt: &str,
+        resource_ids: &[String],
         engine_kind: &str,
         model_label: &str,
     ) -> Result<StartWorkOutput, AppError> {
         let prompt = prompt.trim();
-        if prompt.is_empty() {
+        let mut seen = HashSet::new();
+        let resource_ids = resource_ids
+            .iter()
+            .filter(|resource_id| seen.insert((*resource_id).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if prompt.is_empty() && resource_ids.is_empty() {
             return Err(AppError::invalid_input(
                 "prompt",
-                "prompt must not be empty",
+                "prompt or attachment must not be empty",
             ));
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let work = Self::load_work(&mut transaction, work_id)
             .await?
             .ok_or_else(|| AppError::work_not_found(work_id))?;
@@ -308,6 +353,28 @@ impl WorkRepository {
             WorkStatus::Queued | WorkStatus::Running | WorkStatus::Waiting
         ) {
             return Err(AppError::work_already_running(work_id));
+        }
+        if !resource_ids.is_empty() {
+            let resource_ids_json = serde_json::to_string(&resource_ids)
+                .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
+            let ready_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(DISTINCT managed_resources.id) \
+                 FROM managed_resources \
+                 INNER JOIN resource_links \
+                    ON resource_links.resource_id = managed_resources.id \
+                 WHERE managed_resources.id IN (SELECT value FROM json_each(?)) \
+                   AND managed_resources.status = 'ready' \
+                   AND resource_links.work_id = ? \
+                   AND resource_links.message_id IS NULL \
+                   AND resource_links.role IN ('attached', 'pinned')",
+            )
+            .bind(resource_ids_json)
+            .bind(work_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if usize::try_from(ready_count).ok() != Some(resource_ids.len()) {
+                return Err(AppError::resource_import("resource_not_ready_or_unlinked"));
+            }
         }
         let queued = transition(work.status, WorkAction::Queue)
             .map_err(|_| AppError::invalid_work_state(work_id, work.status, WorkStatus::Queued))?;
@@ -331,6 +398,7 @@ impl WorkRepository {
             run_id: run.id.clone(),
             role: MessageRole::User,
             content: prompt.to_owned(),
+            resource_ids: resource_ids.clone(),
             created_at: now,
         };
 
@@ -372,6 +440,21 @@ impl WorkRepository {
         .bind(user_message.created_at)
         .execute(&mut *transaction)
         .await?;
+        for resource_id in &resource_ids {
+            sqlx::query(
+                "INSERT INTO resource_links \
+                 (id, resource_id, work_id, draft_id, message_id, run_id, role, created_at) \
+                 VALUES (?, ?, ?, NULL, ?, ?, 'attached', ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(resource_id)
+            .bind(work_id)
+            .bind(&user_message.id)
+            .bind(&run.id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
         transaction.commit().await?;
 
         Ok(StartWorkOutput { run, user_message })
@@ -388,7 +471,7 @@ impl WorkRepository {
             ));
         }
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
             .bind(&envelope.run_id)
             .fetch_optional(&mut *transaction)
@@ -532,7 +615,7 @@ impl WorkRepository {
         engine_kind: &str,
         session_id: &str,
     ) -> Result<RunSummary, AppError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut run = sqlx::query_as::<_, RunRow>(
             "SELECT id, work_id, engine_kind, engine_session_id, model_label, status, \
                     created_at, started_at, completed_at FROM runs WHERE id = ?",
@@ -577,7 +660,7 @@ impl WorkRepository {
         work_id: &str,
         reason: &str,
     ) -> Result<WorkEventEnvelope, AppError> {
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
             .bind(run_id)
             .fetch_optional(&mut *transaction)
@@ -930,6 +1013,7 @@ impl From<MessageRow> for MessageSummary {
             run_id: row.run_id,
             role: row.role,
             content: row.content,
+            resource_ids: Vec::new(),
             created_at: row.created_at,
         }
     }
@@ -995,11 +1079,136 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
-        domain::work::{CreateWorkInput, PermissionMode, RunStatus, WorkStatus},
+        domain::{
+            event::{WorkEventEnvelope, WorkEventPayload},
+            work::{CreateWorkInput, PermissionMode, RunStatus, WorkStatus},
+        },
         storage::sqlite::Database,
     };
 
     use super::WorkRepository;
+
+    #[tokio::test]
+    async fn event_append_waits_for_a_concurrent_session_attachment() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory
+            .path()
+            .join("event-session-race.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Concurrent session".into(),
+                goal: "Journal the first event".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+
+        let mut session_attachment = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE runs SET engine_session_id = ? WHERE id = ?")
+            .bind("session-1")
+            .bind(&started.run.id)
+            .execute(&mut *session_attachment)
+            .await
+            .unwrap();
+
+        let append_repository = repository.clone();
+        let envelope = WorkEventEnvelope {
+            version: 1,
+            work_id: work.summary.id.clone(),
+            run_id: started.run.id.clone(),
+            sequence: 1,
+            occurred_at: Utc::now(),
+            payload: WorkEventPayload::RunStarted {
+                model_label: "test-model".into(),
+            },
+        };
+        let expected = envelope.clone();
+        let append = tokio::spawn(async move {
+            append_repository
+                .append_event_and_transition(&envelope)
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        session_attachment.commit().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), append)
+            .await
+            .expect("event append remained blocked after session attachment")
+            .unwrap()
+            .expect("event append failed after concurrent session attachment");
+
+        let detail = repository.get(&work.summary.id).await.unwrap().unwrap();
+        assert_eq!(detail.events, vec![expected]);
+    }
+
+    #[tokio::test]
+    async fn session_attachment_waits_for_a_concurrent_event_append() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory
+            .path()
+            .join("session-event-race.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Concurrent event".into(),
+                goal: "Attach the engine session".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+
+        let mut event_append = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query(
+            "INSERT INTO events \
+             (id, work_id, run_id, sequence, version, occurred_at, payload) \
+             VALUES (?, ?, ?, 1, 1, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&work.summary.id)
+        .bind(&started.run.id)
+        .bind(Utc::now())
+        .bind(r#"{"type":"runStarted","modelLabel":"test-model"}"#)
+        .execute(&mut *event_append)
+        .await
+        .unwrap();
+
+        let attach_repository = repository.clone();
+        let run_id = started.run.id.clone();
+        let attachment = tokio::spawn(async move {
+            attach_repository
+                .attach_engine_session(&run_id, "test-engine", "session-1")
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        event_append.commit().await.unwrap();
+
+        let attached = tokio::time::timeout(Duration::from_secs(1), attachment)
+            .await
+            .expect("session attachment remained blocked after event append")
+            .unwrap()
+            .expect("session attachment failed after concurrent event append");
+
+        assert_eq!(attached.engine_session_id.as_deref(), Some("session-1"));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detail_read_keeps_one_snapshot_during_concurrent_run_and_event_inserts() {
@@ -1015,6 +1224,7 @@ mod tests {
                 goal: "Read consistently".into(),
                 root_path: workspace_path.to_string_lossy().into_owned(),
                 permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
             })
             .await
             .unwrap();
@@ -1080,6 +1290,7 @@ mod tests {
                 goal: "Allow one transition".into(),
                 root_path: workspace_path.to_string_lossy().into_owned(),
                 permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
             })
             .await
             .unwrap();
@@ -1160,6 +1371,7 @@ mod tests {
                 goal: "Allow one transition".into(),
                 root_path: workspace_path.to_string_lossy().into_owned(),
                 permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
             })
             .await
             .unwrap();

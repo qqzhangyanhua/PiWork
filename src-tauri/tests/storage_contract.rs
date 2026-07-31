@@ -1,6 +1,31 @@
 use piwork_lib::storage::sqlite::Database;
 use sqlx::sqlite::SqliteQueryResult;
 
+#[test]
+fn migration_files_use_stable_lf_line_endings() {
+    let migration = include_bytes!("../migrations/0001_foundation.sql");
+
+    assert!(
+        !migration.contains(&b'\r'),
+        "migration checksums must not vary between Windows and Unix checkouts"
+    );
+}
+
+#[test]
+fn resource_migration_uses_stable_lf_line_endings() {
+    let migration = include_bytes!("../migrations/0002_resources.sql");
+    assert!(
+        !migration.contains(&b'\r'),
+        "resource migration checksums must not vary between Windows and Unix checkouts"
+    );
+}
+
+#[test]
+fn document_derivative_migration_uses_stable_lf_line_endings() {
+    let migration = include_bytes!("../migrations/0003_document_derivatives.sql");
+    assert!(!migration.contains(&b'\r'));
+}
+
 async fn insert_work(database: &Database, id: &str) {
     insert_work_with_permission_mode(database, id, "balanced")
         .await
@@ -87,6 +112,69 @@ async fn migration_creates_foundation_tables() {
     for expected in ["works", "runs", "messages", "events", "settings"] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+}
+
+#[tokio::test]
+async fn migration_creates_resource_tables_and_local_personal_space() {
+    let database = Database::open_in_memory().await.unwrap();
+    let names = database.table_names().await.unwrap();
+
+    for expected in [
+        "spaces",
+        "resource_blobs",
+        "blob_replicas",
+        "managed_resources",
+        "resource_links",
+    ] {
+        assert!(names.contains(&expected.to_string()), "missing {expected}");
+    }
+
+    let kind: String = sqlx::query_scalar("SELECT kind FROM spaces WHERE id = 'local-personal'")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(kind, "personal");
+
+    let work_space_column: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('works') WHERE name = 'space_id'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(work_space_column, 1);
+}
+
+#[tokio::test]
+async fn migration_creates_constrained_document_derivatives() {
+    let database = Database::open_in_memory().await.unwrap();
+    let names = database.table_names().await.unwrap();
+    assert!(names.contains(&"resource_derivatives".to_string()));
+
+    let sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'resource_derivatives'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert!(sql.contains("canonical_markdown"));
+    assert!(sql.contains("processing"));
+    assert!(sql.contains("ready"));
+    assert!(sql.contains("failed"));
+}
+
+#[tokio::test]
+async fn resource_links_require_exactly_one_work_or_draft_owner() {
+    let database = Database::open_in_memory().await.unwrap();
+    let result = sqlx::query(
+        "INSERT INTO resource_links \
+         (id, resource_id, work_id, draft_id, role, created_at) \
+         VALUES ('link-1', 'missing', NULL, NULL, 'attached', ?)",
+    )
+    .bind("2026-07-31T00:00:00Z")
+    .execute(database.pool())
+    .await;
+
+    assert_database_error_contains(result, "CHECK constraint failed");
 }
 
 #[tokio::test]

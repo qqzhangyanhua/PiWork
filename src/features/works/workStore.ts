@@ -3,7 +3,9 @@ import { createStore } from "zustand/vanilla";
 import { tauriClient, type PiWorkClient } from "../../app/tauriClient";
 import type {
   CreateWorkInput,
+  ImportResourcesInput,
   MessageSummary,
+  ResourceSummary,
   RunSummary,
   StartWorkOutput,
   WorkDetail,
@@ -20,9 +22,10 @@ import {
 
 export type WorkState = {
   works: Record<string, WorkSummary>;
+  resources: Record<string, ResourceSummary[]>;
   selectedWorkId: string | null;
   timelines: Record<string, TimelineItem[]>;
-  queuedInstructions: Record<string, string[]>;
+  queuedInstructions: Record<string, QueuedInstruction[]>;
   latestRuns: Record<string, RunSummary>;
   lastSequenceByRun: Record<string, number>;
   loading: boolean;
@@ -30,11 +33,28 @@ export type WorkState = {
   hydrationError: AppError | null;
   hydrate(): Promise<void>;
   createWork(input: CreateWorkInput): Promise<WorkDetail>;
-  startWork(workId: string, prompt: string): Promise<StartWorkOutput>;
-  queueInstruction(workId: string, prompt: string): void;
+  importResources(input: ImportResourcesInput): Promise<ResourceSummary[]>;
+  startWork(
+    workId: string,
+    prompt: string,
+    referencedFiles?: string[],
+    resourceIds?: string[],
+  ): Promise<StartWorkOutput>;
+  queueInstruction(
+    workId: string,
+    prompt: string,
+    referencedFiles?: string[],
+    resourceIds?: string[],
+  ): void;
   selectWork(workId: string): void;
   upsertWork(work: WorkSummary): void;
   applyEvent(event: WorkEventEnvelope): void;
+};
+
+export type QueuedInstruction = {
+  prompt: string;
+  referencedFiles: string[];
+  resourceIds: string[];
 };
 
 type InternalWorkState = WorkState & {
@@ -401,6 +421,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
 
     return {
       works: {},
+      resources: {},
       selectedWorkId: null,
       timelines: {},
       queuedInstructions: {},
@@ -449,6 +470,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
 
             const intent = latestSelectionIntent;
             const request = beginSelectionRequest();
+            const resourcesPromise = client.listWorkResources(selectedWorkId);
             const detail = await client.getWork(selectedWorkId);
             if (
               intent !== latestSelectionIntent ||
@@ -458,6 +480,23 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               return;
             }
             set((state) => reduceWork(state, { type: "detail", detail }));
+            void resourcesPromise.then(
+              (resources) => {
+                if (
+                  intent === latestSelectionIntent &&
+                  request === latestSelectionRequest &&
+                  get().selectedWorkId === selectedWorkId
+                ) {
+                  set((state) => ({
+                    resources: {
+                      ...state.resources,
+                      [selectedWorkId]: resources,
+                    },
+                  }));
+                }
+              },
+              () => undefined,
+            );
             if (operation === errorOwner) set({ hydrationError: null });
             succeedOperation(operation);
           } catch (error) {
@@ -478,7 +517,11 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         const operation = beginOperation();
         try {
           const detail = await client.createWork(input);
-          set((state) => reduceWork(state, { type: "detail", detail }));
+          const resources = await client.listWorkResources(detail.summary.id);
+          set((state) => ({
+            ...reduceWork(state, { type: "detail", detail }),
+            resources: { ...state.resources, [detail.summary.id]: resources },
+          }));
           if (intent === latestSelectionIntent) {
             set({ selectedWorkId: detail.summary.id });
           }
@@ -491,7 +534,37 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           endOperation();
         }
       },
-      startWork: async (workId, prompt) => {
+      importResources: async (input) => {
+        const operation = beginOperation();
+        try {
+          const imported = await client.importResources(input);
+          if (input.workId) {
+            set((state) => {
+              const merged = new Map(
+                (state.resources[input.workId!] ?? []).map((resource) => [
+                  resource.id,
+                  resource,
+                ]),
+              );
+              for (const resource of imported) merged.set(resource.id, resource);
+              return {
+                resources: {
+                  ...state.resources,
+                  [input.workId!]: [...merged.values()],
+                },
+              };
+            });
+          }
+          succeedOperation(operation);
+          return imported;
+        } catch (error) {
+          failOperation(operation, error);
+          throw error;
+        } finally {
+          endOperation();
+        }
+      },
+      startWork: async (workId, prompt, referencedFiles = [], resourceIds = []) => {
         const operation = beginOperation();
         const knownUserMessageIds = new Set(
           (get().timelines[workId] ?? [])
@@ -502,7 +575,12 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
             .map(({ id }) => id),
         );
         try {
-          const output = await client.startWork(workId, prompt);
+          const output = await client.startWork(
+            workId,
+            prompt,
+            referencedFiles,
+            resourceIds,
+          );
           set((state) => reduceWork(state, { type: "startResponse", output }));
           succeedOperation(operation);
           return output;
@@ -514,7 +592,9 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
             instructionPersisted = detail.messages.some(
               (message) =>
                 message.role === "user" &&
-                !knownUserMessageIds.has(message.id),
+                !knownUserMessageIds.has(message.id) &&
+                message.resourceIds.length === resourceIds.length &&
+                message.resourceIds.every((id, index) => id === resourceIds[index]),
             );
             set((state) => reduceWork(state, { type: "detail", detail }));
           } catch {
@@ -528,15 +608,24 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           endOperation();
         }
       },
-      queueInstruction: (workId, prompt) => {
+      queueInstruction: (
+        workId,
+        prompt,
+        referencedFiles = [],
+        resourceIds = [],
+      ) => {
         const instruction = prompt.trim();
-        if (!instruction) return;
+        if (!instruction && resourceIds.length === 0) return;
         set((state) => ({
           queuedInstructions: {
             ...state.queuedInstructions,
             [workId]: [
               ...(state.queuedInstructions[workId] ?? []),
-              instruction,
+              {
+                prompt: instruction,
+                referencedFiles: [...referencedFiles],
+                resourceIds: [...resourceIds],
+              },
             ],
           },
         }));
@@ -548,6 +637,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         set({ selectedWorkId: workId });
         void (async () => {
           try {
+            const resourcesPromise = client.listWorkResources(workId);
             const detail = await client.getWork(workId);
             if (
               intent !== latestSelectionIntent ||
@@ -557,6 +647,20 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
               return;
             }
             set((state) => reduceWork(state, { type: "detail", detail }));
+            void resourcesPromise.then(
+              (resources) => {
+                if (
+                  intent === latestSelectionIntent &&
+                  request === latestSelectionRequest &&
+                  get().selectedWorkId === workId
+                ) {
+                  set((state) => ({
+                    resources: { ...state.resources, [workId]: resources },
+                  }));
+                }
+              },
+              () => undefined,
+            );
             if (operation === errorOwner) set({ hydrationError: null });
             succeedOperation(operation);
           } catch (error) {

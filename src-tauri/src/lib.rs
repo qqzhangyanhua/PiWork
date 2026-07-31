@@ -1,12 +1,17 @@
+#![allow(linker_messages)] // Xberg's bundled static Tesseract selects a release CRT in debug builds.
+
 use std::{future::Future, sync::Arc};
 
-use tauri::Manager;
+use tauri::{Manager, path::BaseDirectory};
 
 pub mod app_state;
+pub mod document_runtime;
 pub mod domain;
 pub mod engine;
 pub mod error;
+pub mod model;
 pub mod paths;
+pub mod resource;
 pub mod storage;
 pub mod work;
 
@@ -133,15 +138,26 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 let _ = focus_visible_main_window(&window);
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let paths = paths::AppPaths::from_resolver(app.path())?;
             // Tauri's setup callback runs synchronously on the event-loop thread. Bridge the
             // complete startup sequence once. The configured main window remains hidden until
             // migrations, recovery, and managed state assembly all succeed.
             let database_path = paths.database_path().to_path_buf();
+            let engine_sessions_dir = paths.engine_sessions_dir();
+            let runtime_dir = paths.runtime_dir();
+            let resources_dir = paths.resources_dir();
+            let resource_cache_dir = paths.resource_cache_dir();
+            let bundled_pi = app
+                .path()
+                .resolve("pi-sidecar/dist/piwork-pi.js", BaseDirectory::Resource)
+                .ok();
             tauri::async_runtime::block_on(orchestrate_startup(
                 || {
                     let database_path = database_path.clone();
+                    let resources_dir = resources_dir.clone();
+                    let resource_cache_dir = resource_cache_dir.clone();
                     async move {
                         let database = storage::sqlite::Database::open(database_path).await?;
                         let repository =
@@ -149,13 +165,31 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         work::service::WorkService::new(repository.clone())
                             .recover_interrupted_runs()
                             .await?;
-                        Ok::<_, StartupError>(repository)
+                        let model_repository =
+                            model::ModelConfigurationRepository::new(database.pool().clone());
+                        let resource_repository =
+                            resource::repository::ResourceRepository::new(database.pool().clone());
+                        let blob_store = Arc::new(resource::local_blob_store::LocalBlobStore::new(
+                            resources_dir,
+                        ));
+                        let resource_service = Arc::new(resource::service::ResourceService::new(
+                            resource_repository,
+                            blob_store,
+                            resource_cache_dir,
+                        ));
+                        resource_service.recover_interrupted_imports().await?;
+                        Ok::<_, StartupError>((repository, model_repository, resource_service))
                     }
                 },
-                |repository| -> StartupResult<()> {
-                    let engine = Arc::new(engine::fake::FakeEngineAdapter::new(
-                        std::time::Duration::from_millis(120),
-                    ));
+                |(repository, model_repository, resource_service)| -> StartupResult<()> {
+                    let model_service =
+                        Arc::new(model::ModelService::production(model_repository)?);
+                    let engine = Arc::new(engine::pi::PiEngineAdapter::production_with_executable(
+                        Arc::clone(&model_service),
+                        engine_sessions_dir.clone(),
+                        runtime_dir.clone(),
+                        bundled_pi.clone(),
+                    )?);
                     let publisher = Arc::new(engine::publisher::TauriEventPublisher::new(
                         app.handle().clone(),
                     ));
@@ -163,12 +197,19 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         repository.clone(),
                         engine,
                         publisher,
-                        "Fake model",
+                        "Pi",
                     ));
-                    let service = Arc::new(work::service::WorkService::with_supervisor(
-                        repository, supervisor,
-                    ));
-                    if !app.manage(app_state::AppState::new(service)) {
+                    let service =
+                        Arc::new(work::service::WorkService::with_supervisor_and_resources(
+                            repository,
+                            supervisor,
+                            Arc::clone(&resource_service),
+                        ));
+                    if !app.manage(app_state::AppState::with_services(
+                        service,
+                        model_service,
+                        resource_service,
+                    )) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             "PiWork application state is already managed",
@@ -190,7 +231,15 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             work::commands::create_work,
             work::commands::list_works,
             work::commands::get_work,
-            work::commands::start_work
+            work::commands::list_project_files,
+            work::commands::start_work,
+            model::commands::get_model_configuration_status,
+            model::commands::test_model_connection,
+            model::commands::save_model_configuration,
+            resource::commands::import_resources,
+            resource::commands::list_work_resources,
+            resource::commands::get_resource_thumbnail,
+            resource::commands::detach_draft_resource
         ])
 }
 
@@ -241,13 +290,37 @@ mod tests {
     }
 
     #[test]
-    fn release_windows_binary_declares_the_gui_subsystem() {
+    fn production_registers_every_resource_command() {
+        let source = include_str!("lib.rs");
+        for command in [
+            "resource::commands::import_resources",
+            "resource::commands::list_work_resources",
+            "resource::commands::get_resource_thumbnail",
+            "resource::commands::detach_draft_resource",
+        ] {
+            assert!(source.contains(command), "missing {command}");
+        }
+    }
+
+    #[test]
+    fn production_uses_pi_rpc_instead_of_direct_model_completion() {
+        let source = include_str!("lib.rs");
+        let assembly = source
+            .split("fn application_builder()")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg_attr(mobile")
+            .next()
+            .unwrap();
+        assert!(assembly.contains("engine::pi::PiEngineAdapter::production_with_executable"));
+        assert!(!assembly.contains("ConfiguredModelEngineAdapter::new"));
+    }
+
+    #[test]
+    fn every_windows_binary_declares_the_gui_subsystem() {
         let source = include_str!("main.rs");
-        assert!(
-            source.starts_with(
-                "#![cfg_attr(not(debug_assertions), windows_subsystem = \"windows\")]"
-            )
-        );
+        assert!(source.starts_with("#![cfg_attr(windows, windows_subsystem = \"windows\")]"));
+        assert!(!source.contains("not(debug_assertions)"));
     }
 
     #[test]
@@ -270,6 +343,10 @@ mod tests {
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
 
         assert_eq!(config["bundle"]["resources"]["../NOTICE"], "NOTICE");
+        assert_eq!(
+            config["bundle"]["resources"]["binaries/pi-sidecar"],
+            "pi-sidecar"
+        );
         assert!(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../NOTICE")

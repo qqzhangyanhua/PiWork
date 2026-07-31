@@ -2,7 +2,13 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RunSummary, StartWorkOutput, WorkDetail, WorkEventEnvelope } from "../../bindings";
+import type {
+  ResourceSummary,
+  RunSummary,
+  StartWorkOutput,
+  WorkDetail,
+  WorkEventEnvelope,
+} from "../../bindings";
 import { i18n } from "../../i18n";
 import {
   createMockTauriClient,
@@ -36,6 +42,20 @@ const seededDetail = (status: WorkDetail["summary"]["status"] = "draft"): WorkDe
   events: [],
 });
 
+const resource = (
+  overrides: Partial<ResourceSummary> = {},
+): ResourceSummary => ({
+  id: "resource-1",
+  originalName: "chart.png",
+  mediaType: "image/png",
+  size: 68n,
+  origin: "user_upload",
+  status: "ready",
+  failureCode: null,
+  createdAt: "2026-07-28T08:00:00.000Z",
+  ...overrides,
+});
+
 const event = (
   sequence: number,
   payload: WorkEventEnvelope["payload"],
@@ -50,6 +70,7 @@ const event = (
 
 beforeEach(async () => {
   await i18n.changeLanguage("zh-CN");
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -57,36 +78,283 @@ afterEach(() => {
 });
 
 describe("WorkSurface", () => {
+  it("uploads multiple images through an injected native picker without showing full paths", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    const pickAttachments = vi.fn(async () => [
+      "C:/private/chart.png",
+      "C:/private/photo.jpg",
+    ]);
+    render(<WorkSurface client={client} pickAttachments={pickAttachments} />);
+
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+
+    expect(pickAttachments).toHaveBeenCalledOnce();
+    expect(await screen.findByText("chart.png")).toBeInTheDocument();
+    expect(screen.getByText("photo.jpg")).toBeInTheDocument();
+    expect(screen.queryByText(/C:\/private/u)).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed import visible without hiding ready attachments", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.importResources.mockResolvedValueOnce([
+      resource({ id: "ready", originalName: "ready.png" }),
+      resource({
+        id: "failed",
+        originalName: "broken.png",
+        status: "failed",
+        failureCode: "unsupported_image",
+      }),
+    ]);
+    render(
+      <WorkSurface
+        client={client}
+        pickAttachments={async () => ["C:/private/ready.png", "C:/private/broken.png"]}
+      />,
+    );
+
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+
+    expect(await screen.findByText("ready.png")).toBeInTheDocument();
+    expect(screen.getByText("broken.png").closest("[role='alert']")).not.toBeNull();
+  });
+
+  it("sends selected image ids separately from text and project references", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    render(
+      <WorkSurface
+        client={client}
+        pickAttachments={async () => ["C:/private/chart.png"]}
+      />,
+    );
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+    await screen.findByText("chart.png");
+    await user.type(screen.getByLabelText("给 PiWork 指令"), "解释图表");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(client.startWork).toHaveBeenLastCalledWith(
+      "work-1",
+      "解释图表",
+      [],
+      [expect.stringMatching(/^resource-/u)],
+    );
+  });
+
+  it("allows an attachment-only message and can reuse a Work attachment", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.seedResource(
+      "work-1",
+      resource({ id: "resource-existing", originalName: "saved.png" }),
+    );
+    render(<WorkSurface client={client} />);
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "saved.png" }));
+
+    const send = screen.getByRole("button", { name: "发送" });
+    expect(send).toBeEnabled();
+    await user.click(send);
+    expect(client.startWork).toHaveBeenLastCalledWith(
+      "work-1",
+      "",
+      [],
+      ["resource-existing"],
+    );
+  });
+
+  it("sends a document-only message without requesting an image thumbnail", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.seedResource(
+      "work-1",
+      resource({
+        id: "document-1",
+        originalName: "quarterly.pdf",
+        mediaType: "application/pdf",
+      }),
+    );
+    render(<WorkSurface client={client} />);
+
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "quarterly.pdf" }));
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(client.getResourceThumbnail).not.toHaveBeenCalled();
+    expect(client.startWork).toHaveBeenLastCalledWith(
+      "work-1",
+      "",
+      [],
+      ["document-1"],
+    );
+  });
+
+  it("adopts new-Work uploads and sends them on the first Run", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    render(
+      <WorkSurface
+        client={client}
+        pickProjectDirectory={async () => "D:/workspace"}
+        pickAttachments={async () => ["C:/private/brief.png"]}
+      />,
+    );
+    await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+    await screen.findByText("brief.png");
+    await user.type(screen.getByLabelText("首个任务"), "总结图片");
+    await user.click(screen.getByRole("button", { name: "开始 Work" }));
+
+    expect(client.createWork).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resourceDraftId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      }),
+    );
+    expect(client.startWork).toHaveBeenCalledWith(
+      "work-1",
+      "总结图片",
+      [],
+      [expect.stringMatching(/^resource-/u)],
+    );
+    expect(await client.listWorkResources("work-1")).toHaveLength(1);
+  });
+
+  it("allows a new Work to start from a ready attachment without text", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    render(
+      <WorkSurface
+        client={client}
+        pickProjectDirectory={async () => "D:/workspace"}
+        pickAttachments={async () => ["C:/private/brief.png"]}
+      />,
+    );
+    await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+
+    const start = await screen.findByRole("button", { name: "开始 Work" });
+    expect(start).toBeEnabled();
+    await user.click(start);
+    expect(client.createWork).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "brief.png", goal: "Review brief.png" }),
+    );
+  });
+
+  it("detaches a removed new-Work draft attachment", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    render(
+      <WorkSurface
+        client={client}
+        pickProjectDirectory={async () => "D:/workspace"}
+        pickAttachments={async () => ["C:/private/brief.png"]}
+      />,
+    );
+    await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+    await screen.findByText("brief.png");
+    await user.click(screen.getByRole("button", { name: "移除附件 brief.png" }));
+
+    expect(client.detachDraftResource).toHaveBeenCalledWith(
+      expect.stringMatching(/^[0-9a-f-]{36}$/u),
+      expect.stringMatching(/^resource-/u),
+    );
+    expect(screen.getByRole("button", { name: "开始 Work" })).toBeDisabled();
+  });
+
+  it("lists durable Work attachments in a dedicated inspector tab", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.seedResource(
+      "work-1",
+      resource({ id: "resource-1", originalName: "retained.png" }),
+    );
+    render(<WorkSurface client={client} />);
+
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "打开检查器" }));
+    await user.click(screen.getByRole("tab", { name: "附件" }));
+
+    expect(screen.getByText("retained.png")).toBeInTheDocument();
+    expect(screen.getByText("1 个附件")).toBeInTheDocument();
+  });
+
+  it("never exposes an uploaded attachment source path in product UI", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    render(
+      <WorkSurface
+        client={client}
+        pickAttachments={async () => ["C:/Users/Alice/Private/medical.png"]}
+      />,
+    );
+
+    await screen.findByText("营收看板");
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(screen.getByRole("button", { name: "上传文件" }));
+    await screen.findByText("medical.png");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(screen.getByRole("button", { name: "打开检查器" }));
+    await user.click(screen.getByRole("tab", { name: "附件" }));
+
+    expect(screen.getAllByText("medical.png").length).toBeGreaterThanOrEqual(2);
+    expect(document.body).not.toHaveTextContent(/Alice|Private|C:\\Users/u);
+  });
+
   it("创建 Work、运行、完成后继续同一个 Work", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
-    render(<WorkSurface client={client} />);
+    const pickProjectDirectory = vi.fn().mockResolvedValue("D:\\workspace\\revenue");
+    render(<WorkSurface client={client} pickProjectDirectory={pickProjectDirectory} />);
 
-    await user.click(await screen.findByRole("button", { name: "新建 Work" }));
-    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    await user.type(within(dialog).getByLabelText("目标"), "构建营收看板");
-    await user.type(
-      within(dialog).getByLabelText("工作目录"),
-      "D:\\workspace\\revenue",
-    );
-    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+    const firstPrompt = await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.type(firstPrompt, "构建营收看板");
+    await user.click(screen.getByRole("button", { name: "开始 Work" }));
 
-    const composer = await screen.findByRole("textbox", {
-      name: "给 PiWork 指令",
+    expect(client.createWork).toHaveBeenLastCalledWith({
+      title: "构建营收看板",
+      goal: "构建营收看板",
+      rootPath: "D:\\workspace\\revenue",
+      permissionMode: "balanced",
+      resourceDraftId: expect.stringMatching(/^[0-9a-f-]{36}$/u),
     });
-    await user.type(composer, "开始执行");
-    await user.click(screen.getByRole("button", { name: "发送" }));
-    expect(client.startWork).toHaveBeenLastCalledWith("work-1", "开始执行");
+    expect(client.startWork).toHaveBeenLastCalledWith("work-1", "构建营收看板", [], []);
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
 
     client.emit(runCompletedEvent({ runId: "run-1" }));
     expect(await screen.findByText("Work 已完成")).toBeInTheDocument();
-    expect(
-      screen.getByRole("status", { name: "Work 状态" }),
-    ).toHaveTextContent("已完成");
 
     await user.type(composer, "再优化一次");
     await user.click(screen.getByRole("button", { name: "继续 Work" }));
-    expect(client.startWork).toHaveBeenLastCalledWith("work-1", "再优化一次");
+    expect(client.startWork).toHaveBeenLastCalledWith("work-1", "再优化一次", [], []);
   });
 
   it("运行时额外输入只排队，不启动新 Run", async () => {
@@ -134,10 +402,11 @@ describe("WorkSurface", () => {
         runId: "run-1",
         role: "user",
         content: "只执行一次",
+        resourceIds: [],
         createdAt: "2026-07-28T08:00:10.000Z",
       },
     });
-    await waitFor(() => expect(composer).toHaveValue(""));
+    await waitFor(() => expect(composer).toBeEmptyDOMElement());
   });
 
   it("启动已持久化后拒绝时刷新权威消息、清空输入且保留产品错误", async () => {
@@ -165,6 +434,7 @@ describe("WorkSurface", () => {
         runId: "run-1",
         role: "user",
         content: instruction,
+        resourceIds: [],
         createdAt: failedRun.createdAt,
       });
       detail.summary.status = "failed";
@@ -182,7 +452,7 @@ describe("WorkSurface", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("无法启动 Run，请重试。")).toBeInTheDocument();
-    await waitFor(() => expect(composer).toHaveValue(""));
+    await waitFor(() => expect(composer).toBeEmptyDOMElement());
     expect(screen.getAllByText(instruction)).toHaveLength(1);
     expect(screen.queryByText(/Raw engine startup failure/)).not.toBeInTheDocument();
 
@@ -209,12 +479,16 @@ describe("WorkSurface", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("此 Work 已有正在运行的 Run。")).toBeInTheDocument();
+    expect(screen.getByText("此 Work 已有正在运行的 Run。").closest(".agent-activity")).not.toBeNull();
+    expect(document.querySelector(".workspace-banner")).toBeNull();
     expect(screen.queryByText(/Raw Work already/)).not.toBeInTheDocument();
     expect(screen.queryByText(/work_already_running/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开诊断" }));
+    expect(screen.getByLabelText("Work 检查器", { selector: "aside" })).toHaveAttribute("aria-hidden", "false");
+    expect(screen.getByRole("tab", { name: "日志" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText(/work_already_running/)).toBeInTheDocument();
     expect(client.getWork).toHaveBeenCalledTimes(2);
-    expect(composer).toHaveValue("开始");
+    expect(composer).toHaveTextContent("开始");
   });
 
   it("为六类事件提供独立的可读渲染", async () => {
@@ -301,6 +575,7 @@ describe("WorkSurface", () => {
         runId: "run-2",
         role: "user",
         content: "第二次用户指令",
+        resourceIds: [],
         createdAt: "2026-07-28T08:00:03.000Z",
       },
       {
@@ -309,6 +584,7 @@ describe("WorkSurface", () => {
         runId: "run-1",
         role: "user",
         content: "第一次用户指令",
+        resourceIds: [],
         createdAt: "2026-07-28T08:00:01.000Z",
       },
     ];
@@ -347,15 +623,55 @@ describe("WorkSurface", () => {
     client.seed(detail);
     render(<WorkSurface client={client} />);
 
+    await screen.findByText("交付完成");
+    await user.click(await screen.findByRole("button", { name: "打开检查器" }));
     const tabs = await screen.findByRole("tablist", { name: "Work 检查器" });
-    const artifacts = within(tabs).getByRole("tab", { name: "产物" });
-    await user.click(artifacts);
-    expect(artifacts).toHaveAttribute("aria-selected", "true");
-    const artifactPanel = screen.getByRole("tabpanel", { name: "产物" });
-    expect(within(artifactPanel).getByText("还没有产物")).toBeInTheDocument();
-    expect(within(artifactPanel).queryByText("inspector-output.html")).not.toBeInTheDocument();
+    const preview = within(tabs).getByRole("tab", { name: "预览" });
+    await user.click(preview);
+    expect(preview).toHaveAttribute("aria-selected", "true");
+    const artifactPanel = screen.getByRole("tabpanel", { name: "预览" });
+    expect(within(artifactPanel).getByText("inspector-output.html")).toBeInTheDocument();
+    expect(within(artifactPanel).queryByText("还没有产物")).not.toBeInTheDocument();
+    await user.click(within(tabs).getByRole("tab", { name: "验证" }));
     await user.keyboard("{ArrowRight}");
     expect(within(tabs).getByRole("tab", { name: "日志" })).toHaveFocus();
+  });
+
+  it("产物检查器默认跟随最新 Run，并可切换查看全部 Work", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const detail = seededDetail("completed");
+    detail.events = [
+      event(1, {
+        type: "runCompleted",
+        summary: "第一次交付",
+        artifacts: ["old-report.md"],
+        validation: [],
+        limitations: [],
+      }),
+      {
+        ...event(1, {
+          type: "runCompleted",
+          summary: "最新交付",
+          artifacts: ["latest-report.md"],
+          validation: [],
+          limitations: [],
+        }),
+        runId: "run-2",
+        occurredAt: "2026-07-28T08:00:02.000Z",
+      },
+    ];
+    client.seed(detail);
+    render(<WorkSurface client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "打开检查器" }));
+    const inspector = screen.getByLabelText("Work 检查器", { selector: "aside" });
+    expect(within(inspector).getByText("latest-report.md")).toBeInTheDocument();
+    expect(within(inspector).queryByText("old-report.md")).not.toBeInTheDocument();
+
+    await user.click(within(inspector).getByRole("button", { name: "全部 Work" }));
+    expect(within(inspector).getByText("latest-report.md")).toBeInTheDocument();
+    expect(within(inspector).getByText("old-report.md")).toBeInTheDocument();
   });
 
   it("显示加载、错误诊断与可重试入口", async () => {
@@ -431,124 +747,290 @@ describe("WorkSurface", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("无 Work 时显示产品空状态并校验创建表单", async () => {
+  it("无 Work 时直接显示首任务输入并在未选择项目时禁止开始", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     render(<WorkSurface client={client} />);
-    expect(await screen.findByText("创建第一个 Work")).toBeInTheDocument();
-    await user.click(screen.getAllByRole("button", { name: "新建 Work" })[0]!);
-    await user.click(screen.getByRole("button", { name: "创建" }));
-    expect(screen.getByText("请输入目标")).toBeInTheDocument();
-    expect(screen.getByText("请输入工作目录")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "准备做什么？" })).toBeInTheDocument();
+    const prompt = screen.getByRole("textbox", { name: "首个任务" });
+    await user.type(prompt, "分析当前项目");
+    expect(screen.getByRole("button", { name: "开始 Work" })).toBeDisabled();
     expect(client.createWork).not.toHaveBeenCalled();
   });
 
-  it("创建 dialog 限制焦点并在 Escape、关闭和成功后归还触发按钮", async () => {
+  it("可以通过系统目录选择器选定项目且不在界面暴露完整路径", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
+    const pickProjectDirectory = vi.fn().mockResolvedValue("D:\\workspace\\picked-project");
+    render(<WorkSurface client={client} pickProjectDirectory={pickProjectDirectory} />);
+
+    await user.click(await screen.findByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+
+    expect(pickProjectDirectory).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /picked-project/ })).toHaveAttribute(
+      "title",
+      "D:\\workspace\\picked-project",
+    );
+    expect(screen.queryByText("D:\\workspace\\picked-project")).not.toBeInTheDocument();
+  });
+
+  it("通过搜索最近项目选择目录且不提供手动路径输入", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    render(<WorkSurface client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "新建 Work" }));
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+
+    const search = screen.getByRole("searchbox", { name: "搜索项目" });
+    await user.type(search, "revenue");
+    await user.click(screen.getByRole("button", { name: /revenue/ }));
+
+    expect(screen.getByRole("button", { name: /revenue/ })).toHaveAttribute(
+      "title",
+      "D:\\workspace\\revenue",
+    );
+    expect(screen.queryByRole("textbox", { name: "工作目录" })).not.toBeInTheDocument();
+  });
+
+  it("点击项目浮层外部时关闭浮层", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    render(<WorkSurface client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "新建 Work" }));
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+
+    const search = screen.getByRole("searchbox", { name: "搜索项目" });
+    await user.click(search);
+    expect(search).toBeInTheDocument();
+
+    await user.click(screen.getByRole("textbox", { name: "首个任务" }));
+    expect(screen.queryByRole("searchbox", { name: "搜索项目" })).not.toBeInTheDocument();
+  });
+
+  it("最近 Work 使用紧凑单行显示", async () => {
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    const rendered = render(<WorkSurface client={client} />);
+
+    const sidebar = await screen.findByRole("complementary", { name: "Work 导航" });
+    const item = within(sidebar).getByRole("button", { name: "营收看板" });
+    expect(within(item).getByText("营收看板")).toBeInTheDocument();
+    expect(rendered.container.querySelector(".work-sidebar__time")).not.toBeInTheDocument();
+  });
+
+  it("在已有 Work 中把 @ 文件作为结构化引用发送", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    client.listProjectFiles.mockResolvedValue([
+      { relativePath: "src/features/WorkComposer.tsx" },
+    ]);
+    render(<WorkSurface client={client} />);
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    await user.click(composer);
+    await user.type(composer, "参考 @composer");
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(client.startWork).toHaveBeenLastCalledWith(
+      "work-1",
+      "参考 @{src/features/WorkComposer.tsx}",
+      ["src/features/WorkComposer.tsx"],
+      [],
+    );
+  });
+
+  it("在新建 Work 的首任务中发送 @ 文件引用", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const pickProjectDirectory = vi.fn().mockResolvedValue("D:\\workspace\\new-project");
+    client.listProjectFiles.mockResolvedValue([{ relativePath: "README.md" }]);
+    render(
+      <WorkSurface
+        client={client}
+        pickProjectDirectory={pickProjectDirectory}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    const prompt = screen.getByRole("textbox", { name: "首个任务" });
+    await user.click(prompt);
+    await user.type(prompt, "根据 @readme");
+    await screen.findByRole("option", { name: "README.md" });
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: "开始 Work" }));
+
+    expect(client.startWork).toHaveBeenLastCalledWith(
+      "work-1",
+      "根据 @{README.md}",
+      ["README.md"],
+      [],
+    );
+  });
+
+  it("切换项目时移除旧文件引用并保留周围草稿", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.listProjectFiles.mockResolvedValue([{ relativePath: "README.md" }]);
+    const pickProjectDirectory = vi.fn()
+      .mockResolvedValueOnce("D:\\workspace\\revenue")
+      .mockResolvedValueOnce("D:\\workspace\\new-project");
+    render(
+      <WorkSurface
+        client={client}
+        pickProjectDirectory={pickProjectDirectory}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+
+    const prompt = screen.getByRole("textbox", { name: "首个任务" });
+    await user.click(prompt);
+    await user.type(prompt, "比较 @readme");
+    await screen.findByRole("option", { name: "README.md" });
+    await user.keyboard("{Enter}");
+    await user.keyboard(" 和当前实现");
+
+    await user.click(screen.getByRole("button", { name: /revenue/ }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+
+    await waitFor(() => {
+      expect(prompt).toHaveTextContent("比较 和当前实现");
+      expect(prompt).not.toHaveTextContent("README.md");
+    });
+  });
+
+  it("标题栏隐藏完整目录，只通过项目芯片的悬浮提示提供路径", async () => {
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
+    render(<WorkSurface client={client} />);
+
+    await screen.findByRole("heading", { name: "营收看板" });
+    expect(screen.queryByText("D:\\workspace\\revenue")).not.toBeInTheDocument();
+    expect(screen.getByText("项目")).toHaveAttribute("title", "D:\\workspace\\revenue");
+  });
+
+  it("模型入口从标题栏移至 Work 输入框操作区", async () => {
+    const client = createMockTauriClient();
+    const detail = seededDetail("completed");
+    detail.runs = [{
+      id: "run-1",
+      workId: "work-1",
+      engineKind: "codex",
+      engineSessionId: "session-1",
+      modelLabel: "gpt-5.6-sol",
+      status: "completed",
+      createdAt: "2026-07-28T08:00:01.000Z",
+      startedAt: "2026-07-28T08:00:01.000Z",
+      completedAt: "2026-07-28T08:00:02.000Z",
+    }];
+    client.seed(detail);
+    const rendered = render(<WorkSurface client={client} modelLabel="gpt-5.6-sol" />);
+
+    await screen.findByRole("heading", { name: "营收看板" });
+    const header = rendered.container.querySelector<HTMLElement>(".work-header");
+    expect(header).not.toBeNull();
+    expect(within(header!).queryByText("gpt-5.6-sol")).not.toBeInTheDocument();
+    expect(within(header!).queryByRole("status")).not.toBeInTheDocument();
+
+    const model = screen.getByText("5.6 Sol");
+    expect(model.closest(".work-composer")).not.toBeNull();
+    expect(model.closest("[title]")).toHaveAttribute("title", "gpt-5.6-sol");
+    const actions = model.closest(".work-composer__actions");
+    expect(actions?.querySelector(".lucide-arrow-up")).toBeInTheDocument();
+    const submit = within(actions as HTMLElement).getByRole("button", { name: "继续 Work" });
+    expect(submit.childNodes).toHaveLength(1);
+  });
+
+  it("模型入口显示在新 Work 输入框操作区", async () => {
+    const client = createMockTauriClient();
+    render(<WorkSurface client={client} modelLabel="gpt-5.6-sol" />);
+
+    const model = await screen.findByText("5.6 Sol");
+    expect(model.closest(".new-work-start__actions")).not.toBeNull();
+    expect(screen.queryByText("Agent · 自动")).not.toBeInTheDocument();
+  });
+
+  it("已有 Work 时点击新建进入空白工作台，选择原 Work 可取消", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail());
     render(<WorkSurface client={client} />);
     const sidebar = screen.getByRole("complementary", { name: "Work 导航" });
     const trigger = within(sidebar).getByRole("button", { name: "新建 Work" });
 
     await user.click(trigger);
-    let dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    const goal = within(dialog).getByLabelText("目标");
-    const close = within(dialog).getByRole("button", { name: "关闭" });
-    const create = within(dialog).getByRole("button", { name: "创建" });
-    expect(goal).toHaveFocus();
-    await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(close).toHaveFocus();
-    await user.keyboard("{Shift>}{Tab}{/Shift}");
-    expect(create).toHaveFocus();
-    await user.keyboard("{Tab}");
-    expect(close).toHaveFocus();
-    await user.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument();
-    expect(trigger).toHaveFocus();
+    expect(await screen.findByRole("heading", { name: "准备做什么？" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "首个任务" })).toHaveFocus();
 
-    await user.click(trigger);
-    dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    await user.click(within(dialog).getByRole("button", { name: "关闭" }));
-    expect(trigger).toHaveFocus();
-
-    await user.click(trigger);
-    dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    await user.type(within(dialog).getByLabelText("目标"), "恢复焦点测试");
-    await user.type(within(dialog).getByLabelText("工作目录"), "D:\\workspace\\focus");
-    await user.click(within(dialog).getByRole("button", { name: "创建" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument());
-    expect(trigger).toHaveFocus();
+    await user.click(within(sidebar).getByRole("button", { name: /营收看板/ }));
+    expect(await screen.findByRole("heading", { name: "营收看板" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "首个任务" })).not.toBeInTheDocument();
   });
 
-  it("创建 pending 时同步单飞、禁用控件且成功后关闭并归还焦点", async () => {
+  it("创建 pending 时同步单飞并禁用首任务控件", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     const pendingCreate = deferred<WorkDetail>();
     client.createWork.mockImplementationOnce(() => pendingCreate.promise);
-    render(<WorkSurface client={client} />);
-    const sidebar = screen.getByRole("complementary", { name: "Work 导航" });
-    const trigger = within(sidebar).getByRole("button", { name: "新建 Work" });
+    const pickProjectDirectory = vi.fn().mockResolvedValue("D:\\workspace\\single-flight");
+    render(<WorkSurface client={client} pickProjectDirectory={pickProjectDirectory} />);
 
-    await user.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    const goal = within(dialog).getByLabelText("目标");
-    const rootPath = within(dialog).getByLabelText("工作目录");
-    const create = within(dialog).getByRole("button", { name: "创建" });
-    const cancel = within(dialog).getByRole("button", { name: "取消" });
-    const close = within(dialog).getByRole("button", { name: "关闭" });
-    await user.type(goal, "只创建一次");
-    await user.type(rootPath, "D:\\workspace\\single-flight");
-
-    fireEvent.click(create);
-    fireEvent.click(create);
-    fireEvent.submit(create.closest("form")!);
+    const prompt = await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.type(prompt, "只创建一次");
+    const start = screen.getByRole("button", { name: "开始 Work" });
+    fireEvent.click(start);
+    fireEvent.click(start);
 
     expect(client.createWork).toHaveBeenCalledTimes(1);
-    expect(goal).toBeDisabled();
-    expect(rootPath).toBeDisabled();
-    expect(cancel).toBeDisabled();
-    expect(close).toBeDisabled();
-    expect(within(dialog).getByRole("button", { name: "正在创建" })).toBeDisabled();
-    await user.keyboard("{Escape}");
-    expect(screen.getByRole("dialog", { name: "新建 Work" })).toBeInTheDocument();
+    expect(prompt).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: /single-flight/ })).toBeDisabled();
+    expect(start).toBeDisabled();
 
     pendingCreate.resolve(seededDetail());
     await waitFor(() =>
-      expect(screen.queryByRole("dialog", { name: "新建 Work" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("textbox", { name: "首个任务" })).not.toBeInTheDocument(),
     );
-    expect(trigger).toHaveFocus();
   });
 
-  it("创建失败后解除 pending、保留输入、显示本地化错误并聚焦目标", async () => {
+  it("创建失败后解除 pending、保留输入与项目并聚焦首任务", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     const pendingCreate = deferred<WorkDetail>();
     client.createWork.mockImplementationOnce(() => pendingCreate.promise);
-    render(<WorkSurface client={client} />);
+    const pickProjectDirectory = vi.fn().mockResolvedValue("D:\\workspace\\keep-input");
+    render(<WorkSurface client={client} pickProjectDirectory={pickProjectDirectory} />);
 
-    await user.click(screen.getAllByRole("button", { name: "新建 Work" })[0]!);
-    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    const goal = within(dialog).getByLabelText("目标");
-    const rootPath = within(dialog).getByLabelText("工作目录");
-    await user.type(goal, "保留这条目标");
-    await user.type(rootPath, "D:\\workspace\\keep-input");
-    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+    const prompt = await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.type(prompt, "保留这条目标");
+    await user.click(screen.getByRole("button", { name: "开始 Work" }));
 
     pendingCreate.reject({
       code: "database_error",
       message: "raw database failure must stay hidden",
     });
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+    expect(await screen.findByRole("alert")).toHaveTextContent(
       "本地数据库暂时不可用，请重试。",
     );
-    expect(dialog).not.toHaveTextContent("raw database failure must stay hidden");
-    expect(goal).toHaveValue("保留这条目标");
-    expect(rootPath).toHaveValue("D:\\workspace\\keep-input");
-    expect(goal).toBeEnabled();
-    expect(rootPath).toBeEnabled();
-    expect(within(dialog).getByRole("button", { name: "创建" })).toBeEnabled();
-    expect(goal).toHaveFocus();
+    expect(screen.queryByText("raw database failure must stay hidden")).not.toBeInTheDocument();
+    expect(prompt).toHaveTextContent("保留这条目标");
+    expect(screen.getByRole("button", { name: /keep-input/ })).toBeEnabled();
+    expect(prompt).toHaveAttribute("aria-disabled", "false");
+    expect(screen.getByRole("button", { name: "开始 Work" })).toBeEnabled();
+    await waitFor(() => expect(prompt).toHaveFocus());
   });
 
   it.each([
@@ -566,33 +1048,30 @@ describe("WorkSurface", () => {
         path: "C:\\Users\\private\\missing-workspace",
       },
     });
-    render(<WorkSurface client={client} />);
+    const pickProjectDirectory = vi.fn().mockResolvedValue("C:\\missing");
+    render(<WorkSurface client={client} pickProjectDirectory={pickProjectDirectory} />);
 
-    await user.click(screen.getAllByRole("button", { name: language === "en" ? "New Work" : "新建 Work" })[0]!);
-    const dialog = screen.getByRole("dialog");
-    await user.type(within(dialog).getByLabelText(language === "en" ? "Goal" : "目标"), "Test path error");
-    await user.type(within(dialog).getByLabelText(language === "en" ? "Working directory" : "工作目录"), "C:\\missing");
-    await user.click(within(dialog).getByRole("button", { name: language === "en" ? "Create" : "创建" }));
+    const prompt = await screen.findByRole("textbox", { name: language === "en" ? "First task" : "首个任务" });
+    await user.click(screen.getByRole("button", { name: language === "en" ? "Select project" : "选择项目" }));
+    await user.click(screen.getByRole("button", { name: language === "en" ? "Choose another folder…" : "选择其他文件夹…" }));
+    await user.type(prompt, "Test path error");
+    await user.click(screen.getByRole("button", { name: language === "en" ? "Start Work" : "开始 Work" }));
 
-    expect(await within(dialog).findByRole("alert")).toHaveTextContent(expected);
-    expect(dialog).not.toHaveTextContent("Raw workspace path could not be resolved");
-    expect(dialog).not.toHaveTextContent("private\\missing-workspace");
+    expect(await screen.findByRole("alert")).toHaveTextContent(expected);
+    expect(screen.queryByText("Raw workspace path could not be resolved")).not.toBeInTheDocument();
+    expect(screen.queryByText(/private\\missing-workspace/)).not.toBeInTheDocument();
   });
 
-  it("中央空态创建成功后将焦点移入新工作台", async () => {
+  it("首任务启动成功后将焦点移入 Work composer", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
-    render(<WorkSurface client={client} />);
-    const emptyHeading = await screen.findByRole("heading", { name: "创建第一个 Work" });
-    const emptyState = emptyHeading.closest("section");
-    expect(emptyState).not.toBeNull();
-    const trigger = within(emptyState!).getByRole("button", { name: "新建 Work" });
-
-    await user.click(trigger);
-    const dialog = screen.getByRole("dialog", { name: "新建 Work" });
-    await user.type(within(dialog).getByLabelText("目标"), "中央空态焦点测试");
-    await user.type(within(dialog).getByLabelText("工作目录"), "D:\\workspace\\empty-focus");
-    await user.click(within(dialog).getByRole("button", { name: "创建" }));
+    const pickProjectDirectory = vi.fn().mockResolvedValue("D:\\workspace\\empty-focus");
+    render(<WorkSurface client={client} pickProjectDirectory={pickProjectDirectory} />);
+    const prompt = await screen.findByRole("textbox", { name: "首个任务" });
+    await user.click(screen.getByRole("button", { name: "选择项目" }));
+    await user.click(screen.getByRole("button", { name: "选择其他文件夹…" }));
+    await user.type(prompt, "中央空态焦点测试");
+    await user.click(screen.getByRole("button", { name: "开始 Work" }));
 
     const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
     expect(composer).toHaveFocus();
@@ -616,16 +1095,23 @@ describe("WorkSurface", () => {
     expect(screen.getByText(/诊断详情无法安全显示/)).toBeInTheDocument();
   });
 
-  it("可切换窄窗口检查器抽屉并在卸载时取消订阅", async () => {
+  it("检查器默认隐藏，打开后成为可拖拽三段式并记住宽度", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     client.seed(seededDetail());
     const rendered = render(<WorkSurface client={client} />);
     const toggle = await screen.findByRole("button", { name: "打开检查器" });
+    const inspector = rendered.container.querySelector(".work-inspector");
+    expect(inspector).not.toBeNull();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(inspector).toHaveAttribute("aria-hidden", "true");
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("complementary", { name: "Work 检查器" })).toHaveAttribute("data-open", "true");
+    expect(inspector).toHaveAttribute("aria-hidden", "false");
+    expect(inspector).toHaveAttribute("data-open", "true");
+    const divider = screen.getByRole("separator", { name: "调整产物区域宽度" });
+    fireEvent.doubleClick(divider);
+    expect(localStorage.getItem("piwork.inspectorWidthPercent")).toBe("42");
     rendered.unmount();
     expect(client.unlisten).toHaveBeenCalledTimes(1);
   });
@@ -654,7 +1140,7 @@ describe("WorkSurface", () => {
     await user.click(toggle);
     expect(inspector).toHaveAttribute("aria-hidden", "false");
     expect(inspector).not.toHaveAttribute("inert");
-    within(inspector).getByRole("tab", { name: "进度" }).focus();
+    within(inspector).getByRole("tab", { name: "预览" }).focus();
     await user.keyboard("{Escape}");
 
     expect(inspector).toHaveAttribute("aria-hidden", "true");

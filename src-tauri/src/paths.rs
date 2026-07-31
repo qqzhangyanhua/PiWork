@@ -61,6 +61,14 @@ impl AppPaths {
     pub fn backups_dir(&self) -> PathBuf {
         self.roaming_root.join("backups")
     }
+
+    pub fn resources_dir(&self) -> PathBuf {
+        self.roaming_root.join("resources")
+    }
+
+    pub fn resource_cache_dir(&self) -> PathBuf {
+        self.local_root.join("resource-cache")
+    }
 }
 
 #[cfg(test)]
@@ -79,11 +87,16 @@ mod tests {
             paths.database_path(),
             paths.engine_sessions_dir(),
             paths.backups_dir(),
+            paths.resources_dir(),
         ] {
             assert!(path.starts_with(&roaming_root));
         }
 
-        for path in [paths.logs_dir(), paths.runtime_dir()] {
+        for path in [
+            paths.logs_dir(),
+            paths.runtime_dir(),
+            paths.resource_cache_dir(),
+        ] {
             assert!(path.starts_with(&local_root));
         }
 
@@ -93,8 +106,13 @@ mod tests {
             roaming_root.join("engine-sessions")
         );
         assert_eq!(paths.backups_dir(), roaming_root.join("backups"));
+        assert_eq!(paths.resources_dir(), roaming_root.join("resources"));
         assert_eq!(paths.logs_dir(), local_root.join("logs"));
         assert_eq!(paths.runtime_dir(), local_root.join("runtime"));
+        assert_eq!(
+            paths.resource_cache_dir(),
+            local_root.join("resource-cache")
+        );
     }
 
     #[cfg(debug_assertions)]

@@ -1,8 +1,44 @@
 {
   "app": { "name": "PiWork" },
+  "runtime": {
+    "desktopRequiredTitle": "请在 PiWork 桌面应用中打开",
+    "desktopRequiredBody": "localhost 只提供前端页面，无法访问模型配置和本地 Work。请运行 pnpm tauri dev，并使用自动打开的 PiWork 窗口。"
+  },
+  "model": {
+    "loading": "正在加载模型配置",
+    "loadError": "无法加载模型配置",
+    "required": "创建第一个 Work 前必须完成",
+    "connectTitle": "连接你的模型",
+    "connectBody": "验证 Provider 并选择默认模型后，才能创建 Work。",
+    "provider": "Provider",
+    "apiKey": "API Key",
+    "baseUrl": "Base URL",
+    "defaultModel": "默认模型",
+    "test": "测试连接",
+    "testing": "正在测试连接",
+    "save": "保存并继续",
+    "saving": "正在保存配置",
+    "connectionError": "无法验证 Provider，请检查 API Key 后重试。"
+  },
   "common": { "cancel": "取消", "close": "关闭", "create": "创建", "creating": "正在创建", "retry": "重试" },
   "work": { "new": "新建 Work", "empty": "创建第一个 Work" },
-  "sidebar": { "label": "Work 导航", "works": "全部 Work" },
+  "sidebar": { "label": "Work 导航", "works": "全部 Work", "recent": "最近", "search": "搜索 Work", "searchPlaceholder": "搜索 Work…", "localConnected": "本地执行已连接" },
+  "newWork": {
+    "heading": "准备做什么？",
+    "body": "描述目标，Pi 会在选定的本地项目中开始工作。",
+    "promptLabel": "首个任务",
+    "promptPlaceholder": "让 Pi 帮你完成一个任务…",
+    "selectProject": "选择项目",
+    "searchProjects": "搜索项目",
+    "recentProjects": "最近项目",
+    "noRecentProjects": "还没有最近项目",
+    "pathPlaceholder": "输入本地目录路径",
+    "usePath": "使用此目录",
+    "browse": "选择其他文件夹…",
+    "agentMode": "Agent · 自动",
+    "start": "开始 Work",
+    "hint": "发送第一条任务时创建 Work，并自动生成名称"
+  },
   "create": {
     "goal": "目标",
     "rootPath": "工作目录",
@@ -21,6 +57,10 @@
     "database": "本地数据库暂时不可用，请重试。",
     "workspacePath": "所选工作目录不存在或无法访问。",
     "pathResolution": "无法访问 PiWork 的本地数据目录。",
+    "referencedFile": "引用的文件 {{path}} 已失效、不可读或超出限制，请重新选择。",
+    "resourceImport": "部分附件无法导入，请移除后重试。",
+    "resourceStorage": "本地附件存储暂时不可用，请重试。",
+    "resourceNotFound": "附件已失效，请重新上传。",
     "invalidInput": {
       "title": "请输入有效标题。",
       "goal": "请输入有效目标。",
@@ -36,7 +76,7 @@
     "eventPublish": "无法更新 Work 进度，请重试。",
     "io": "本地文件操作失败，请重试。"
   },
-  "header": { "workStatus": "Work 状态" },
+  "header": { "workStatus": "Work 状态", "project": "项目", "more": "更多操作" },
   "status": {
     "draft": "草稿", "queued": "排队中", "running": "运行中", "waiting": "等待中",
     "idle": "空闲", "completed": "已完成", "failed": "失败", "stopped": "已停止",
@@ -52,6 +92,10 @@
     "failed": "失败",
     "completed": "已完成",
     "runFailed": "Run 失败",
+    "activityRunning": "Pi 正在执行",
+    "activityCompleted": "Pi 已完成 {{count}} 个操作",
+    "activityFailed": "Pi 执行遇到问题 · {{count}} 个操作",
+    "activityToggle": "展开详情",
     "validation": "验证",
     "limitations": "限制"
   },
@@ -62,11 +106,30 @@
     "continue": "继续 Work",
     "queued": "已排队 {{count}} 条指令"
   },
+  "mentions": {
+    "files": "项目文件",
+    "loading": "正在读取项目文件…",
+    "loadError": "无法读取项目文件",
+    "empty": "没有匹配的文件",
+    "remove": "移除文件 {{name}}"
+  },
+  "attachments": {
+    "add": "添加附件",
+    "uploadFiles": "上传文件",
+    "available": "Work 附件",
+    "remove": "移除附件 {{name}}",
+    "failed": "无法使用",
+    "count_one": "{{count}} 个附件",
+    "count_other": "{{count}} 个附件",
+    "empty": "还没有附件",
+    "importing": "正在导入附件"
+  },
   "inspector": {
     "label": "Work 检查器", "open": "打开检查器", "close": "关闭检查器",
-    "progress": "进度", "changes": "变更", "artifacts": "产物", "logs": "日志",
-    "noProgress": "Run 开始后将在这里汇总进度", "noChanges": "还没有变更",
-    "noArtifacts": "还没有产物", "noLogs": "还没有日志",
+    "title": "产物", "currentRun": "本次 Run", "allWork": "全部 Work", "resize": "调整产物区域宽度", "resizeHint": "拖拽调整宽度，双击恢复默认",
+    "preview": "预览", "attachments": "附件", "progress": "进度", "changes": "变更", "artifacts": "产物", "validation": "验证", "logs": "日志",
+    "noProgress": "Run 开始后将在这里汇总进度", "noChanges": "还没有变更", "noValidation": "还没有验证记录",
+    "noArtifacts": "还没有产物", "noAttachments": "还没有附件", "noLogs": "还没有日志",
     "runEvents": "{{count}} 条 Run 事件", "toolEvents": "{{count}} 次工具调用"
   }
 }

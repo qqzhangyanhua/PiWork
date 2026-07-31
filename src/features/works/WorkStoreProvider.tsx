@@ -44,6 +44,8 @@ export const useWorkStoreContext = () => {
   return value;
 };
 
+export const useOptionalWorkStoreContext = () => useContext(WorkStoreContext);
+
 export const useWorkStore = <T,>(selector: (state: WorkState) => T): T => {
   const { store } = useWorkStoreContext();
   return useStore(store, selector);

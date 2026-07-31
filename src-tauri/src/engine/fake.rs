@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use tokio::sync::Notify;
 
-use super::{EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef};
+use super::{
+    EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
+};
 
 #[derive(Clone)]
 pub struct FakeEngineAdapter {
@@ -107,7 +109,7 @@ impl EngineAdapter for FakeEngineAdapter {
     async fn start(
         &self,
         context: EngineRunContext,
-        prompt: String,
+        input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         let (abort_sender, abort_receiver) = oneshot::channel();
@@ -138,7 +140,7 @@ impl EngineAdapter for FakeEngineAdapter {
         #[cfg(test)]
         let completion_gate = self.completion_gate.clone();
         tokio::spawn(async move {
-            let result = emit_run(context, prompt, sink, delay, abort_receiver).await;
+            let result = emit_run(context, input.message, sink, delay, abort_receiver).await;
             let outcome = match result {
                 Ok(()) => FakeTaskOutcome::Completed,
                 Err(EngineError::Aborted) => FakeTaskOutcome::Aborted,
@@ -253,7 +255,47 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::FakeEngineAdapter;
-    use crate::engine::{EngineAdapter, EngineRunContext};
+    use crate::engine::{EngineAdapter, EngineImage, EngineInput, EngineRunContext};
+
+    fn text_input(message: &str) -> EngineInput {
+        EngineInput {
+            message: message.into(),
+            images: Vec::new(),
+            documents: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_engine_accepts_typed_image_input() {
+        let (sender, mut receiver) = mpsc::channel(16);
+        let engine = FakeEngineAdapter::new(Duration::ZERO);
+        let context = EngineRunContext::test("work-1", "run-images");
+
+        engine
+            .start(
+                context,
+                EngineInput {
+                    message: "Inspect".into(),
+                    images: vec![EngineImage {
+                        media_type: "image/png".into(),
+                        data: vec![1, 2, 3],
+                    }],
+                    documents: Vec::new(),
+                },
+                sender,
+            )
+            .await
+            .unwrap();
+
+        let mut assistant = None;
+        while let Some(event) = receiver.recv().await {
+            if let crate::engine::EngineEvent::AssistantDelta { text } = event {
+                assistant = Some(text);
+                break;
+            }
+        }
+        assert_eq!(assistant.as_deref(), Some("Working on: Inspect"));
+    }
 
     #[tokio::test]
     async fn fake_engine_emits_a_complete_ordered_run() {
@@ -262,7 +304,7 @@ mod tests {
         let context = EngineRunContext::test("work-1", "run-1");
 
         let session = engine
-            .start(context, "Build it".into(), sender)
+            .start(context, text_input("Build it"), sender)
             .await
             .unwrap();
 
@@ -309,7 +351,7 @@ mod tests {
         let context = EngineRunContext::test("work-1", "run-1");
         let (first_sender, _first_receiver) = mpsc::channel(16);
         engine
-            .start(context.clone(), "First".into(), first_sender)
+            .start(context.clone(), text_input("First"), first_sender)
             .await
             .unwrap();
 
@@ -319,7 +361,7 @@ mod tests {
 
         let (overlap_sender, _overlap_receiver) = mpsc::channel(16);
         let overlap = engine
-            .start(context.clone(), "Overlapping".into(), overlap_sender)
+            .start(context.clone(), text_input("Overlapping"), overlap_sender)
             .await;
         assert!(matches!(overlap, Err(crate::engine::EngineError::Start(_))));
 
@@ -328,7 +370,7 @@ mod tests {
 
         let (second_sender, _second_receiver) = mpsc::channel(16);
         engine
-            .start(context, "Second".into(), second_sender)
+            .start(context, text_input("Second"), second_sender)
             .await
             .unwrap();
         engine.abort("run-1").await.unwrap();
@@ -341,7 +383,7 @@ mod tests {
         let context = EngineRunContext::test("work-1", "run-1");
         let (sender, mut receiver) = mpsc::channel(16);
         engine
-            .start(context, "Complete first".into(), sender)
+            .start(context, text_input("Complete first"), sender)
             .await
             .unwrap();
         while let Some(event) = receiver.recv().await {
@@ -367,7 +409,7 @@ mod tests {
         let context = EngineRunContext::test("work-1", "run-1");
         let (first_sender, mut first_receiver) = mpsc::channel(16);
         engine
-            .start(context.clone(), "First".into(), first_sender)
+            .start(context.clone(), text_input("First"), first_sender)
             .await
             .unwrap();
         assert_eq!(first_receiver.recv().await.unwrap().kind(), "run_started");
@@ -380,7 +422,7 @@ mod tests {
 
         let (second_sender, _second_receiver) = mpsc::channel(16);
         engine
-            .start(context, "Second".into(), second_sender)
+            .start(context, text_input("Second"), second_sender)
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(10)).await;

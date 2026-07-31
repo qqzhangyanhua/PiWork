@@ -29,6 +29,9 @@ const deferred = <T,>() => {
 const makeClient = (
   listenToWorkEvents: PiWorkClient["listenToWorkEvents"],
 ): PiWorkClient => ({
+  getModelConfigurationStatus: async () => ({ configured: true, configuration: { provider: "openai", modelId: "gpt-5.2" } }),
+  testModelConnection: async () => ({ models: [] }),
+  saveModelConfiguration: async (input) => ({ provider: input.provider, modelId: input.modelId }),
   createWork: async () => {
     throw new Error("unused");
   },
@@ -36,6 +39,11 @@ const makeClient = (
   getWork: async () => {
     throw new Error("unused");
   },
+  listProjectFiles: async () => [],
+  importResources: async () => [],
+  listWorkResources: async () => [],
+  getResourceThumbnail: async () => ({ mediaType: "image/png", dataBase64: "" }),
+  detachDraftResource: async () => undefined,
   startWork: async () => {
     throw new Error("unused");
   },
@@ -91,6 +99,7 @@ function OperationListener({ operation }: { operation: "create" | "start" }) {
             goal: "Test ownership",
             rootPath: "D:/dev/PiWork",
             permissionMode: "balanced",
+            resourceDraftId: null,
           });
     void promise.catch(() => undefined);
   };
@@ -256,6 +265,7 @@ describe("useWorkEvents", () => {
             runId: "r1",
             role: "user",
             content: "go",
+            resourceIds: [],
             createdAt: "2026-07-28T09:00:01.000Z",
           },
         }),
@@ -307,6 +317,7 @@ describe("useWorkEvents", () => {
                 runId: "r2",
                 role: "user",
                 content: "go",
+                resourceIds: [],
                 createdAt: "2026-07-28T09:00:02.000Z",
               },
             });

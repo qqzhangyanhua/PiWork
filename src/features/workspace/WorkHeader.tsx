@@ -1,48 +1,33 @@
-import { PanelRightOpen } from "lucide-react";
-import { useEffect, useState, type Ref } from "react";
+import { Folder, MoreHorizontal, PanelRightOpen } from "lucide-react";
+import { type Ref } from "react";
 import { useTranslation } from "react-i18next";
 
-import { isWorkEventTimelineItem, type TimelineItem, type AppError } from "../../domain/work";
-import { appErrorMessageKey, formatAppErrorDiagnostics } from "../../domain/appError";
-import type { RunSummary, WorkSummary } from "../../bindings";
+import type { WorkSummary } from "../../bindings";
 
 type WorkHeaderProps = {
   work: WorkSummary;
-  timeline: TimelineItem[];
-  error: AppError | null;
-  latestRun?: RunSummary;
   inspectorOpen: boolean;
   inspectorToggleRef: Ref<HTMLButtonElement>;
   onInspectorToggle(): void;
 };
 
-export function WorkHeader({ work, timeline, error, latestRun, inspectorOpen, inspectorToggleRef, onInspectorToggle }: WorkHeaderProps) {
+export function WorkHeader({ work, inspectorOpen, inspectorToggleRef, onInspectorToggle }: WorkHeaderProps) {
   const { t } = useTranslation();
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  useEffect(() => setDiagnosticsOpen(false), [error]);
-  const model = [...timeline]
-    .reverse()
-    .filter(isWorkEventTimelineItem)
-    .find(({ payload }) => payload.type === "runStarted")?.payload;
-  const modelLabel = latestRun?.modelLabel ?? (model?.type === "runStarted" ? model.modelLabel : "Fake model");
 
   return (
     <div className="work-header-region">
-      {error && <div className="workspace-banner" role="status"><p>{t(appErrorMessageKey(error))}</p><button className="button" type="button" onClick={() => setDiagnosticsOpen((open) => !open)}>{t("diagnostics.open")}</button>{diagnosticsOpen && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}</div>}
       <header className="work-header">
         <div className="work-header__identity">
           <h1>{work.title}</h1>
-          <span title={work.rootPath}>{work.rootPath}</span>
+          <span className="work-header__project" title={work.rootPath}>
+            <Folder aria-hidden="true" size={13} />
+            {t("header.project")}
+          </span>
         </div>
         <div className="work-header__meta">
-          <span className="model-label">{modelLabel}</span>
-          <span
-            aria-label={t("header.workStatus")}
-            className={`status-badge status-badge--${work.status}`}
-            role="status"
-          >
-            {t(`status.${work.status}`)}
-          </span>
+          <button className="icon-button" type="button" aria-label={t("header.more")}>
+            <MoreHorizontal aria-hidden="true" size={18} />
+          </button>
           <button
             className="icon-button work-header__inspector-toggle"
             type="button"

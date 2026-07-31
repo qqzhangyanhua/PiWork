@@ -31,7 +31,8 @@
     "active": true,
     "targets": ["nsis"],
     "resources": {
-      "../NOTICE": "NOTICE"
+      "../NOTICE": "NOTICE",
+      "binaries/pi-sidecar": "pi-sidecar"
     },
     "icon": [
       "icons/32x32.png",

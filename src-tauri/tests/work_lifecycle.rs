@@ -1,14 +1,17 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use piwork_lib::{
     app_state::AppState,
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
-        work::{CreateWorkInput, MessageRole, PermissionMode, RunStatus, WorkDetail, WorkStatus},
+        work::{
+            CreateWorkInput, MessageRole, PermissionMode, RunStatus, StartWorkInput, WorkDetail,
+            WorkStatus,
+        },
     },
     engine::{
-        EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef,
+        EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
         fake::FakeEngineAdapter,
         publisher::{ChannelEventPublisher, EventPublisher},
         supervisor::EngineSupervisor,
@@ -31,6 +34,40 @@ struct StartCountingEngine {
 
 struct PreReturnEventEngine {
     abort_calls: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Default)]
+struct PromptRecordingEngine {
+    prompt: Mutex<Option<String>>,
+}
+
+#[async_trait]
+impl EngineAdapter for PromptRecordingEngine {
+    fn kind(&self) -> &'static str {
+        "prompt-recording"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        *self.prompt.lock().unwrap() = Some(input.message);
+        sink.send(EngineEvent::RunStarted {
+            model_label: "Recording model".into(),
+        })
+        .await
+        .map_err(|_| EngineError::ChannelClosed)?;
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: "recording-session".into(),
+        })
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        Err(EngineError::NotRunning)
+    }
 }
 
 impl StartCountingEngine {
@@ -66,7 +103,7 @@ impl EngineAdapter for StartCountingEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         _sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         self.start_count
@@ -88,7 +125,7 @@ impl EngineAdapter for PreReturnEventEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         sink.send(EngineEvent::RunStarted {
@@ -129,6 +166,7 @@ impl TestHarness {
                 goal: "Exercise the engine pipeline".into(),
                 root_path: self.workspace_path.to_string_lossy().into_owned(),
                 permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
             })
             .await
             .unwrap()
@@ -227,7 +265,7 @@ impl EngineAdapter for PanickingAbortEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         _sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         Err(EngineError::Start("abort must recover this failure".into()))
@@ -261,7 +299,7 @@ impl EngineAdapter for NoResourceStartFailingEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         _sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         Err(EngineError::Start(
@@ -404,7 +442,7 @@ impl EngineAdapter for ControlledEngine {
     async fn start(
         &self,
         context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         let _future_guard = StartFutureGuard {
@@ -593,7 +631,14 @@ async fn start_work_returns_before_the_engine_stream_finishes() {
 
     let run = tokio::time::timeout(
         std::time::Duration::from_millis(150),
-        service.start_work(&work.summary.id, "Build it"),
+        service.start_work(
+            &work.summary.id,
+            StartWorkInput {
+                prompt: "Build it".into(),
+                referenced_files: Vec::new(),
+                resource_ids: Vec::new(),
+            },
+        ),
     )
     .await
     .expect("start_work waited for the engine event stream")
@@ -635,7 +680,7 @@ impl EngineAdapter for BlockingStartEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         if let Some(entered) = self.entered.lock().unwrap().take() {
@@ -822,7 +867,7 @@ impl EngineAdapter for FloodingStartEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         sink.send(EngineEvent::RunStarted {
@@ -988,9 +1033,11 @@ async fn start_failure_without_an_engine_resource_is_confirmed_safe() {
         .unwrap()
         .unwrap();
 
+    let first = serde_json::to_value(first).unwrap();
+    assert_eq!(first["code"], "engine_start_failed");
     assert_eq!(
-        serde_json::to_value(first).unwrap()["code"],
-        "engine_start_failed"
+        first["details"]["reason"],
+        "engine failed to start: failed before creating resources"
     );
     assert_eq!(after_first.summary.status, WorkStatus::Failed);
     assert_eq!(after_first.runs[0].status, RunStatus::Failed);
@@ -1062,7 +1109,7 @@ impl EngineAdapter for EarlyClosingEngine {
     async fn start(
         &self,
         _context: EngineRunContext,
-        _prompt: String,
+        _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
         tokio::spawn(async move {
@@ -1251,6 +1298,7 @@ async fn begin_run_returns_the_authoritative_user_message_and_get_replays_it() {
         .begin_run(
             &work.summary.id,
             "  Keep this user instruction  ",
+            &[],
             "fake",
             "Fake model",
         )
@@ -1284,12 +1332,13 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
             goal: "Persist user instructions".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
 
     let first = repository
-        .begin_run(&work.summary.id, "First prompt", "fake", "Fake model")
+        .begin_run(&work.summary.id, "First prompt", &[], "fake", "Fake model")
         .await
         .unwrap();
     repository
@@ -1309,7 +1358,7 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
         .await
         .unwrap();
     let second = repository
-        .begin_run(&work.summary.id, "Second prompt", "fake", "Fake model")
+        .begin_run(&work.summary.id, "Second prompt", &[], "fake", "Fake model")
         .await
         .unwrap();
     drop(repository);
@@ -1349,6 +1398,7 @@ async fn engine_execution_identity_survives_database_reopen() {
             goal: "Recover the engine session".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -1427,6 +1477,39 @@ async fn start_rejects_an_empty_prompt_and_an_archived_work() {
             .runs
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn referenced_files_expand_only_the_engine_prompt() {
+    let harness = TestHarness::new().await;
+    std::fs::write(harness.workspace_path.join("context.md"), "current context").unwrap();
+    let work = harness.create_work("Referenced context").await;
+    let engine = Arc::new(PromptRecordingEngine::default());
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = Arc::new(EngineSupervisor::new(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(publisher),
+        "Recording model",
+    ));
+    let service = WorkService::with_supervisor(harness.repository.clone(), supervisor);
+
+    let output = service
+        .start_work(
+            &work.summary.id,
+            StartWorkInput {
+                prompt: "Review @{context.md}".into(),
+                referenced_files: vec!["context.md".into()],
+                resource_ids: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(output.user_message.content, "Review @{context.md}");
+    let engine_prompt = engine.prompt.lock().unwrap().clone().unwrap();
+    assert!(engine_prompt.contains("current context"));
+    assert!(engine_prompt.contains("path=\"context.md\""));
 }
 
 #[tokio::test]
@@ -1631,7 +1714,7 @@ async fn repository_rejects_every_event_after_a_terminal_event() {
     let work = harness.create_work("Terminal is last").await;
     let run = harness
         .repository
-        .begin_run(&work.summary.id, "Build it", "fake", "Fake model")
+        .begin_run(&work.summary.id, "Build it", &[], "fake", "Fake model")
         .await
         .unwrap();
     let completed = WorkEventEnvelope {
@@ -1719,6 +1802,7 @@ async fn created_work_survives_database_reopen() {
             goal: "  Build the foundation  ".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -1764,6 +1848,7 @@ async fn create_rejects_blank_title_and_goal() {
                 goal: goal.into(),
                 root_path: workspace_path.to_string_lossy().into_owned(),
                 permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
             })
             .await
             .unwrap_err();
@@ -1792,6 +1877,7 @@ async fn create_rejects_a_missing_workspace_path() {
             goal: "Goal".into(),
             root_path: missing_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap_err();
@@ -1823,6 +1909,7 @@ async fn create_rejects_a_regular_file_as_the_workspace_root() {
             goal: "Goal".into(),
             root_path: file_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap_err();
@@ -1852,6 +1939,7 @@ async fn list_orders_works_by_most_recent_update() {
             goal: "Goal".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -1861,6 +1949,7 @@ async fn list_orders_works_by_most_recent_update() {
             goal: "Goal".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -1902,6 +1991,7 @@ async fn inserted_runs_are_returned_in_creation_order() {
             goal: "Keep history".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -1956,6 +2046,7 @@ async fn get_orders_and_decodes_events_by_run_then_sequence() {
             goal: "Replay history".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -2037,6 +2128,7 @@ async fn setting_work_status_persists_and_updates_the_timestamp() {
             goal: "Persist state".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -2064,6 +2156,7 @@ async fn setting_run_status_tracks_start_and_completion_times() {
             goal: "Track execution".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -2116,6 +2209,7 @@ async fn archived_work_rejects_running_without_changing_persisted_state() {
             goal: "Stay archived".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -2159,6 +2253,7 @@ async fn completed_run_rejects_running_without_changing_persisted_state() {
             goal: "Stay completed".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();
@@ -2223,6 +2318,7 @@ async fn service_creates_lists_and_gets_work_details() {
             goal: "Expose work".into(),
             root_path: workspace_path.to_string_lossy().into_owned(),
             permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
         })
         .await
         .unwrap();

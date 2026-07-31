@@ -1,10 +1,15 @@
-import { CornerDownLeft } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { type Ref, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { WorkSummary } from "../../bindings";
+import type { ResourceSummary, WorkSummary } from "../../bindings";
+import type { PickAttachments } from "../../app/attachmentPicker";
 import { didPersistStartInstruction } from "../works/workStore";
 import { useWorkStore } from "../works/WorkStoreProvider";
+import { ComposerModelIndicator } from "./ComposerModelIndicator";
+import { AttachmentButton } from "./AttachmentButton";
+import { AttachmentDraftList } from "./AttachmentDraftList";
+import { ProjectPromptEditor } from "./ProjectPromptEditor";
 
 const queueStatuses: WorkSummary["status"][] = ["queued", "running", "waiting"];
 const continueStatuses: WorkSummary["status"][] = [
@@ -12,13 +17,25 @@ const continueStatuses: WorkSummary["status"][] = [
 ];
 
 type WorkComposerProps = {
-  promptRef?: Ref<HTMLTextAreaElement>;
+  modelLabel: string;
+  pickAttachments: PickAttachments;
+  promptRef?: Ref<HTMLDivElement>;
+  resources: ResourceSummary[];
   work: WorkSummary;
 };
 
-export function WorkComposer({ promptRef, work }: WorkComposerProps) {
+export function WorkComposer({
+  modelLabel,
+  pickAttachments,
+  promptRef,
+  resources,
+  work,
+}: WorkComposerProps) {
   const { t } = useTranslation();
   const [prompt, setPrompt] = useState("");
+  const [referencedFiles, setReferencedFiles] = useState<string[]>([]);
+  const [attachmentResults, setAttachmentResults] = useState<ResourceSummary[]>([]);
+  const [selectedResourceIds, setSelectedResourceIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const startWork = useWorkStore((state) => state.startWork);
@@ -30,24 +47,40 @@ export function WorkComposer({ promptRef, work }: WorkComposerProps) {
   const actionLabel = continueStatuses.includes(work.status)
       ? t("composer.continue")
       : t("composer.send");
+  const availableResources = [...resources, ...attachmentResults].filter(
+    (resource, index, all) => all.findIndex(({ id }) => id === resource.id) === index,
+  );
+  const readyResourceIds = selectedResourceIds.filter((id) =>
+    availableResources.some(
+      (resource) => resource.id === id && resource.status === "ready",
+    ),
+  );
+  const canSubmit = Boolean(prompt.trim()) || readyResourceIds.length > 0;
+
+  const clearDraft = () => {
+    setPrompt("");
+    setReferencedFiles([]);
+    setAttachmentResults([]);
+    setSelectedResourceIds([]);
+  };
 
   const submit = async () => {
     const instruction = prompt.trim();
-    if (!instruction) return;
+    if (!instruction && readyResourceIds.length === 0) return;
     if (shouldQueue) {
-      queueInstruction(work.id, instruction);
-      setPrompt("");
+      queueInstruction(work.id, instruction, referencedFiles, readyResourceIds);
+      clearDraft();
       return;
     }
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      await startWork(work.id, instruction);
-      setPrompt("");
+      await startWork(work.id, instruction, referencedFiles, readyResourceIds);
+      clearDraft();
     } catch (error) {
       if (didPersistStartInstruction(error)) {
-        setPrompt("");
+        clearDraft();
       }
       // The store normalizes and exposes the error in the product UI.
     } finally {
@@ -60,24 +93,49 @@ export function WorkComposer({ promptRef, work }: WorkComposerProps) {
     <footer className="work-composer">
       {queued.length > 0 && <p className="queue-count">{t("composer.queued", { count: queued.length })}</p>}
       <div className="work-composer__box">
-        <label className="sr-only" htmlFor="work-prompt">{t("composer.label")}</label>
-        <textarea
-          ref={promptRef}
+        <ProjectPromptEditor
+          editorRef={promptRef}
           id="work-prompt"
+          label={t("composer.label")}
           placeholder={t("composer.placeholder")}
+          rootPath={work.rootPath}
           value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              void submit();
-            }
+          onDraftChange={(nextPrompt, nextReferences) => {
+            setPrompt(nextPrompt);
+            setReferencedFiles(nextReferences);
+          }}
+          onSubmit={() => void submit()}
+        />
+        <AttachmentDraftList
+          resources={availableResources}
+          selectedIds={selectedResourceIds}
+          onRemove={(resource) => {
+            setSelectedResourceIds((current) => current.filter((id) => id !== resource.id));
+            setAttachmentResults((current) => current.filter(({ id }) => id !== resource.id));
           }}
         />
-        <button className="button button--primary" type="button" disabled={!prompt.trim() || submitting || (loading && !shouldQueue)} onClick={() => void submit()}>
-          <CornerDownLeft aria-hidden="true" size={15} />
-          {actionLabel}
-        </button>
+        <div className="work-composer__actions">
+          <AttachmentButton
+            available={availableResources}
+            disabled={submitting}
+            draftId={null}
+            pickAttachments={pickAttachments}
+            selectedIds={selectedResourceIds}
+            workId={work.id}
+            onImported={(imported) =>
+              setAttachmentResults((current) => {
+                const merged = new Map(current.map((resource) => [resource.id, resource]));
+                for (const resource of imported) merged.set(resource.id, resource);
+                return [...merged.values()];
+              })
+            }
+            onSelectedIdsChange={setSelectedResourceIds}
+          />
+          <ComposerModelIndicator modelLabel={modelLabel} />
+          <button aria-label={actionLabel} className="button button--primary" type="button" disabled={!canSubmit || submitting || (loading && !shouldQueue)} onClick={() => void submit()}>
+            <ArrowUp aria-hidden="true" size={16} />
+          </button>
+        </div>
       </div>
     </footer>
   );

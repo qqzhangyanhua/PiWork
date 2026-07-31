@@ -1,8 +1,44 @@
 {
   "app": { "name": "PiWork" },
+  "runtime": {
+    "desktopRequiredTitle": "Open the PiWork desktop app",
+    "desktopRequiredBody": "localhost only serves the frontend and cannot access model configuration or local Works. Run pnpm tauri dev and use the PiWork window that opens automatically."
+  },
+  "model": {
+    "loading": "Loading model configuration",
+    "loadError": "Unable to load model configuration",
+    "required": "Required before your first Work",
+    "connectTitle": "Connect your model",
+    "connectBody": "Verify a provider and choose a default model before creating a Work.",
+    "provider": "Provider",
+    "apiKey": "API key",
+    "baseUrl": "Base URL",
+    "defaultModel": "Default model",
+    "test": "Test connection",
+    "testing": "Testing connection",
+    "save": "Save and continue",
+    "saving": "Saving configuration",
+    "connectionError": "The provider could not be verified. Check the API key and try again."
+  },
   "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "creating": "Creating", "retry": "Retry" },
   "work": { "new": "New Work", "empty": "Create your first Work" },
-  "sidebar": { "label": "Work navigation", "works": "All Works" },
+  "sidebar": { "label": "Work navigation", "works": "All Works", "recent": "Recent", "search": "Search Works", "searchPlaceholder": "Search Works…", "localConnected": "Local runtime connected" },
+  "newWork": {
+    "heading": "What would you like to do?",
+    "body": "Describe the goal and Pi will start in the selected local project.",
+    "promptLabel": "First task",
+    "promptPlaceholder": "Ask Pi to complete a task…",
+    "selectProject": "Select project",
+    "searchProjects": "Search projects",
+    "recentProjects": "Recent projects",
+    "noRecentProjects": "No recent projects yet",
+    "pathPlaceholder": "Enter a local directory path",
+    "usePath": "Use this directory",
+    "browse": "Choose another folder…",
+    "agentMode": "Agent · Auto",
+    "start": "Start Work",
+    "hint": "PiWork creates and names the Work when you send the first task"
+  },
   "create": {
     "goal": "Goal",
     "rootPath": "Working directory",
@@ -21,6 +57,10 @@
     "database": "The local database is temporarily unavailable. Try again.",
     "workspacePath": "The selected working directory does not exist or cannot be accessed.",
     "pathResolution": "PiWork cannot access its local data directory.",
+    "referencedFile": "The referenced file {{path}} is unavailable, unreadable, or over the limit. Select it again.",
+    "resourceImport": "Some attachments could not be imported. Remove them and try again.",
+    "resourceStorage": "Local attachment storage is temporarily unavailable. Try again.",
+    "resourceNotFound": "This attachment is unavailable. Upload it again.",
     "invalidInput": {
       "title": "Enter a valid title.",
       "goal": "Enter a valid goal.",
@@ -36,7 +76,7 @@
     "eventPublish": "Unable to update Work progress. Try again.",
     "io": "The local file operation failed. Try again."
   },
-  "header": { "workStatus": "Work status" },
+  "header": { "workStatus": "Work status", "project": "Project", "more": "More actions" },
   "status": {
     "draft": "Draft", "queued": "Queued", "running": "Running", "waiting": "Waiting",
     "idle": "Idle", "completed": "Completed", "failed": "Failed", "stopped": "Stopped",
@@ -52,6 +92,10 @@
     "failed": "Failed",
     "completed": "Completed",
     "runFailed": "Run failed",
+    "activityRunning": "Pi is working",
+    "activityCompleted": "Pi completed {{count}} actions",
+    "activityFailed": "Pi hit a problem · {{count}} actions",
+    "activityToggle": "Show details",
     "validation": "Validation",
     "limitations": "Limitations"
   },
@@ -62,11 +106,30 @@
     "continue": "Continue Work",
     "queued": "{{count}} instructions queued"
   },
+  "mentions": {
+    "files": "Project files",
+    "loading": "Loading project files…",
+    "loadError": "Unable to read project files",
+    "empty": "No matching files",
+    "remove": "Remove file {{name}}"
+  },
+  "attachments": {
+    "add": "Add attachment",
+    "uploadFiles": "Upload files",
+    "available": "Work attachments",
+    "remove": "Remove attachment {{name}}",
+    "failed": "Unavailable",
+    "count_one": "{{count}} attachment",
+    "count_other": "{{count}} attachments",
+    "empty": "No attachments yet",
+    "importing": "Importing attachments"
+  },
   "inspector": {
     "label": "Work inspector", "open": "Open inspector", "close": "Close inspector",
-    "progress": "Progress", "changes": "Changes", "artifacts": "Artifacts", "logs": "Logs",
-    "noProgress": "Run progress will be summarized here", "noChanges": "No changes yet",
-    "noArtifacts": "No artifacts yet", "noLogs": "No logs yet",
+    "title": "Outputs", "currentRun": "Current Run", "allWork": "All Work", "resize": "Resize output panel", "resizeHint": "Drag to resize; double-click to reset",
+    "preview": "Preview", "attachments": "Attachments", "progress": "Progress", "changes": "Changes", "artifacts": "Artifacts", "validation": "Validation", "logs": "Logs",
+    "noProgress": "Run progress will be summarized here", "noChanges": "No changes yet", "noValidation": "No validation records yet",
+    "noArtifacts": "No artifacts yet", "noAttachments": "No attachments yet", "noLogs": "No logs yet",
     "runEvents": "{{count}} Run events", "toolEvents": "{{count}} tool calls"
   }
 }

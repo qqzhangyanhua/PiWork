@@ -4,6 +4,7 @@ import type { PiWorkClient } from "../../app/tauriClient";
 import type {
   CreateWorkInput,
   MessageSummary,
+  ResourceSummary,
   RunSummary,
   StartWorkOutput,
   WorkDetail,
@@ -11,6 +12,7 @@ import type {
   WorkSummary,
 } from "../../bindings";
 import { isWorkEventTimelineItem } from "../../domain/work";
+import { createMockTauriClient } from "../../test/mockTauriClient";
 import {
   createWorkStore,
   didPersistStartInstruction,
@@ -50,6 +52,9 @@ const event = (
 });
 
 const unusedClient: PiWorkClient = {
+  getModelConfigurationStatus: async () => ({ configured: true, configuration: { provider: "openai", modelId: "gpt-5.2" } }),
+  testModelConnection: async () => ({ models: [] }),
+  saveModelConfiguration: async (input) => ({ provider: input.provider, modelId: input.modelId }),
   createWork: async () => {
     throw new Error("unused");
   },
@@ -57,6 +62,11 @@ const unusedClient: PiWorkClient = {
   getWork: async () => {
     throw new Error("unused");
   },
+  listProjectFiles: async () => [],
+  importResources: async () => [],
+  listWorkResources: async () => [],
+  getResourceThumbnail: async () => ({ mediaType: "image/png", dataBase64: "" }),
+  detachDraftResource: async () => undefined,
   startWork: async () => {
     throw new Error("unused");
   },
@@ -83,21 +93,104 @@ const userMessage = (
   runId: "r1",
   role: "user",
   content: "Ship it",
+  resourceIds: [],
   createdAt: "2026-07-28T09:00:01.000Z",
   ...overrides,
 });
 
+const resource = (
+  overrides: Partial<ResourceSummary> = {},
+): ResourceSummary => ({
+  id: "resource-1",
+  originalName: "chart.png",
+  mediaType: "image/png",
+  size: 68n,
+  origin: "user_upload",
+  status: "ready",
+  failureCode: null,
+  createdAt: "2026-07-28T09:00:00.000Z",
+  ...overrides,
+});
+
+const workDetail = (): WorkDetail => ({
+  summary: work,
+  runs: [],
+  messages: [],
+  events: [],
+});
+
 describe("createWorkStore", () => {
+  it("imports Work resources and keeps failed files isolated", async () => {
+    const client = createMockTauriClient();
+    client.seed(workDetail());
+    client.importResources.mockResolvedValueOnce([
+      resource({ id: "resource-ready", originalName: "ready.png" }),
+      resource({
+        id: "resource-failed",
+        originalName: "broken.png",
+        status: "failed",
+        failureCode: "unsupported_image",
+      }),
+    ]);
+    const store = createWorkStore(client);
+
+    const imported = await store.getState().importResources({
+      sourcePaths: ["C:/private/ready.png", "C:/private/broken.png"],
+      workId: "w1",
+      draftId: null,
+    });
+
+    expect(imported).toHaveLength(2);
+    expect(store.getState().resources.w1).toEqual(imported);
+    expect(store.getState().error).toBeNull();
+  });
+
+  it("copies resource ids when an instruction is queued", () => {
+    const store = createWorkStore(createMockTauriClient());
+    const resourceIds = ["resource-1"];
+
+    store.getState().queueInstruction("w1", "Compare", [], resourceIds);
+    resourceIds.push("resource-2");
+
+    expect(store.getState().queuedInstructions.w1).toEqual([
+      {
+        prompt: "Compare",
+        referencedFiles: [],
+        resourceIds: ["resource-1"],
+      },
+    ]);
+  });
+
+  it("hydrates Work resources beside the Work detail", async () => {
+    const client = createMockTauriClient();
+    client.seed(workDetail());
+    client.listWorkResources.mockResolvedValueOnce([
+      resource({ id: "resource-1", originalName: "chart.png" }),
+    ]);
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+
+    expect(client.listWorkResources).toHaveBeenCalledWith("w1");
+    expect(store.getState().resources.w1?.[0]?.id).toBe("resource-1");
+  });
+
   it("queues trimmed instructions per Work without creating events", () => {
     const store = createWorkStore(unusedClient);
 
-    store.getState().queueInstruction("w1", "  Follow up  ");
+    store.getState().queueInstruction("w1", "  Follow up  ", ["src/context.ts"]);
     store.getState().queueInstruction("w1", "   ");
     store.getState().queueInstruction("w2", "Second Work");
 
     expect(store.getState().queuedInstructions).toEqual({
-      w1: ["Follow up"],
-      w2: ["Second Work"],
+      w1: [
+        {
+          prompt: "Follow up",
+          referencedFiles: ["src/context.ts"],
+          resourceIds: [],
+        },
+      ],
+      w2: [{ prompt: "Second Work", referencedFiles: [], resourceIds: [] }],
     });
     expect(store.getState().timelines).toEqual({});
   });
@@ -385,6 +478,7 @@ describe("createWorkStore", () => {
       goal: work.goal,
       rootPath: work.rootPath,
       permissionMode: work.permissionMode,
+      resourceDraftId: null,
     };
     const detail: WorkDetail = {
       summary: work,
@@ -695,6 +789,7 @@ describe("createWorkStore", () => {
       goal: createdWork.goal,
       rootPath: createdWork.rootPath,
       permissionMode: createdWork.permissionMode,
+      resourceDraftId: null,
     });
     expect(store.getState().loading).toBe(true);
 
@@ -874,6 +969,7 @@ describe("createWorkStore", () => {
       goal: createdWork.goal,
       rootPath: createdWork.rootPath,
       permissionMode: createdWork.permissionMode,
+      resourceDraftId: null,
     });
 
     store.getState().selectWork("w1");
@@ -904,6 +1000,7 @@ describe("createWorkStore", () => {
       goal: work.goal,
       rootPath: work.rootPath,
       permissionMode: work.permissionMode,
+      resourceDraftId: null,
     };
 
     const firstCreate = store.getState().createWork(input);
@@ -942,6 +1039,7 @@ describe("createWorkStore", () => {
       goal: createdWork.goal,
       rootPath: createdWork.rootPath,
       permissionMode: createdWork.permissionMode,
+      resourceDraftId: null,
     });
     selectionResult.resolve({
       summary: work,
@@ -973,6 +1071,7 @@ describe("createWorkStore", () => {
       goal: createdWork.goal,
       rootPath: createdWork.rootPath,
       permissionMode: createdWork.permissionMode,
+      resourceDraftId: null,
     });
 
     listResult.resolve([listedWork]);

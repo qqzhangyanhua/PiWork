@@ -12,7 +12,7 @@ use crate::{
         event::{WorkEventEnvelope, WorkEventPayload},
         work::StartWorkOutput,
     },
-    engine::{EngineAdapter, EngineEvent, EngineRunContext, EngineSessionRef},
+    engine::{EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef},
     error::AppError,
     work::repository::WorkRepository,
 };
@@ -186,6 +186,26 @@ impl EngineSupervisor {
     }
 
     pub async fn start(&self, work_id: &str, prompt: &str) -> Result<StartWorkOutput, AppError> {
+        self.start_with_engine_input(
+            work_id,
+            prompt,
+            Vec::new(),
+            EngineInput {
+                message: prompt.trim().to_owned(),
+                images: Vec::new(),
+                documents: Vec::new(),
+            },
+        )
+        .await
+    }
+
+    pub async fn start_with_engine_input(
+        &self,
+        work_id: &str,
+        user_prompt: &str,
+        resource_ids: Vec<String>,
+        engine_input: EngineInput,
+    ) -> Result<StartWorkOutput, AppError> {
         let generation = Uuid::new_v4();
         {
             let mut active = self.active.lock().await;
@@ -218,7 +238,9 @@ impl EngineSupervisor {
             Arc::clone(&self.active),
             generation,
             work_id.to_owned(),
-            prompt.to_owned(),
+            user_prompt.to_owned(),
+            resource_ids,
+            engine_input,
             self.model_label.clone(),
             self.startup_timeout,
             self.abort_timeout,
@@ -253,7 +275,9 @@ async fn run_lifecycle(
     active: ActiveRuns,
     generation: Uuid,
     work_id: String,
-    prompt: String,
+    user_prompt: String,
+    resource_ids: Vec<String>,
+    engine_input: EngineInput,
     model_label: String,
     startup_timeout: Duration,
     abort_timeout: Duration,
@@ -272,8 +296,22 @@ async fn run_lifecycle(
             return;
         }
     };
+    let model_label = match engine.model_label(&model_label).await {
+        Ok(model_label) => model_label,
+        Err(_) => {
+            remove_active(&active, &work_id, generation).await;
+            let _ = result_sender.send(Err(AppError::engine_start_failed(&work_id)));
+            return;
+        }
+    };
     let started = match repository
-        .begin_run(&work_id, &prompt, engine.kind(), &model_label)
+        .begin_run(
+            &work_id,
+            &user_prompt,
+            &resource_ids,
+            engine.kind(),
+            &model_label,
+        )
         .await
     {
         Ok(run) => run,
@@ -331,7 +369,7 @@ async fn run_lifecycle(
     ));
 
     let start_phase = {
-        let start = engine.start(context, prompt.trim().to_owned(), event_sender);
+        let start = engine.start(context, engine_input, event_sender);
         tokio::pin!(start);
         let deadline = tokio::time::sleep(startup_timeout);
         tokio::pin!(deadline);
@@ -342,6 +380,11 @@ async fn run_lifecycle(
         }
     };
 
+    let startup_diagnostic = match &start_phase {
+        StartPhaseOutcome::Returned(Err(error)) => Some(error.to_string()),
+        StartPhaseOutcome::TimedOut => Some("Engine startup timed out".to_owned()),
+        _ => None,
+    };
     let session = match start_phase {
         StartPhaseOutcome::Returned(Ok(session)) => session,
         StartPhaseOutcome::Returned(Err(_)) | StartPhaseOutcome::TimedOut => {
@@ -359,7 +402,12 @@ async fn run_lifecycle(
             )
             .await;
             let response = if outcome == AbortOutcome::Confirmed {
-                AppError::engine_start_failed(&work_id)
+                AppError::engine_start_failed_with_reason(
+                    &work_id,
+                    startup_diagnostic
+                        .as_deref()
+                        .unwrap_or("Engine startup failed without a diagnostic"),
+                )
             } else {
                 AppError::engine_faulted(&work_id)
             };
@@ -820,7 +868,7 @@ mod tests {
 
     use super::{AbortOutcome, TerminationOwner};
     use crate::engine::{
-        EngineAdapter, EngineError, EngineEvent, EngineRunContext, EngineSessionRef,
+        EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
     };
 
     #[derive(Default)]
@@ -837,7 +885,7 @@ mod tests {
         async fn start(
             &self,
             _context: EngineRunContext,
-            _prompt: String,
+            _input: EngineInput,
             _sink: mpsc::Sender<EngineEvent>,
         ) -> Result<EngineSessionRef, EngineError> {
             Err(EngineError::Start("not used by this test".into()))

@@ -4,14 +4,17 @@
 html,
 body,
 #root {
-  min-height: 100%;
+  height: 100%;
   margin: 0;
 }
 
 body {
+  overflow: hidden;
   background: var(--pw-surface-canvas);
   color: var(--pw-text-primary);
-  font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  font-size: 14px;
+  text-rendering: optimizeLegibility;
 }
 
 button {
@@ -68,6 +71,80 @@ button {
 
 .app-shell__workspace {
   min-height: calc(100vh - 65px);
+}
+
+.model-setup {
+  display: grid;
+  min-height: 100vh;
+  grid-template-rows: auto 1fr;
+  padding: 24px 28px;
+  box-sizing: border-box;
+  background: var(--pw-surface-panel);
+}
+
+.model-setup--loading {
+  place-content: center;
+}
+
+.model-setup__card {
+  width: min(560px, calc(100vw - 56px));
+  margin: auto;
+  text-align: center;
+}
+
+.model-setup__form {
+  display: grid;
+  gap: 9px;
+  margin-top: 28px;
+  padding: 22px;
+  border: 1px solid var(--pw-border-default);
+  border-radius: var(--pw-radius-lg);
+  background: var(--pw-surface-panel);
+  box-shadow: var(--pw-shadow-panel);
+  text-align: left;
+}
+
+.model-setup__form label {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.model-setup__form input,
+.model-setup__form select {
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 0 11px;
+  border: 1px solid var(--pw-border-strong);
+  border-radius: 8px;
+  background: var(--pw-surface-panel);
+  color: var(--pw-text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+
+.model-setup__form .button {
+  margin-top: 8px;
+}
+
+.model-setup__eyebrow {
+  margin: 0 0 10px;
+  color: var(--pw-accent-600);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.model-setup__card h1 {
+  margin: 0;
+  font-size: 32px;
+  letter-spacing: -.035em;
+}
+
+.model-setup__card > p:last-child {
+  margin: 12px auto 0;
+  color: var(--pw-text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
 }
 
 .continuous-loop-logo {

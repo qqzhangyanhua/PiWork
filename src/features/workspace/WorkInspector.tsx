@@ -1,37 +1,52 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { GripVertical, X } from "lucide-react";
+import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 
-import { isWorkEventTimelineItem, type TimelineItem } from "../../domain/work";
+import { formatAppErrorDiagnostics } from "../../domain/appError";
+import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../../domain/work";
+import type { ResourceSummary } from "../../bindings";
+import { AttachmentChips } from "./AttachmentChips";
 
-const tabs = ["progress", "changes", "artifacts", "logs"] as const;
-type InspectorTab = (typeof tabs)[number];
+const tabs = ["preview", "attachments", "changes", "validation", "logs"] as const;
+export type InspectorTab = (typeof tabs)[number];
+type InspectorScope = "current" | "all";
 
-const compactInspectorQuery = "(max-width: 1099px)";
-
-const useCompactInspector = () => {
-  const [compact, setCompact] = useState(
-    () => typeof matchMedia === "function" && matchMedia(compactInspectorQuery).matches,
-  );
-  useEffect(() => {
-    if (typeof matchMedia !== "function") return;
-    const query = matchMedia(compactInspectorQuery);
-    const update = () => setCompact(query.matches);
-    update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-  return compact;
-};
-
-export function WorkInspector({ timeline, open, onClose }: { timeline: TimelineItem[]; open: boolean; onClose(): void }) {
+export function WorkInspector({
+  timeline,
+  resources,
+  open,
+  widthPercent,
+  active,
+  error,
+  onActiveChange,
+  onClose,
+  onResizeReset,
+  onResizeStart,
+}: {
+  timeline: TimelineItem[];
+  resources: ResourceSummary[];
+  open: boolean;
+  widthPercent: number;
+  active: InspectorTab;
+  error: AppError | null;
+  onActiveChange(tab: InspectorTab): void;
+  onClose(): void;
+  onResizeReset(): void;
+  onResizeStart(event: PointerEvent<HTMLDivElement>): void;
+}) {
   const { t } = useTranslation();
-  const compact = useCompactInspector();
-  const [active, setActive] = useState<InspectorTab>("progress");
+  const [scope, setScope] = useState<InspectorScope>("current");
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
-  const events = timeline.filter(isWorkEventTimelineItem);
-  const toolCount = events.filter(({ payload }) => payload.type === "toolStarted").length;
-  const completed = events.some(({ payload }) => payload.type === "runCompleted");
-  const hidden = compact && !open;
+  const latestRunId = timeline.at(-1)?.runId;
+  const allEvents = timeline.filter(isWorkEventTimelineItem);
+  const events = scope === "all"
+    ? allEvents
+    : allEvents.filter((event) => !latestRunId || event.runId === latestRunId);
+  const completions = events.filter(
+    (event): event is typeof event & { payload: Extract<typeof event.payload, { type: "runCompleted" }> } =>
+      event.payload.type === "runCompleted",
+  );
+  const hidden = !open;
   const activateRelative = (event: KeyboardEvent, index: number) => {
     if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
     event.preventDefault();
@@ -39,18 +54,27 @@ export function WorkInspector({ timeline, open, onClose }: { timeline: TimelineI
     const next = (index + direction + tabs.length) % tabs.length;
     const nextTab = tabs[next];
     if (!nextTab) return;
-    setActive(nextTab);
+    onActiveChange(nextTab);
     refs.current[next]?.focus();
   };
 
   const content = () => {
-    if (active === "progress") return timeline.length ? <ul className="inspector-list"><li>{t("inspector.runEvents", { count: events.length })}</li><li>{t("inspector.toolEvents", { count: toolCount })}</li>{completed && <li>{t("status.completed")}</li>}</ul> : <p className="inspector-empty">{t("inspector.noProgress")}</p>;
-    const emptyKey = active === "changes"
-      ? "inspector.noChanges"
-      : active === "artifacts"
-        ? "inspector.noArtifacts"
-        : "inspector.noLogs";
-    return <p className="inspector-empty">{t(emptyKey)}</p>;
+    if (active === "preview") {
+      if (!completions.length) return <p className="inspector-empty">{t("inspector.noArtifacts")}</p>;
+      return <div className="inspector-previews">{completions.map(({ payload, runId, sequence }) => <article className="inspector-preview" key={`${runId}:${sequence}`}><h2>{payload.summary}</h2>{payload.artifacts.length > 0 ? <ul className="inspector-files">{payload.artifacts.map((artifact) => <li key={artifact}>{artifact}</li>)}</ul> : <p className="inspector-empty">{t("inspector.noArtifacts")}</p>}</article>)}</div>;
+    }
+    if (active === "attachments") {
+      if (!resources.length) return <p className="inspector-empty">{t("inspector.noAttachments")}</p>;
+      return <section className="inspector-attachments"><strong>{t("attachments.count", { count: resources.length })}</strong><AttachmentChips resources={resources} /></section>;
+    }
+    if (active === "validation") {
+      const validations = completions.flatMap(({ payload, runId }) => payload.validation.map((item) => ({ item, runId })));
+      return validations.length ? <ul className="inspector-list">{validations.map(({ item, runId }, index) => <li key={`${runId}:${index}`}>{item}</li>)}</ul> : <p className="inspector-empty">{t("inspector.noValidation")}</p>;
+    }
+    if (active === "logs") {
+      return <div className="inspector-logs">{error && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}{events.length ? <ol className="inspector-log">{events.map(({ payload, sequence, runId }) => <li key={`${runId}:${sequence}`}><span>{payload.type}</span>{payload.type === "toolStarted" ? payload.inputSummary : payload.type === "toolFinished" ? payload.outputSummary : payload.type === "runFailed" ? payload.message : payload.type === "runCompleted" ? payload.summary : payload.type === "runStarted" ? payload.modelLabel : payload.text}</li>)}</ol> : !error && <p className="inspector-empty">{t("inspector.noLogs")}</p>}</div>;
+    }
+    return <p className="inspector-empty">{t("inspector.noChanges")}</p>;
   };
 
   return (
@@ -67,6 +91,27 @@ export function WorkInspector({ timeline, open, onClose }: { timeline: TimelineI
         }
       }}
     >
+      <div
+        aria-label={t("inspector.resize")}
+        aria-orientation="vertical"
+        aria-valuemax={60}
+        aria-valuemin={32}
+        aria-valuenow={Math.round(widthPercent)}
+        className="work-inspector__resize"
+        onDoubleClick={onResizeReset}
+        onPointerDown={onResizeStart}
+        role="separator"
+        tabIndex={open ? 0 : -1}
+        title={t("inspector.resizeHint")}
+      >
+        <GripVertical aria-hidden="true" size={14} />
+      </div>
+      <header className="work-inspector__header">
+        <div className="work-inspector__heading"><strong>{t("inspector.title")}</strong><div className="work-inspector__scope"><button aria-pressed={scope === "current"} onClick={() => setScope("current")} type="button">{t("inspector.currentRun")}</button><button aria-pressed={scope === "all"} onClick={() => setScope("all")} type="button">{t("inspector.allWork")}</button></div></div>
+        <button className="icon-button" type="button" aria-label={t("inspector.close")} onClick={onClose}>
+          <X aria-hidden="true" size={17} />
+        </button>
+      </header>
       <div className="work-inspector__tabs" role="tablist" aria-label={t("inspector.label")}>
         {tabs.map((tab, index) => (
           <button
@@ -74,7 +119,7 @@ export function WorkInspector({ timeline, open, onClose }: { timeline: TimelineI
             aria-selected={active === tab}
             id={`inspector-tab-${tab}`}
             key={tab}
-            onClick={() => setActive(tab)}
+            onClick={() => onActiveChange(tab)}
             onKeyDown={(event) => activateRelative(event, index)}
             ref={(node) => { refs.current[index] = node; }}
             role="tab"
@@ -85,7 +130,7 @@ export function WorkInspector({ timeline, open, onClose }: { timeline: TimelineI
           </button>
         ))}
       </div>
-      <div className="work-inspector__panel" role="tabpanel" id={`inspector-panel-${active}`} aria-labelledby={`inspector-tab-${active}`}>{content()}</div>
+      <div className="work-inspector__panel" role="tabpanel" id={`inspector-panel-${active}`} aria-labelledby={`inspector-tab-${active}`}>{open ? content() : null}</div>
     </aside>
   );
 }

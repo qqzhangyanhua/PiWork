@@ -1,4 +1,5 @@
 pub mod event;
+pub mod resource;
 pub mod work;
 
 #[cfg(test)]
@@ -9,6 +10,10 @@ mod tests {
 
     use super::{
         event::{WorkEventEnvelope, WorkEventPayload},
+        resource::{
+            ImportResourcesInput, ResourceOrigin, ResourceStatus, ResourceSummary,
+            ResourceThumbnail,
+        },
         work::{
             CreateWorkInput, MessageRole, MessageSummary, PermissionMode, RunStatus, RunSummary,
             StartWorkOutput, WorkDetail, WorkStatus, WorkSummary,
@@ -27,6 +32,11 @@ mod tests {
         MessageSummary::export().unwrap();
         StartWorkOutput::export().unwrap();
         CreateWorkInput::export().unwrap();
+        ResourceStatus::export().unwrap();
+        ResourceOrigin::export().unwrap();
+        ResourceSummary::export().unwrap();
+        ResourceThumbnail::export().unwrap();
+        ImportResourcesInput::export().unwrap();
         WorkEventEnvelope::export().unwrap();
         WorkEventPayload::export().unwrap();
 
@@ -42,6 +52,11 @@ mod tests {
             "MessageSummary",
             "StartWorkOutput",
             "CreateWorkInput",
+            "ResourceStatus",
+            "ResourceOrigin",
+            "ResourceSummary",
+            "ResourceThumbnail",
+            "ImportResourcesInput",
             "WorkEventEnvelope",
             "WorkEventPayload",
         ] {

@@ -29,12 +29,31 @@ export const appErrorMessageKey = (error: AppError): string => {
     migration_error: "errors.database",
     not_found: "errors.notFound",
     path_resolution_error: "errors.pathResolution",
+    referenced_file_error: "errors.referencedFile",
+    resource_import: "errors.resourceImport",
+    resource_not_found: "errors.resourceNotFound",
+    resource_storage: "errors.resourceStorage",
     work_already_running: "errors.workAlreadyRunning",
   };
   return byCode[error.code] ?? "errors.generic";
 };
 
-const diagnosticFields = new Set(["field", "from", "runId", "to", "workId"]);
+export const appErrorMessageValues = (error: AppError): Record<string, string> | undefined => {
+  const path = error.details?.path;
+  if (
+    error.code === "referenced_file_error" &&
+    typeof path === "string" &&
+    path.length > 0 &&
+    !path.startsWith("/") &&
+    !/^[a-z]:/iu.test(path) &&
+    !path.split(/[\\/]/u).includes("..")
+  ) {
+    return { path };
+  }
+  return undefined;
+};
+
+const diagnosticFields = new Set(["field", "from", "reason", "runId", "to", "workId"]);
 
 export const formatAppErrorDiagnostics = (error: AppError, fallback: string) => {
   if (!error.details) return `${error.code}\n${error.message}`;
