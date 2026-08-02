@@ -13,8 +13,10 @@
     "cargo:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
+    "@gsap/react": "^2.1.2",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
+    "gsap": "^3.15.0",
     "i18next": "^25.0.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
