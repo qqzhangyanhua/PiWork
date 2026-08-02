@@ -99,6 +99,32 @@
     "validation": "Validation",
     "limitations": "Limitations"
   },
+  "progress": {
+    "label": "Execution progress",
+    "preparing": "Pi is preparing",
+    "running": "Pi is working",
+    "completed_one": "Pi completed {{count}} action",
+    "completed_other": "Pi completed {{count}} actions",
+    "failed": "The task did not finish",
+    "recovered_one": "{{count}} action encountered a problem",
+    "recovered_other": "{{count}} actions encountered problems",
+    "expand": "Expand execution details",
+    "collapse": "Collapse execution details",
+    "phase": {
+      "prepare": "Prepare",
+      "analyze": "Analyze project",
+      "execute": "Apply changes",
+      "validate": "Validate results",
+      "deliver": "Deliver results"
+    },
+    "status": {
+      "pending": "Waiting",
+      "active": "In progress",
+      "completed": "Completed",
+      "skipped": "Not needed",
+      "failed": "Failed"
+    }
+  },
   "composer": {
     "label": "Instructions for PiWork",
     "placeholder": "Describe the next step, or add a requirement for the current Run…",

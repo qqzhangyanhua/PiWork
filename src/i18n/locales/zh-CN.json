@@ -99,6 +99,32 @@
     "validation": "验证",
     "limitations": "限制"
   },
+  "progress": {
+    "label": "执行进度",
+    "preparing": "Pi 正在准备执行",
+    "running": "Pi 正在执行",
+    "completed_one": "Pi 已完成 {{count}} 个操作",
+    "completed_other": "Pi 已完成 {{count}} 个操作",
+    "failed": "执行未完成",
+    "recovered_one": "其中 {{count}} 个操作曾遇到问题",
+    "recovered_other": "其中 {{count}} 个操作曾遇到问题",
+    "expand": "展开执行详情",
+    "collapse": "收起执行详情",
+    "phase": {
+      "prepare": "准备执行",
+      "analyze": "分析项目",
+      "execute": "执行修改",
+      "validate": "验证结果",
+      "deliver": "交付结果"
+    },
+    "status": {
+      "pending": "等待",
+      "active": "进行中",
+      "completed": "完成",
+      "skipped": "未经过",
+      "failed": "失败"
+    }
+  },
   "composer": {
     "label": "给 PiWork 指令",
     "placeholder": "描述下一步，或补充当前 Run 的要求…",

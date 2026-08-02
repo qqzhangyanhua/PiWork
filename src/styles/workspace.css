@@ -183,6 +183,193 @@
 .timeline-empty h2 { margin: 13px 0 5px; color: var(--pw-text-primary); font-size: 14px; }
 .timeline-empty p { margin: 0; font-size: 11px; }
 
+/* Execution process */
+.execution-progress {
+  margin: 6px 0 18px;
+  overflow: hidden;
+  border: 1px solid var(--pw-border-default);
+  border-radius: var(--pw-radius-md);
+  background: var(--pw-surface-raised);
+}
+
+.execution-progress[data-status="failed"] {
+  border-color: color-mix(in srgb, var(--pw-failure-500) 34%, var(--pw-border-default));
+}
+
+.execution-progress__summary {
+  display: grid;
+  width: 100%;
+  min-height: 46px;
+  grid-template-columns: 22px minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--pw-text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.execution-progress__summary:hover {
+  background: var(--pw-surface-subtle);
+}
+
+.execution-progress__icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: var(--pw-radius-sm);
+  background: var(--pw-accent-50);
+  color: var(--pw-accent-700);
+}
+
+.execution-progress__icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.execution-progress[data-status="preparing"] .execution-progress__icon svg,
+.execution-progress[data-status="running"] .execution-progress__icon svg {
+  animation: pw-spin 1.25s linear infinite;
+}
+
+.execution-progress[data-status="completed"] .execution-progress__icon {
+  background: var(--pw-success-50);
+  color: var(--pw-success-500);
+}
+
+.execution-progress[data-status="failed"] .execution-progress__icon {
+  background: var(--pw-failure-50);
+  color: var(--pw-failure-500);
+}
+
+.execution-progress__headline {
+  min-width: 0;
+}
+
+.execution-progress__headline strong,
+.execution-progress__headline small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.execution-progress__headline strong {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.execution-progress__headline small,
+.execution-progress__count {
+  color: var(--pw-text-tertiary);
+  font-size: 10px;
+}
+
+.execution-progress__chevron {
+  width: 14px;
+  height: 14px;
+  color: var(--pw-text-tertiary);
+  transition: transform 180ms ease;
+}
+
+.execution-progress__summary[aria-expanded="true"] .execution-progress__chevron {
+  transform: rotate(180deg);
+}
+
+.execution-progress__details {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--pw-border-subtle);
+}
+
+.execution-progress__phases {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.execution-progress__phase {
+  display: grid;
+  min-height: 29px;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 7px;
+  border-radius: var(--pw-radius-sm);
+  color: var(--pw-text-secondary);
+  font-size: 11px;
+}
+
+.execution-progress__phase small {
+  color: var(--pw-text-tertiary);
+  font-size: 10px;
+}
+
+.execution-progress__phase[data-status="active"] {
+  background: var(--pw-accent-50);
+  color: var(--pw-accent-700);
+}
+
+.execution-progress__phase[data-status="failed"] {
+  background: var(--pw-failure-50);
+  color: var(--pw-failure-500);
+}
+
+.execution-progress__phase[data-status="skipped"] {
+  color: var(--pw-text-tertiary);
+}
+
+.execution-progress__dot {
+  width: 7px;
+  height: 7px;
+  justify-self: center;
+  border: 1px solid var(--pw-border-strong);
+  border-radius: 50%;
+  background: var(--pw-surface-panel);
+}
+
+.execution-progress__phase[data-status="active"] .execution-progress__dot {
+  border-color: var(--pw-accent-500);
+  background: var(--pw-accent-500);
+  animation: pw-progress-pulse 1.6s ease-in-out infinite;
+}
+
+.execution-progress__phase[data-status="completed"] .execution-progress__dot {
+  border-color: var(--pw-success-500);
+  background: var(--pw-success-500);
+}
+
+.execution-progress__phase[data-status="failed"] .execution-progress__dot {
+  border-color: var(--pw-failure-500);
+  background: var(--pw-failure-500);
+}
+
+.execution-progress__activity {
+  margin-top: 7px;
+  padding-top: 4px;
+  border-top: 1px solid var(--pw-border-subtle);
+}
+
+@keyframes pw-progress-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--pw-accent-500) 10%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--pw-accent-500) 16%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .execution-progress__icon svg,
+  .execution-progress__dot {
+    animation: none !important;
+  }
+
+  .execution-progress__chevron {
+    transition: none;
+  }
+}
+
 /* Pi activity */
 .agent-activity { margin: 4px 0 17px; overflow: hidden; border: 1px solid var(--pw-border-default); border-radius: 11px; background: var(--pw-surface-panel); }
 .agent-activity summary { display: flex; min-height: 40px; align-items: center; gap: 8px; padding: 0 11px; background: #f8f8f5; list-style: none; cursor: pointer; user-select: none; }
