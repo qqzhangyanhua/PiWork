@@ -137,4 +137,16 @@ impl WorkService {
             )),
         }
     }
+
+    pub async fn stop_work(&self, work_id: &str) -> Result<WorkDetail, AppError> {
+        match &self.execution {
+            Execution::Supervisor(supervisor) => supervisor.stop(work_id).await?,
+            Execution::RepositoryOnly => {
+                return Err(AppError::engine(
+                    "Work execution is not configured for this service",
+                ));
+            }
+        }
+        self.get_work(work_id).await
+    }
 }

@@ -1,3 +1,4 @@
+pub mod environment;
 pub mod event;
 pub mod resource;
 pub mod work;
@@ -9,6 +10,7 @@ mod tests {
     use ts_rs::TS;
 
     use super::{
+        environment::{RuntimeCheck, RuntimeStatus},
         event::{WorkEventEnvelope, WorkEventPayload},
         resource::{
             ImportResourcesInput, ResourceOrigin, ResourceStatus, ResourceSummary,
@@ -22,6 +24,8 @@ mod tests {
 
     #[test]
     fn export_bindings() {
+        RuntimeCheck::export().unwrap();
+        RuntimeStatus::export().unwrap();
         WorkStatus::export().unwrap();
         RunStatus::export().unwrap();
         MessageRole::export().unwrap();
@@ -42,6 +46,8 @@ mod tests {
 
         let output_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings");
         for type_name in [
+            "RuntimeCheck",
+            "RuntimeStatus",
             "WorkStatus",
             "RunStatus",
             "MessageRole",

@@ -4,6 +4,8 @@ export type { MessageSummary } from "./MessageSummary";
 export type { PermissionMode } from "./PermissionMode";
 export type { ProjectFileSummary } from "./ProjectFileSummary";
 export type { ImportResourcesInput } from "./ImportResourcesInput";
+export type { RuntimeCheck } from "./RuntimeCheck";
+export type { RuntimeStatus } from "./RuntimeStatus";
 export type { ResourceOrigin } from "./ResourceOrigin";
 export type { ResourceStatus } from "./ResourceStatus";
 export type { ResourceSummary } from "./ResourceSummary";

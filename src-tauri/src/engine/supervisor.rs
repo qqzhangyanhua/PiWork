@@ -39,6 +39,7 @@ struct ActiveEntry {
 enum ActiveState {
     Starting,
     Running,
+    Stopping,
     Faulted { reason: String },
 }
 
@@ -51,6 +52,7 @@ enum StartSignal {
 
 enum ConsumerOutcome {
     Terminal,
+    Stopped,
     Abnormal(&'static str),
     StartFailed,
 }
@@ -265,6 +267,40 @@ impl EngineSupervisor {
             .await
             .unwrap_or_else(|_| Err(AppError::engine("Engine startup task ended unexpectedly")))
     }
+
+    pub async fn stop(&self, work_id: &str) -> Result<(), AppError> {
+        let (generation, run_id, termination) = {
+            let mut active = self.active.lock().await;
+            let entry = active
+                .get_mut(work_id)
+                .ok_or_else(|| AppError::engine("Work does not have an active execution"))?;
+            let run_id = entry
+                .run_id
+                .clone()
+                .ok_or_else(|| AppError::engine("Work execution is still starting"))?;
+            let termination = entry
+                .termination
+                .clone()
+                .ok_or_else(|| AppError::engine("Work execution cannot be stopped yet"))?;
+            entry.state = ActiveState::Stopping;
+            (entry.generation, run_id, termination)
+        };
+
+        if termination.abort_once().await == AbortOutcome::Unconfirmed {
+            set_faulted(
+                &self.active,
+                work_id,
+                generation,
+                "Engine stop could not be confirmed",
+            )
+            .await;
+            return Err(AppError::engine_faulted(work_id));
+        }
+
+        let stopped = self.repository.stop_run(&run_id, work_id).await;
+        remove_active(&self.active, work_id, generation).await;
+        stopped
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -475,6 +511,7 @@ async fn run_lifecycle(
 
     match consumer.await {
         Ok(ConsumerOutcome::Terminal) => {}
+        Ok(ConsumerOutcome::Stopped) => {}
         Ok(ConsumerOutcome::Abnormal(reason)) => {
             let _ = terminate_abnormally(
                 &termination,
@@ -535,6 +572,9 @@ async fn consume_events(
             StartSignal::Ready => receiver.recv().await,
         };
         let Some(event) = event else {
+            if is_stopping(&active, &work_id, generation).await {
+                return ConsumerOutcome::Stopped;
+            }
             return match await_start_signal(&mut start_signal).await {
                 StartSignal::Ready => {
                     ConsumerOutcome::Abnormal("Engine event stream closed before a terminal event")
@@ -542,6 +582,9 @@ async fn consume_events(
                 StartSignal::Failed | StartSignal::Pending => ConsumerOutcome::StartFailed,
             };
         };
+        if is_stopping(&active, &work_id, generation).await {
+            return ConsumerOutcome::Stopped;
+        }
         let terminal = event.is_terminal();
         if terminal {
             match await_start_signal_while_draining(&mut start_signal, &mut receiver).await {
@@ -597,6 +640,7 @@ fn consumer_failure_reason(result: Result<ConsumerOutcome, JoinError>) -> &'stat
     match result {
         Ok(ConsumerOutcome::Abnormal(reason)) => reason,
         Ok(ConsumerOutcome::Terminal) => "Engine terminated before its session was attached",
+        Ok(ConsumerOutcome::Stopped) => "Engine stopped before its session was attached",
         Ok(ConsumerOutcome::StartFailed) => "Engine startup failed",
         Err(_) => "Engine event consumer stopped unexpectedly",
     }
@@ -753,6 +797,12 @@ async fn set_task_handle(active: &ActiveRuns, work_id: &str, generation: Uuid, t
     {
         entry.task = Some(task);
     }
+}
+
+async fn is_stopping(active: &ActiveRuns, work_id: &str, generation: Uuid) -> bool {
+    active.lock().await.get(work_id).is_some_and(|entry| {
+        entry.generation == generation && matches!(entry.state, ActiveState::Stopping)
+    })
 }
 
 async fn set_run_id(active: &ActiveRuns, work_id: &str, generation: Uuid, run_id: &str) {

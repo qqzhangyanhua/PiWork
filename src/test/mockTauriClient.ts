@@ -14,9 +14,14 @@ import type {
 } from "../bindings";
 
 export type MockTauriClient = PiWorkClient & {
+  getRuntimeStatus: Mock<Required<PiWorkClient>["getRuntimeStatus"]>;
   getModelConfigurationStatus: Mock<PiWorkClient["getModelConfigurationStatus"]>;
+  listModelConfigurations: Mock<PiWorkClient["listModelConfigurations"]>;
   testModelConnection: Mock<PiWorkClient["testModelConnection"]>;
+  testSavedModelConfiguration: Mock<PiWorkClient["testSavedModelConfiguration"]>;
   saveModelConfiguration: Mock<PiWorkClient["saveModelConfiguration"]>;
+  activateModelConfiguration: Mock<PiWorkClient["activateModelConfiguration"]>;
+  selectModelForConfiguration: Mock<PiWorkClient["selectModelForConfiguration"]>;
   createWork: Mock<PiWorkClient["createWork"]>;
   listWorks: Mock<PiWorkClient["listWorks"]>;
   getWork: Mock<PiWorkClient["getWork"]>;
@@ -26,6 +31,7 @@ export type MockTauriClient = PiWorkClient & {
   getResourceThumbnail: Mock<PiWorkClient["getResourceThumbnail"]>;
   detachDraftResource: Mock<PiWorkClient["detachDraftResource"]>;
   startWork: Mock<PiWorkClient["startWork"]>;
+  stopWork: Mock<PiWorkClient["stopWork"]>;
   listenToWorkEvents: Mock<PiWorkClient["listenToWorkEvents"]>;
   emit(event: WorkEventEnvelope): void;
   seed(detail: WorkDetail): void;
@@ -46,7 +52,7 @@ export const runCompletedEvent = (
   occurredAt: now(20),
   payload: {
     type: "runCompleted",
-    summary: "Work 已完成",
+    summary: "任务已完成",
     artifacts: ["dist/report.html"],
     validation: ["Dashboard checks passed"],
     limitations: ["Uses mock revenue data"],
@@ -64,19 +70,55 @@ export const createMockTauriClient = (): MockTauriClient => {
   const resourcesByDraft = new Map<string, ResourceSummary[]>();
   const thumbnailByResource = new Map<string, ResourceThumbnail>();
   const unlisten = vi.fn(() => handlers.clear());
+  const getRuntimeStatus: Mock<Required<PiWorkClient>["getRuntimeStatus"]> = vi.fn(async () => ({
+    python: { available: true, version: "3.11.6" },
+    node: { available: true, version: "18.20.2" },
+    git: { available: true, version: null },
+  }));
   const getModelConfigurationStatus: Mock<PiWorkClient["getModelConfigurationStatus"]> = vi.fn(async () => ({
     configured: true,
     configuration: {
+      id: "openai-default",
       provider: "openai" as const,
+      baseUrl: "https://api.openai.com/v1",
       modelId: "gpt-5.2",
+      active: true,
+      credentialConfigured: true,
     },
   }));
+  const listModelConfigurations: Mock<PiWorkClient["listModelConfigurations"]> = vi.fn(async () => {
+    const configuration = (await getModelConfigurationStatus()).configuration;
+    return configuration ? [configuration] : [];
+  });
   const testModelConnection: Mock<PiWorkClient["testModelConnection"]> = vi.fn(async (_input) => ({
     models: [{ id: "gpt-5.2", label: "GPT-5.2" }],
   }));
+  const testSavedModelConfiguration: Mock<PiWorkClient["testSavedModelConfiguration"]> = vi.fn(async (_configurationId) => ({
+    models: [{ id: "gpt-5.2", label: "GPT-5.2" }],
+  }));
   const saveModelConfiguration: Mock<PiWorkClient["saveModelConfiguration"]> = vi.fn(async (input) => ({
+    id: input.id ?? "model-new",
     provider: input.provider,
+    baseUrl: input.baseUrl,
     modelId: input.modelId,
+    active: false,
+    credentialConfigured: true,
+  }));
+  const activateModelConfiguration: Mock<PiWorkClient["activateModelConfiguration"]> = vi.fn(async (configurationId) => ({
+    id: configurationId,
+    provider: "openai" as const,
+    baseUrl: "https://api.openai.com/v1",
+    modelId: "gpt-5.2",
+    active: true,
+    credentialConfigured: true,
+  }));
+  const selectModelForConfiguration: Mock<PiWorkClient["selectModelForConfiguration"]> = vi.fn(async (input) => ({
+    id: input.configurationId,
+    provider: "openai" as const,
+    baseUrl: "https://api.openai.com/v1",
+    modelId: input.modelId,
+    active: true,
+    credentialConfigured: true,
   }));
 
   const createWork = vi.fn(async (input: CreateWorkInput) => {
@@ -201,6 +243,19 @@ export const createMockTauriClient = (): MockTauriClient => {
       return { run, userMessage } satisfies StartWorkOutput;
     },
   );
+  const stopWork: Mock<PiWorkClient["stopWork"]> = vi.fn(async (workId) => {
+    const detail = details.get(workId);
+    if (!detail) throw new Error(`Work not found: ${workId}`);
+    const activeRun = [...detail.runs]
+      .reverse()
+      .find(({ status }) => status === "queued" || status === "running" || status === "waiting");
+    if (!activeRun) throw new Error(`Work is not running: ${workId}`);
+    activeRun.status = "stopped";
+    activeRun.completedAt = now(50 + runSequence);
+    detail.summary.status = "stopped";
+    detail.summary.updatedAt = activeRun.completedAt;
+    return detail;
+  });
   const listenToWorkEvents = vi.fn(
     async (handler: (event: WorkEventEnvelope) => void) => {
       handlers.add(handler);
@@ -209,9 +264,14 @@ export const createMockTauriClient = (): MockTauriClient => {
   );
 
   const client: MockTauriClient = {
+    getRuntimeStatus,
     getModelConfigurationStatus,
+    listModelConfigurations,
     testModelConnection,
+    testSavedModelConfiguration,
     saveModelConfiguration,
+    activateModelConfiguration,
+    selectModelForConfiguration,
     createWork,
     listWorks,
     getWork,
@@ -221,6 +281,7 @@ export const createMockTauriClient = (): MockTauriClient => {
     getResourceThumbnail,
     detachDraftResource,
     startWork,
+    stopWork,
     listenToWorkEvents,
     unlisten,
     seed(detail) {

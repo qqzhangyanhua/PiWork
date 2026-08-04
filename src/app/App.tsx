@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { isTauri } from "@tauri-apps/api/core";
 
 import { ContinuousLoopLogo } from "../components/brand/ContinuousLoopLogo";
+import { AnimatedSurfaceState } from "../components/motion/AnimatedSurfaceState";
 import { ModelSetup } from "../features/model-setup/ModelSetup";
 import { WorkSurface } from "../features/workspace/WorkSurface";
 import {
@@ -40,31 +41,45 @@ export function App({ client }: AppProps) {
 
   if (!desktopRuntimeAvailable) {
     return (
-      <main className="model-setup model-setup--loading">
+      <AnimatedSurfaceState
+        as="main"
+        className="model-setup model-setup--loading"
+        variant="error"
+      >
         <section className="model-setup__card" role="alert">
           <h1>{t("runtime.desktopRequiredTitle")}</h1>
           <p>{t("runtime.desktopRequiredBody")}</p>
         </section>
-      </main>
+      </AnimatedSurfaceState>
     );
   }
 
   if (loadError) {
     return (
-      <main className="model-setup model-setup--loading">
+      <AnimatedSurfaceState
+        as="main"
+        className="model-setup model-setup--loading"
+        variant="error"
+      >
         <section className="model-setup__card" role="alert">
           <h1>{t("model.loadError")}</h1>
           <button className="button button--primary" type="button" onClick={() => setLoadRequest((request) => request + 1)}>{t("common.retry")}</button>
         </section>
-      </main>
+      </AnimatedSurfaceState>
     );
   }
 
   if (!status) {
     return (
-      <main className="model-setup model-setup--loading" role="status" aria-label={t("model.loading")}>
+      <AnimatedSurfaceState
+        aria-label={t("model.loading")}
+        as="main"
+        className="model-setup model-setup--loading"
+        role="status"
+        variant="loading"
+      >
         <ContinuousLoopLogo showWordmark />
-      </main>
+      </AnimatedSurfaceState>
     );
   }
 
@@ -72,5 +87,13 @@ export function App({ client }: AppProps) {
     return <ModelSetup client={resolvedClient} onConfigured={(configuration) => setStatus({ configured: true, configuration })} />;
   }
 
-  return <WorkSurface client={resolvedClient} modelLabel={status.configuration?.modelId ?? "Pi"} />;
+  return (
+    <WorkSurface
+      client={resolvedClient}
+      initialView="home"
+      modelConfiguration={status.configuration}
+      modelLabel={status.configuration?.modelId ?? "Pi"}
+      onModelConfigured={(configuration) => setStatus({ configured: true, configuration })}
+    />
+  );
 }

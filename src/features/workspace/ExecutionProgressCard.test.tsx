@@ -48,7 +48,7 @@ describe("ExecutionProgressCard", () => {
     );
   });
 
-  it("shows the active phase and keeps live execution details expanded", async () => {
+  it("keeps live execution details collapsed and never invents workflow phases", async () => {
     render(
       <ExecutionProgressCard events={runningEvents()}>
         <div>工具活动详情</div>
@@ -58,14 +58,16 @@ describe("ExecutionProgressCard", () => {
     expect(
       await screen.findByRole("status", { name: "执行进度" }),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("execution-phase:analyze")).toHaveAttribute(
-      "data-status",
-      "active",
-    );
     expect(
-      screen.getByRole("button", { name: "收起执行详情" }),
-    ).toHaveAttribute("aria-expanded", "true");
+      screen.getByRole("button", { name: "展开执行详情" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("工具活动详情")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+
     expect(screen.getByText("工具活动详情")).toBeVisible();
+    expect(screen.queryByTestId("execution-phase:analyze")).not.toBeInTheDocument();
+    expect(screen.queryByText("未经过")).not.toBeInTheDocument();
   });
 
   it("starts a hydrated successful execution collapsed and remains inspectable", () => {
@@ -105,7 +107,20 @@ describe("ExecutionProgressCard", () => {
     expect(screen.getByText("读取 src/app.tsx")).toBeVisible();
   });
 
-  it("keeps terminal failures expanded without exposing raw engine text", async () => {
+  it("does not describe a text-only answer as zero tool actions", () => {
+    render(
+      <ExecutionProgressCard events={[
+        event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+        event(2, { type: "assistantDelta", text: "answer" }),
+        event(3, { type: "runCompleted", summary: "done", artifacts: [], validation: [], limitations: [] }),
+      ]} />,
+    );
+
+    expect(screen.getByText("Pi 已完成")).toBeInTheDocument();
+    expect(screen.queryByText(/0 个操作/)).not.toBeInTheDocument();
+  });
+
+  it("keeps terminal failure activity collapsed without exposing raw engine text", async () => {
     render(
       <ExecutionProgressCard
         events={[
@@ -123,9 +138,9 @@ describe("ExecutionProgressCard", () => {
     expect(screen.getByText("执行未完成")).toBeInTheDocument();
     expect(screen.queryByText("private engine failure")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "收起执行详情" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("最后一个安全活动")).toBeVisible();
+      screen.getByRole("button", { name: "展开执行详情" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("最后一个安全活动")).not.toBeInTheDocument();
   });
 
   it("reports recovered tool failures without overriding final success", () => {

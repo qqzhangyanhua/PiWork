@@ -1,23 +1,46 @@
-import { Check, CircleAlert, LoaderCircle, Wrench } from "lucide-react";
-import { useLayoutEffect, useRef } from "react";
+import { ArrowDown, Check, CircleAlert, CircleCheck, LoaderCircle, Wrench } from "lucide-react";
+import { useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
 import remarkGfm from "remark-gfm";
 
 import { appErrorMessageKey, appErrorMessageValues } from "../../domain/appError";
 import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../../domain/work";
-import type { MessageSummary, ResourceSummary, WorkEventEnvelope } from "../../bindings";
+import type { MessageSummary, ResourceSummary, WorkEventEnvelope, WorkSummary } from "../../bindings";
 import { AttachmentChips } from "./AttachmentChips";
+import { ExecutionProgressCard } from "./ExecutionProgressCard";
 
-type RunGroup = {
+type ConversationTurnGroup = {
   key: string;
   runId: string;
   items: TimelineItem[];
 };
 
+const itemTimestamp = (item: TimelineItem) =>
+  isWorkEventTimelineItem(item) ? item.occurredAt : item.createdAt;
+
+const formatTurnTimestamp = (value: string, locale: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return new Intl.DateTimeFormat(locale, sameDay
+    ? { hour: "2-digit", minute: "2-digit" }
+    : {
+        ...(sameYear ? {} : { year: "numeric" as const }),
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(date);
+};
+
 const groupByRun = (timeline: TimelineItem[]) => {
-  const groups: RunGroup[] = [];
-  const byRun = new Map<string, RunGroup>();
+  const groups: ConversationTurnGroup[] = [];
+  const byRun = new Map<string, ConversationTurnGroup>();
   for (const item of timeline) {
     let group = byRun.get(item.runId);
     if (!group) {
@@ -32,8 +55,13 @@ const groupByRun = (timeline: TimelineItem[]) => {
 
 const DetailList = ({ label, values }: { label: string; values: string[] }) =>
   values.length ? (
-    <section className="agent-activity__details"><strong>{label}</strong><ul>{values.map((value, index) => <li key={`${value}-${index}`}>{value}</li>)}</ul></section>
+    <section className="timeline-delivery__details"><strong>{label}</strong><ul>{values.map((value, index) => <li key={`${value}-${index}`}>{value}</li>)}</ul></section>
   ) : null;
+
+const presentableCompletionSummary = (summary: string) => {
+  const value = summary.trim();
+  return /^Pi completed this Run with \d+ tool calls?$/iu.test(value) ? "" : value;
+};
 
 function ActivityRow({ event }: { event: WorkEventEnvelope }) {
   const { t } = useTranslation();
@@ -51,37 +79,7 @@ function ActivityRow({ event }: { event: WorkEventEnvelope }) {
       <em>{t(payload.success ? "timeline.succeeded" : "timeline.failed")}</em>
     </div>;
   }
-  if (payload.type === "runFailed") {
-    return <div className="agent-activity__row agent-activity__row--failure"><CircleAlert aria-hidden="true" /><span><strong>{t("timeline.runFailed")}</strong><small>{payload.message}</small></span></div>;
-  }
-  if (payload.type === "runCompleted") {
-    return <div className="agent-activity__completion"><p>{payload.summary}</p><DetailList label={t("inspector.artifacts")} values={payload.artifacts} /><DetailList label={t("timeline.validation")} values={payload.validation} /><DetailList label={t("timeline.limitations")} values={payload.limitations} /></div>;
-  }
   return null;
-}
-
-function AgentActivity({ events }: { events: WorkEventEnvelope[] }) {
-  const { t } = useTranslation();
-  const tools = new Set(events.flatMap(({ payload }) =>
-    payload.type === "toolStarted" || payload.type === "toolFinished" ? [payload.toolCallId] : [],
-  ));
-  const completed = events.some(({ payload }) => payload.type === "runCompleted");
-  const failed = events.some(({ payload }) => payload.type === "runFailed" || (payload.type === "toolFinished" && !payload.success));
-  const terminal = completed || failed;
-  const label = failed
-    ? t("timeline.activityFailed", { count: tools.size })
-    : completed
-      ? t("timeline.activityCompleted", { count: tools.size })
-      : t("timeline.activityRunning");
-
-  return (
-    <details className={`agent-activity${failed ? " agent-activity--failure" : ""}`} open={!terminal}>
-      <summary><span className="agent-activity__pi" aria-hidden="true">π</span><strong>{label}</strong><span className="agent-activity__toggle">{t("timeline.activityToggle")}</span></summary>
-      <div className="agent-activity__body">
-        {events.map((event) => <ActivityRow event={event} key={`${event.runId}:${event.sequence}`} />)}
-      </div>
-    </details>
-  );
 }
 
 function AssistantMessage({ text }: { text: string }) {
@@ -94,14 +92,16 @@ function AssistantMessage({ text }: { text: string }) {
   );
 }
 
-function Run({
+function ConversationSegment({
   group,
   resourcesById,
+  onOpenDiagnostics,
 }: {
-  group: RunGroup;
+  group: ConversationTurnGroup;
   resourcesById: Map<string, ResourceSummary>;
+  onOpenDiagnostics?(): void;
 }) {
-  const { t } = useTranslation();
+  const { i18n, t } = useTranslation();
   const messages = group.items.filter(
     (item): item is MessageSummary => !isWorkEventTimelineItem(item),
   );
@@ -109,10 +109,34 @@ function Run({
   const assistantText = events
     .flatMap(({ payload }) => payload.type === "assistantDelta" ? [payload.text] : [])
     .join("");
-  const activity = events.filter(({ payload }) => payload.type !== "assistantDelta");
-
+  const activity = events.filter(({ payload }) =>
+    payload.type === "runStarted" || payload.type === "toolStarted" || payload.type === "toolFinished",
+  );
+  const completion = events.find(
+    (event): event is WorkEventEnvelope & { payload: Extract<WorkEventEnvelope["payload"], { type: "runCompleted" }> } =>
+      event.payload.type === "runCompleted",
+  );
+  const failure = events.find(
+    (event): event is WorkEventEnvelope & { payload: Extract<WorkEventEnvelope["payload"], { type: "runFailed" }> } =>
+      event.payload.type === "runFailed",
+  );
+  const completionSummary = completion
+    ? presentableCompletionSummary(completion.payload.summary)
+    : "";
+  const hasDelivery = Boolean(completion && (
+    completionSummary
+    || completion.payload.artifacts.length
+    || completion.payload.validation.length
+    || completion.payload.limitations.length
+  ));
+  const startedAt = group.items
+    .map(itemTimestamp)
+    .reduce((earliest, current) => current < earliest ? current : earliest);
   return (
-    <section className="timeline-run" data-run-id={group.runId}>
+    <>
+      <time className="conversation-turn__time" dateTime={startedAt}>
+        {formatTurnTimestamp(startedAt, i18n.resolvedLanguage ?? i18n.language)}
+      </time>
       {messages.map((message) => message.role === "assistant" ? (
         <AssistantMessage key={message.id} text={message.content} />
       ) : (
@@ -127,37 +151,109 @@ function Run({
           />
         </article>
       ))}
-      {activity.length > 0 && <AgentActivity events={activity} />}
+      {(activity.length > 0 || completion || failure) && (
+        <ExecutionProgressCard events={events}>
+          {activity.length > 0
+            ? activity.map((event) => (
+                <ActivityRow
+                  event={event}
+                  key={`${event.runId}:${event.sequence}`}
+                />
+              ))
+            : undefined}
+        </ExecutionProgressCard>
+      )}
       {assistantText && <AssistantMessage text={assistantText} />}
-    </section>
+      {completion && hasDelivery && (
+        <article className="timeline-delivery">
+          <header><CircleCheck aria-hidden="true" /><strong>{t("timeline.delivery")}</strong></header>
+          {completionSummary && <p>{completionSummary}</p>}
+          <DetailList label={t("inspector.artifacts")} values={completion.payload.artifacts} />
+          <DetailList label={t("timeline.validation")} values={completion.payload.validation} />
+          <DetailList label={t("timeline.limitations")} values={completion.payload.limitations} />
+        </article>
+      )}
+      {failure && (
+        <article className="timeline-failure" role="alert">
+          <CircleAlert aria-hidden="true" />
+          <div>
+            <strong>{t("timeline.runFailed")}</strong>
+            <p>{t("timeline.runFailedBody")}</p>
+            {onOpenDiagnostics && <button className="button" onClick={onOpenDiagnostics} type="button">{t("diagnostics.open")}</button>}
+          </div>
+        </article>
+      )}
+    </>
   );
 }
 
-export function WorkTimeline({ timeline, resources, error = null, onOpenDiagnostics }: { timeline: TimelineItem[]; resources: ResourceSummary[]; error?: AppError | null; onOpenDiagnostics?(): void }) {
+export function WorkTimeline({ timeline, resources, work, error = null, onOpenDiagnostics }: { timeline: TimelineItem[]; resources: ResourceSummary[]; work?: WorkSummary; error?: AppError | null; onOpenDiagnostics?(): void }) {
   const { t } = useTranslation();
   const timelineRef = useRef<HTMLElement>(null);
+  const followingRef = useRef(true);
+  const [hasNewOutput, setHasNewOutput] = useState(false);
   const groups = groupByRun(timeline);
   const resourcesById = new Map(resources.map((resource) => [resource.id, resource]));
 
   useLayoutEffect(() => {
+    followingRef.current = true;
+    setHasNewOutput(false);
     const element = timelineRef.current;
-    if (element) {
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [work?.id]);
+
+  useLayoutEffect(() => {
+    const element = timelineRef.current;
+    if (element && followingRef.current) {
       element.scrollTop = element.scrollHeight;
+      setHasNewOutput(false);
+    } else if (element) {
+      setHasNewOutput(true);
     }
   }, [timeline, resources, error]);
 
+  const scrollToLatest = () => {
+    const element = timelineRef.current;
+    if (!element) return;
+    followingRef.current = true;
+    element.scrollTop = element.scrollHeight;
+    setHasNewOutput(false);
+  };
+
   return (
-    <section ref={timelineRef} className="work-timeline" aria-label={t("timeline.label")}>
-      {timeline.length === 0 ? (
-        <div className="timeline-empty"><span className="timeline-empty__pi" aria-hidden="true">π</span><h2>{t("timeline.emptyTitle")}</h2><p>{t("timeline.emptyBody")}</p></div>
-      ) : groups.map((group) => <Run group={group} key={group.key} resourcesById={resourcesById} />)}
-      {error && (
-        <aside className="agent-activity agent-activity--failure agent-activity__error" role="alert">
-          <span className="agent-activity__pi" aria-hidden="true">π</span>
-          <div><strong>{t("timeline.runFailed")}</strong><p>{t(appErrorMessageKey(error), appErrorMessageValues(error))}</p></div>
-          {onOpenDiagnostics && <button className="button" onClick={onOpenDiagnostics} type="button">{t("diagnostics.open")}</button>}
-        </aside>
+    <div className="work-timeline-shell">
+      <section
+        ref={timelineRef}
+        className="work-timeline"
+        aria-label={t("timeline.label")}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight <= 120;
+          followingRef.current = nearBottom;
+          if (nearBottom) setHasNewOutput(false);
+        }}
+      >
+        {timeline.length === 0 ? (
+          <div className="timeline-empty"><h2>{t("timeline.emptyTitle")}</h2><p>{t("timeline.emptyBody")}</p></div>
+        ) : (
+          <section className="conversation-thread">
+            {groups.map((group) => <ConversationSegment group={group} key={group.key} onOpenDiagnostics={onOpenDiagnostics} resourcesById={resourcesById} />)}
+          </section>
+        )}
+        {error && (
+          <aside className="agent-activity agent-activity--failure agent-activity__error" role="alert">
+            <span className="agent-activity__pi" aria-hidden="true">π</span>
+            <div><strong>{t("timeline.runFailed")}</strong><p>{t(appErrorMessageKey(error), appErrorMessageValues(error))}</p></div>
+            {onOpenDiagnostics && <button className="button" onClick={onOpenDiagnostics} type="button">{t("diagnostics.open")}</button>}
+          </aside>
+        )}
+      </section>
+      {hasNewOutput && (
+        <button className="timeline-new-output" onClick={scrollToLatest} type="button">
+          <ArrowDown aria-hidden="true" size={15} />
+          {t("timeline.newOutput")}
+        </button>
       )}
-    </section>
+    </div>
   );
 }

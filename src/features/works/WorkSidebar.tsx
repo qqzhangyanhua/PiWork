@@ -1,63 +1,196 @@
-import { Plus, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Database,
+  Folder,
+  LibraryBig,
+  LoaderCircle,
+  MessageSquare,
+  Plus,
+  Settings,
+  SquarePen,
+} from "lucide-react";
+import { useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
-import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
+import type { WorkSummary } from "../../bindings";
+import { OrbLogo } from "../../components/brand/OrbLogo";
+import { AccountMenu } from "../settings/AccountMenu";
+import { projectGroups } from "../workspace/WorkList";
 import { useWorkStore } from "./WorkStoreProvider";
 
+export type WorkspaceView = "home" | "new" | "all" | "detail" | "settings";
+
 type WorkSidebarProps = {
-  creating: boolean;
-  onCreateRequest(): void;
+  activeView: WorkspaceView;
+  onCreateRequest(rootPath?: string): void;
+  onSettingsRequest(): void;
   onWorkSelected(): void;
+  newWorkTriggerRef: RefObject<HTMLButtonElement | null>;
+  settingsTriggerRef: RefObject<HTMLButtonElement | null>;
 };
 
-export function WorkSidebar({ creating, onCreateRequest, onWorkSelected }: WorkSidebarProps) {
+function ConversationIcon({ status }: { status: WorkSummary["status"] }) {
+  if (status === "running" || status === "queued") {
+    return <LoaderCircle aria-hidden="true" className="project-conversation__spinner" size={14} />;
+  }
+  if (status === "failed" || status === "interrupted" || status === "stopped") {
+    return <CircleAlert aria-hidden="true" size={14} />;
+  }
+  return <MessageSquare aria-hidden="true" size={14} />;
+}
+
+export function WorkSidebar({
+  activeView,
+  onCreateRequest,
+  onSettingsRequest,
+  onWorkSelected,
+  newWorkTriggerRef,
+  settingsTriggerRef,
+}: WorkSidebarProps) {
   const { t } = useTranslation();
   const works = useWorkStore((state) => state.works);
   const selectedWorkId = useWorkStore((state) => state.selectedWorkId);
   const selectWork = useWorkStore((state) => state.selectWork);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const sortedWorks = useMemo(() => Object.values(works)
-    .filter((work) => work.status !== "archived")
-    .filter((work) => work.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)), [query, works]);
+  const groups = useMemo(() => projectGroups(Object.values(works)), [works]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const selectedRootPath = selectedWorkId ? works[selectedWorkId]?.rootPath : undefined;
+  const defaultRootPath = selectedRootPath ?? groups[0]?.rootPath;
+
+  const toggleProject = (rootPath: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(rootPath)) next.delete(rootPath);
+      else next.add(rootPath);
+      return next;
+    });
+  };
 
   return (
     <aside className="work-sidebar" aria-label={t("sidebar.label")}>
-      <div className="work-sidebar__brand">
-        <ContinuousLoopLogo size={28} />
-        <strong>PiWork</strong>
+      <div className="work-sidebar__topbar">
+        <div className="work-sidebar__brand">
+          <span className="work-sidebar__brand-mark"><OrbLogo size={32} /></span>
+          <strong>PiWork</strong>
+        </div>
       </div>
-      <div className="work-sidebar__primary-actions">
-      <button className="work-sidebar__new" aria-current={creating ? "page" : undefined} type="button" onClick={onCreateRequest}>
-        <Plus aria-hidden="true" size={16} />
-        {t("work.new")}
+
+      <button
+        aria-current={activeView === "home" ? "page" : undefined}
+        aria-label={t("conversation.new")}
+        className="work-sidebar__new-conversation"
+        onClick={() => onCreateRequest(defaultRootPath)}
+        ref={newWorkTriggerRef}
+        type="button"
+      >
+        <SquarePen aria-hidden="true" size={16} />
+        <span>{t("conversation.new")}</span>
+        <kbd aria-hidden="true" className="work-sidebar__shortcut">Ctrl N</kbd>
       </button>
-      <button className="work-sidebar__search-toggle" type="button" aria-label={t("sidebar.search")} onClick={() => setSearchOpen((open) => !open)}>
-        <Search aria-hidden="true" size={15} />
-      </button>
-      </div>
-      {searchOpen && <label className="work-sidebar__search"><span className="sr-only">{t("sidebar.search")}</span><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("sidebar.searchPlaceholder")} /></label>}
-      <p className="work-sidebar__section-label">{t("sidebar.recent")}</p>
-      <nav className="work-sidebar__nav" aria-label={t("sidebar.works")}>
-        {sortedWorks.map((work) => (
-          <button
-            className="work-sidebar__item"
-            aria-current={selectedWorkId === work.id ? "page" : undefined}
-            key={work.id}
-            onClick={() => {
-              onWorkSelected();
-              selectWork(work.id);
-            }}
-            type="button"
-          >
-            <span className={`status-dot status-dot--${work.status}`} aria-hidden="true" />
-            <span className="work-sidebar__title">{work.title}</span>
-          </button>
-        ))}
+
+      <nav className="work-sidebar__primary-nav" aria-label={t("sidebar.primary")}>
+        <button
+          aria-label={t("dashboard.comingSoon", { feature: t("sidebar.nav.agents") })}
+          className="work-sidebar__nav-item"
+          disabled
+          type="button"
+        >
+          <Bot aria-hidden="true" size={16} />
+          <span>{t("sidebar.nav.agents")}</span>
+        </button>
+        <button
+          aria-label={t("dashboard.comingSoon", { feature: t("sidebar.nav.knowledge") })}
+          className="work-sidebar__nav-item"
+          disabled
+          type="button"
+        >
+          <LibraryBig aria-hidden="true" size={16} />
+          <span>{t("sidebar.nav.knowledge")}</span>
+        </button>
+        <button
+          aria-label={t("dashboard.comingSoon", { feature: t("sidebar.nav.dataSources") })}
+          className="work-sidebar__nav-item"
+          disabled
+          type="button"
+        >
+          <Database aria-hidden="true" size={16} />
+          <span>{t("sidebar.nav.dataSources")}</span>
+        </button>
+        <button
+          aria-current={activeView === "settings" ? "page" : undefined}
+          className="work-sidebar__nav-item"
+          onClick={onSettingsRequest}
+          type="button"
+        >
+          <Settings aria-hidden="true" size={16} />
+          <span>{t("sidebar.nav.settings")}</span>
+        </button>
       </nav>
-      <div className="work-sidebar__footer"><span className="status-dot status-dot--completed" />{t("sidebar.localConnected")}</div>
+
+      <div className="work-sidebar__section-header">
+        <p className="work-sidebar__section-label">{t("project.section")}</p>
+      </div>
+      <nav className="project-groups" aria-label={t("sidebar.projects")}>
+        {groups.map((group) => {
+          const isCollapsed = collapsed.has(group.rootPath);
+          return (
+            <section className="project-group" key={group.rootPath}>
+              <div className="project-group__header">
+                <button
+                  aria-expanded={!isCollapsed}
+                  aria-label={t("project.groupLabel", { name: group.name })}
+                  className="project-group__toggle"
+                  onClick={() => toggleProject(group.rootPath)}
+                  title={group.rootPath}
+                  type="button"
+                >
+                  {isCollapsed ? <ChevronRight aria-hidden="true" size={13} /> : <ChevronDown aria-hidden="true" size={13} />}
+                  <Folder aria-hidden="true" size={15} />
+                  <span>{group.name}</span>
+                </button>
+                <button
+                  aria-label={t("conversation.newInProject", { project: group.name })}
+                  className="project-group__new"
+                  onClick={() => onCreateRequest(group.rootPath)}
+                  title={t("conversation.newInProject", { project: group.name })}
+                  type="button"
+                >
+                  <Plus aria-hidden="true" size={14} />
+                </button>
+              </div>
+              {!isCollapsed && (
+                <div className="project-group__conversations">
+                  {group.conversations.map((work) => (
+                    <button
+                      aria-current={activeView === "detail" && selectedWorkId === work.id ? "page" : undefined}
+                      aria-label={`${work.title}, ${t(`status.${work.status}`)}`}
+                      className="project-conversation"
+                      key={work.id}
+                      onClick={() => {
+                        selectWork(work.id);
+                        onWorkSelected();
+                      }}
+                      title={work.title}
+                      type="button"
+                    >
+                      <ConversationIcon status={work.status} />
+                      <span>{work.title}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+          );
+        })}
+      </nav>
+
+      <AccountMenu
+        active={activeView === "settings"}
+        onSettingsRequest={onSettingsRequest}
+        triggerRef={settingsTriggerRef}
+      />
     </aside>
   );
 }

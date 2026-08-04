@@ -1,5 +1,5 @@
-import { render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   MessageSummary,
@@ -74,7 +74,7 @@ describe("WorkTimeline", () => {
     ).toBe("STRONG");
   });
 
-  it("groups one Run's tool activity into a compact expandable Pi summary", () => {
+  it("separates process details from delivery without exposing Run containers", () => {
     const { container } = render(
       <WorkTimeline
         resources={[]}
@@ -104,17 +104,58 @@ describe("WorkTimeline", () => {
       />,
     );
 
-    const activity = container.querySelector(".agent-activity");
+    expect(container.querySelector("details.timeline-run")).toBeNull();
+    expect(screen.queryByText(/^Run\s+\d+/u)).not.toBeInTheDocument();
+    const activity = container.querySelector(".execution-progress");
+    const delivery = container.querySelector(".timeline-delivery");
     expect(activity).not.toBeNull();
-    expect(container.querySelectorAll(".agent-activity")).toHaveLength(1);
+    expect(container.querySelectorAll(".execution-progress")).toHaveLength(1);
     expect(activity).toHaveTextContent("Pi 已完成 1 个操作");
+    expect(activity).not.toHaveTextContent("读取 src/app.tsx");
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
     expect(activity).toHaveTextContent("读取 src/app.tsx");
-    expect(activity).toHaveTextContent("类型检查通过");
-    expect(activity).not.toHaveAttribute("open");
-    expect(container.querySelectorAll(".timeline-event")).toHaveLength(0);
+    expect(activity).not.toHaveTextContent("类型检查通过");
+    expect(delivery).toHaveTextContent("检查完成");
+    expect(delivery).toHaveTextContent("report.md");
+    expect(delivery).toHaveTextContent("类型检查通过");
   });
 
-  it("keeps the current Pi activity group expanded while a Run is active", () => {
+  it("shows the authoritative turn time without naming the internal Run", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[event(1, { type: "runStarted", modelLabel: "GPT-5.6" })]}
+      />,
+    );
+
+    const turnTime = container.querySelector<HTMLTimeElement>(".conversation-turn__time");
+    expect(turnTime).not.toBeNull();
+    expect(turnTime).toHaveAttribute("dateTime", "2026-07-29T00:00:01.000Z");
+    expect(turnTime).not.toBeEmptyDOMElement();
+    expect(screen.queryByText(/Run/u)).not.toBeInTheDocument();
+  });
+
+  it("renders a failed Run as a safe failure node with diagnostics", () => {
+    const onOpenDiagnostics = vi.fn();
+    const { container } = render(
+      <WorkTimeline
+        onOpenDiagnostics={onOpenDiagnostics}
+        resources={[]}
+        timeline={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, { type: "runFailed", message: "网络不可用" }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelector(".timeline-failure")).toHaveTextContent("本次执行未完成。确认本地执行环境可用后重试。");
+    expect(container.querySelector(".timeline-failure")).not.toHaveTextContent("网络不可用");
+    expect(container.querySelector(".execution-progress")).not.toHaveTextContent("网络不可用");
+    fireEvent.click(screen.getByRole("button", { name: "打开诊断" }));
+    expect(onOpenDiagnostics).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the current Pi activity group collapsed while a Run is active", () => {
     const { container } = render(
       <WorkTimeline
         resources={[]}
@@ -130,8 +171,11 @@ describe("WorkTimeline", () => {
       />,
     );
 
-    expect(container.querySelector(".agent-activity")).toHaveAttribute("open");
-    expect(container.querySelector(".agent-activity")).toHaveTextContent("Pi 正在执行");
+    expect(container.querySelector(".execution-progress")).toHaveTextContent("Pi 正在执行");
+    expect(container.querySelector(".execution-progress__summary")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
   });
 
   it("renders persisted assistant messages as assistant output instead of user bubbles", () => {
@@ -144,13 +188,15 @@ describe("WorkTimeline", () => {
     expect(container.querySelector(".timeline-user")).not.toHaveTextContent("检查完成");
   });
 
-  it("keeps following the latest content while messages and assistant deltas arrive", () => {
+  it("follows new output near the bottom but preserves an active reading position", () => {
     const firstMessage = message("user", "继续执行");
     const rendered = render(<WorkTimeline resources={[]} timeline={[firstMessage]} />);
     const timeline = rendered.container.querySelector<HTMLElement>(".work-timeline");
     expect(timeline).not.toBeNull();
+    Object.defineProperty(timeline, "clientHeight", { configurable: true, value: 200 });
     Object.defineProperty(timeline, "scrollHeight", { configurable: true, value: 480 });
-    timeline!.scrollTop = 0;
+    timeline!.scrollTop = 260;
+    fireEvent.scroll(timeline!);
 
     rendered.rerender(
       <WorkTimeline resources={[]} timeline={[firstMessage, event(1, { type: "assistantDelta", text: "正在处理" })]} />,
@@ -158,6 +204,8 @@ describe("WorkTimeline", () => {
     expect(timeline!.scrollTop).toBe(480);
 
     Object.defineProperty(timeline, "scrollHeight", { configurable: true, value: 720 });
+    timeline!.scrollTop = 100;
+    fireEvent.scroll(timeline!);
     rendered.rerender(
       <WorkTimeline timeline={[
         firstMessage,
@@ -165,7 +213,12 @@ describe("WorkTimeline", () => {
         event(2, { type: "assistantDelta", text: "，即将完成" }),
       ]} resources={[]} />,
     );
+    expect(timeline!.scrollTop).toBe(100);
+    expect(screen.getByRole("button", { name: "查看新输出" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看新输出" }));
     expect(timeline!.scrollTop).toBe(720);
+    expect(screen.queryByRole("button", { name: "查看新输出" })).not.toBeInTheDocument();
   });
 
   it("renders message attachments under their authoritative user message", () => {
@@ -186,5 +239,64 @@ describe("WorkTimeline", () => {
     expect(screen.getByTestId("message:message-1")).toContainElement(
       screen.getByText("diagram.png"),
     );
+  });
+
+  it("renders every historical interaction as one continuous visible conversation", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          message("user", "第一次指令", { id: "message-1", runId: "run-1" }),
+          event(1, {
+            type: "runCompleted",
+            summary: "第一次完成",
+            artifacts: [],
+            validation: [],
+            limitations: [],
+          }),
+          message("user", "第二次指令", {
+            id: "message-2",
+            runId: "run-2",
+            createdAt: "2026-07-29T01:00:00.000Z",
+          }),
+          {
+            ...event(2, { type: "runStarted", modelLabel: "GPT-5.6" }),
+            runId: "run-2",
+            occurredAt: "2026-07-29T01:00:01.000Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".conversation-thread")).toHaveLength(1);
+    expect(container.querySelector(".conversation-turn")).toBeNull();
+    expect(container.querySelector("details.timeline-run")).toBeNull();
+    expect(screen.getByText("第一次指令")).toBeVisible();
+    expect(screen.getByText("第一次完成")).toBeVisible();
+    expect(screen.getByText("第二次指令")).toBeVisible();
+    expect(screen.queryByText(/^Run\s+\d+/u)).not.toBeInTheDocument();
+  });
+
+  it("does not surface legacy Run boilerplate as a duplicate delivery", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          message("user", "已经安装好了"),
+          event(1, { type: "assistantDelta", text: "请重启 PiWork 后继续扫描。" }),
+          event(2, {
+            type: "runCompleted",
+            summary: "Pi completed this Run with 1 tool call",
+            artifacts: [],
+            validation: [],
+            limitations: [],
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("请重启 PiWork 后继续扫描。")).toBeVisible();
+    expect(screen.queryByText(/completed this Run/u)).not.toBeInTheDocument();
+    expect(container.querySelector(".timeline-delivery")).toBeNull();
   });
 });

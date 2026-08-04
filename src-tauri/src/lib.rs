@@ -8,6 +8,7 @@ pub mod app_state;
 pub mod document_runtime;
 pub mod domain;
 pub mod engine;
+pub mod environment;
 pub mod error;
 pub mod model;
 pub mod paths;
@@ -228,18 +229,25 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             ))
         })
         .invoke_handler(tauri::generate_handler![
+            work::commands::get_default_project_directory,
             work::commands::create_work,
             work::commands::list_works,
             work::commands::get_work,
             work::commands::list_project_files,
             work::commands::start_work,
+            work::commands::stop_work,
             model::commands::get_model_configuration_status,
+            model::commands::list_model_configurations,
             model::commands::test_model_connection,
+            model::commands::test_saved_model_configuration,
             model::commands::save_model_configuration,
+            model::commands::activate_model_configuration,
+            model::commands::select_model_for_configuration,
             resource::commands::import_resources,
             resource::commands::list_work_resources,
             resource::commands::get_resource_thumbnail,
-            resource::commands::detach_draft_resource
+            resource::commands::detach_draft_resource,
+            environment::commands::get_runtime_status
         ])
 }
 

@@ -1,5 +1,11 @@
 .superpowers/
 .worktrees/
+.agents/
+.omc/
+skills-lock.json
+
+# Local design reference dumps
+/docs/ui/
 
 # Tauri / Rust
 /target/

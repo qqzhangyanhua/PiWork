@@ -66,6 +66,19 @@ impl AppPaths {
         self.roaming_root.join("resources")
     }
 
+    pub fn default_workspace_dir(&self) -> PathBuf {
+        self.roaming_root.join("workspace")
+    }
+
+    pub fn ensure_default_workspace(&self) -> Result<PathBuf, AppError> {
+        let path = self.default_workspace_dir();
+        std::fs::create_dir_all(&path).map_err(|source| AppError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(path)
+    }
+
     pub fn resource_cache_dir(&self) -> PathBuf {
         self.local_root.join("resource-cache")
     }
@@ -88,6 +101,7 @@ mod tests {
             paths.engine_sessions_dir(),
             paths.backups_dir(),
             paths.resources_dir(),
+            paths.default_workspace_dir(),
         ] {
             assert!(path.starts_with(&roaming_root));
         }
@@ -107,6 +121,10 @@ mod tests {
         );
         assert_eq!(paths.backups_dir(), roaming_root.join("backups"));
         assert_eq!(paths.resources_dir(), roaming_root.join("resources"));
+        assert_eq!(
+            paths.default_workspace_dir(),
+            roaming_root.join("workspace")
+        );
         assert_eq!(paths.logs_dir(), local_root.join("logs"));
         assert_eq!(paths.runtime_dir(), local_root.join("runtime"));
         assert_eq!(

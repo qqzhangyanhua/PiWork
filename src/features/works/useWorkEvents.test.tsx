@@ -29,9 +29,13 @@ const deferred = <T,>() => {
 const makeClient = (
   listenToWorkEvents: PiWorkClient["listenToWorkEvents"],
 ): PiWorkClient => ({
-  getModelConfigurationStatus: async () => ({ configured: true, configuration: { provider: "openai", modelId: "gpt-5.2" } }),
+  getModelConfigurationStatus: async () => ({ configured: true, configuration: { id: "openai-default", provider: "openai", baseUrl: "https://api.openai.com/v1", modelId: "gpt-5.2", active: true, credentialConfigured: true } }),
+  listModelConfigurations: async () => [],
   testModelConnection: async () => ({ models: [] }),
-  saveModelConfiguration: async (input) => ({ provider: input.provider, modelId: input.modelId }),
+  testSavedModelConfiguration: async () => ({ models: [] }),
+  saveModelConfiguration: async (input) => ({ id: input.id ?? "model", provider: input.provider, baseUrl: input.baseUrl, modelId: input.modelId, active: true, credentialConfigured: true }),
+  activateModelConfiguration: async () => { throw new Error("unused"); },
+  selectModelForConfiguration: async () => { throw new Error("unused"); },
   createWork: async () => {
     throw new Error("unused");
   },
@@ -45,6 +49,9 @@ const makeClient = (
   getResourceThumbnail: async () => ({ mediaType: "image/png", dataBase64: "" }),
   detachDraftResource: async () => undefined,
   startWork: async () => {
+    throw new Error("unused");
+  },
+  stopWork: async () => {
     throw new Error("unused");
   },
   listenToWorkEvents,

@@ -1,5 +1,5 @@
 import { GripVertical, X } from "lucide-react";
-import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { formatAppErrorDiagnostics } from "../../domain/appError";
@@ -7,9 +7,8 @@ import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../..
 import type { ResourceSummary } from "../../bindings";
 import { AttachmentChips } from "./AttachmentChips";
 
-const tabs = ["preview", "attachments", "changes", "validation", "logs"] as const;
+const tabs = ["delivery", "attachments", "validation", "logs"] as const;
 export type InspectorTab = (typeof tabs)[number];
-type InspectorScope = "current" | "all";
 
 export function WorkInspector({
   timeline,
@@ -35,18 +34,42 @@ export function WorkInspector({
   onResizeStart(event: PointerEvent<HTMLDivElement>): void;
 }) {
   const { t } = useTranslation();
-  const [scope, setScope] = useState<InspectorScope>("current");
   const refs = useRef<Array<HTMLButtonElement | null>>([]);
-  const latestRunId = timeline.at(-1)?.runId;
-  const allEvents = timeline.filter(isWorkEventTimelineItem);
-  const events = scope === "all"
-    ? allEvents
-    : allEvents.filter((event) => !latestRunId || event.runId === latestRunId);
+  const inspectorRef = useRef<HTMLElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const [modal, setModal] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(max-width: 1150px)").matches
+      : false,
+  );
+  const events = timeline.filter(isWorkEventTimelineItem);
   const completions = events.filter(
     (event): event is typeof event & { payload: Extract<typeof event.payload, { type: "runCompleted" }> } =>
       event.payload.type === "runCompleted",
   );
   const hidden = !open;
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(max-width: 1150px)");
+    const update = () => setModal(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => query.removeEventListener?.("change", update);
+  }, []);
+  useEffect(() => {
+    if (!open || !modal) return;
+    queueMicrotask(() => closeRef.current?.focus());
+  }, [modal, open]);
+  useEffect(() => {
+    if (!open || !modal) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [modal, onClose, open]);
   const activateRelative = (event: KeyboardEvent, index: number) => {
     if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
     event.preventDefault();
@@ -59,9 +82,11 @@ export function WorkInspector({
   };
 
   const content = () => {
-    if (active === "preview") {
-      if (!completions.length) return <p className="inspector-empty">{t("inspector.noArtifacts")}</p>;
-      return <div className="inspector-previews">{completions.map(({ payload, runId, sequence }) => <article className="inspector-preview" key={`${runId}:${sequence}`}><h2>{payload.summary}</h2>{payload.artifacts.length > 0 ? <ul className="inspector-files">{payload.artifacts.map((artifact) => <li key={artifact}>{artifact}</li>)}</ul> : <p className="inspector-empty">{t("inspector.noArtifacts")}</p>}</article>)}</div>;
+    if (active === "delivery") {
+      if (!completions.length) return <p className="inspector-empty">{t("inspector.noDeliveries")}</p>;
+      const artifacts = Array.from(new Set(completions.flatMap(({ payload }) => payload.artifacts)));
+      if (!artifacts.length) return <p className="inspector-empty">{t("inspector.noArtifacts")}</p>;
+      return <section aria-label={t("inspector.artifacts")} className="inspector-preview"><ul className="inspector-files">{artifacts.map((artifact) => <li key={artifact}>{artifact}</li>)}</ul></section>;
     }
     if (active === "attachments") {
       if (!resources.length) return <p className="inspector-empty">{t("inspector.noAttachments")}</p>;
@@ -72,22 +97,62 @@ export function WorkInspector({
       return validations.length ? <ul className="inspector-list">{validations.map(({ item, runId }, index) => <li key={`${runId}:${index}`}>{item}</li>)}</ul> : <p className="inspector-empty">{t("inspector.noValidation")}</p>;
     }
     if (active === "logs") {
-      return <div className="inspector-logs">{error && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}{events.length ? <ol className="inspector-log">{events.map(({ payload, sequence, runId }) => <li key={`${runId}:${sequence}`}><span>{payload.type}</span>{payload.type === "toolStarted" ? payload.inputSummary : payload.type === "toolFinished" ? payload.outputSummary : payload.type === "runFailed" ? payload.message : payload.type === "runCompleted" ? payload.summary : payload.type === "runStarted" ? payload.modelLabel : payload.text}</li>)}</ol> : !error && <p className="inspector-empty">{t("inspector.noLogs")}</p>}</div>;
+      const assistantRuns = new Set<string>();
+      const logEvents = events.filter(({ payload, runId }) => {
+        if (payload.type !== "assistantDelta") return true;
+        if (assistantRuns.has(runId)) return false;
+        assistantRuns.add(runId);
+        return true;
+      });
+      return <div className="inspector-logs">{error && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}{logEvents.length ? <ol className="inspector-log">{logEvents.map(({ payload, sequence, runId }) => {
+        const description = payload.type === "toolStarted"
+          ? payload.inputSummary
+          : payload.type === "toolFinished"
+            ? payload.outputSummary
+            : payload.type === "runFailed"
+              ? payload.message
+              : payload.type === "runCompleted"
+                ? payload.summary
+                : payload.type === "runStarted"
+                  ? payload.modelLabel
+                  : t("inspector.logOutputSummary");
+        return <li key={`${runId}:${sequence}`}><span>{t(`inspector.logEvents.${payload.type}`)}</span><p>{description}</p></li>;
+      })}</ol> : !error && <p className="inspector-empty">{t("inspector.noLogs")}</p>}</div>;
     }
-    return <p className="inspector-empty">{t("inspector.noChanges")}</p>;
+    return null;
   };
 
   return (
     <aside
       aria-hidden={hidden}
       aria-label={t("inspector.label")}
+      aria-modal={modal ? true : undefined}
       className="work-inspector"
       data-open={open}
       inert={hidden}
+      ref={inspectorRef}
+      role={modal ? "dialog" : undefined}
       onKeyDownCapture={(event) => {
         if (event.key === "Escape" && open) {
           event.preventDefault();
           onClose();
+          return;
+        }
+        if (event.key === "Tab" && open && modal) {
+          const focusable = Array.from(inspectorRef.current?.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ) ?? []);
+          const first = focusable[0];
+          const last = focusable.at(-1);
+          if (!first || !last) return;
+          const active = document.activeElement;
+          if (event.shiftKey && (active === first || !inspectorRef.current?.contains(active))) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && (active === last || !inspectorRef.current?.contains(active))) {
+            event.preventDefault();
+            first.focus();
+          }
         }
       }}
     >
@@ -107,8 +172,8 @@ export function WorkInspector({
         <GripVertical aria-hidden="true" size={14} />
       </div>
       <header className="work-inspector__header">
-        <div className="work-inspector__heading"><strong>{t("inspector.title")}</strong><div className="work-inspector__scope"><button aria-pressed={scope === "current"} onClick={() => setScope("current")} type="button">{t("inspector.currentRun")}</button><button aria-pressed={scope === "all"} onClick={() => setScope("all")} type="button">{t("inspector.allWork")}</button></div></div>
-        <button className="icon-button" type="button" aria-label={t("inspector.close")} onClick={onClose}>
+        <div className="work-inspector__heading"><strong>{t("inspector.title")}</strong></div>
+        <button className="icon-button" ref={closeRef} type="button" aria-label={t("inspector.close")} onClick={onClose}>
           <X aria-hidden="true" size={17} />
         </button>
       </header>

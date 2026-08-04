@@ -761,6 +761,56 @@ impl WorkRepository {
         Ok(envelope)
     }
 
+    pub async fn stop_run(&self, run_id: &str, work_id: &str) -> Result<(), AppError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| AppError::run_not_found(run_id))?;
+        if run.work_id != work_id {
+            return Err(AppError::run_not_found(run_id));
+        }
+        let work_status =
+            sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
+                .bind(work_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| AppError::work_not_found(work_id))?;
+        let next_run = transition_run(run.status, RunAction::Stop)
+            .map_err(|_| AppError::invalid_run_state(run_id, run.status, RunStatus::Stopped))?;
+        let next_work = transition(work_status, WorkAction::Stop)
+            .map_err(|_| AppError::invalid_work_state(work_id, work_status, WorkStatus::Stopped))?;
+        let now = Utc::now();
+        let run_update = sqlx::query(
+            "UPDATE runs SET status = ?, updated_at = ?, completed_at = ? \
+             WHERE id = ? AND status = ?",
+        )
+        .bind(next_run)
+        .bind(now)
+        .bind(now)
+        .bind(run_id)
+        .bind(run.status)
+        .execute(&mut *transaction)
+        .await?;
+        if run_update.rows_affected() == 0 {
+            return Err(AppError::concurrent_run_modification(run_id));
+        }
+        let work_update =
+            sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(next_work)
+                .bind(now)
+                .bind(work_id)
+                .bind(work_status)
+                .execute(&mut *transaction)
+                .await?;
+        if work_update.rows_affected() == 0 {
+            return Err(AppError::concurrent_work_modification(work_id));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn set_work_status(&self, work_id: &str, status: WorkStatus) -> Result<(), AppError> {
         let current = self.validate_work_transition(work_id, status).await?;
         self.update_work_status(work_id, current, status).await

@@ -1,4 +1,4 @@
-export const DEFAULT_INSPECTOR_PERCENT = 42;
+export const DEFAULT_INSPECTOR_PERCENT = 36;
 export const INSPECTOR_WIDTH_STORAGE_KEY = "piwork.inspectorWidthPercent";
 
 export const clampInspectorPercent = (value: number) =>

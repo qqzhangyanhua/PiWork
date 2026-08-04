@@ -40,6 +40,7 @@ export type WorkState = {
     referencedFiles?: string[],
     resourceIds?: string[],
   ): Promise<StartWorkOutput>;
+  stopWork(workId: string): Promise<WorkDetail>;
   queueInstruction(
     workId: string,
     prompt: string,
@@ -603,6 +604,20 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           if (instructionPersisted) {
             throw new PersistedStartInstructionError(error);
           }
+          throw error;
+        } finally {
+          endOperation();
+        }
+      },
+      stopWork: async (workId) => {
+        const operation = beginOperation();
+        try {
+          const detail = await client.stopWork(workId);
+          set((state) => reduceWork(state, { type: "detail", detail }));
+          succeedOperation(operation);
+          return detail;
+        } catch (error) {
+          failOperation(operation, error);
           throw error;
         } finally {
           endOperation();

@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { clampInspectorPercent, DEFAULT_INSPECTOR_PERCENT } from "./inspectorLayout";
 
 describe("inspector layout", () => {
-  it("uses 42 percent as the default expanded width", () => {
-    expect(DEFAULT_INSPECTOR_PERCENT).toBe(42);
+  it("uses 36 percent as the default expanded width", () => {
+    expect(DEFAULT_INSPECTOR_PERCENT).toBe(36);
   });
 
   it("constrains dragged inspector widths to 32–60 percent", () => {

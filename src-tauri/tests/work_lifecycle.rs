@@ -548,6 +548,47 @@ async fn wait_for_no_controlled_producers(engine: &ControlledEngine) {
     .expect("controlled producer remained alive");
 }
 
+#[tokio::test]
+async fn stopping_an_active_work_aborts_once_and_persists_stopped_state() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Stop safely").await;
+    let engine = ControlledEngine::new(ControlledStartBehavior::Immediate);
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        Arc::new(engine.clone()),
+        Arc::new(publisher),
+        "Controlled model",
+    );
+
+    let started = supervisor
+        .start(&work.summary.id, "Keep working")
+        .await
+        .unwrap();
+    supervisor.stop(&work.summary.id).await.unwrap();
+    let detail = harness
+        .repository
+        .get(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(engine.abort_calls(), 1);
+    assert_eq!(detail.summary.status, WorkStatus::Stopped);
+    assert_eq!(detail.runs[0].id, started.run.id);
+    assert_eq!(detail.runs[0].status, RunStatus::Stopped);
+    assert!(detail.runs[0].completed_at.is_some());
+    assert_authoritative_prompt(&detail, "Keep working", RunStatus::Stopped);
+    wait_for_no_controlled_producers(&engine).await;
+
+    let second = supervisor.stop(&work.summary.id).await.unwrap_err();
+    assert_eq!(
+        serde_json::to_value(second).unwrap()["code"],
+        "engine_error"
+    );
+    assert_eq!(engine.abort_calls(), 1);
+}
+
 impl PanickingPublisher {
     fn new() -> Self {
         Self {

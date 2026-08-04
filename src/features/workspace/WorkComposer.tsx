@@ -1,4 +1,4 @@
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { type Ref, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -37,13 +37,12 @@ export function WorkComposer({
   const [attachmentResults, setAttachmentResults] = useState<ResourceSummary[]>([]);
   const [selectedResourceIds, setSelectedResourceIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const submittingRef = useRef(false);
   const startWork = useWorkStore((state) => state.startWork);
-  const queueInstruction = useWorkStore((state) => state.queueInstruction);
-  const queuedInstructions = useWorkStore((state) => state.queuedInstructions);
-  const queued = queuedInstructions[work.id] ?? [];
+  const stopWork = useWorkStore((state) => state.stopWork);
   const loading = useWorkStore((state) => state.loading);
-  const shouldQueue = queueStatuses.includes(work.status);
+  const runActive = queueStatuses.includes(work.status);
   const actionLabel = continueStatuses.includes(work.status)
       ? t("composer.continue")
       : t("composer.send");
@@ -67,11 +66,7 @@ export function WorkComposer({
   const submit = async () => {
     const instruction = prompt.trim();
     if (!instruction && readyResourceIds.length === 0) return;
-    if (shouldQueue) {
-      queueInstruction(work.id, instruction, referencedFiles, readyResourceIds);
-      clearDraft();
-      return;
-    }
+    if (runActive) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -89,10 +84,30 @@ export function WorkComposer({
     }
   };
 
+  const stop = async () => {
+    if (!runActive || stopping) return;
+    setStopping(true);
+    try {
+      await stopWork(work.id);
+    } catch {
+      // The store exposes the normalized error in the product UI.
+    } finally {
+      setStopping(false);
+    }
+  };
+
   return (
     <footer className="work-composer">
-      {queued.length > 0 && <p className="queue-count">{t("composer.queued", { count: queued.length })}</p>}
+      {runActive && <p className="composer-status" role="status">{t("composer.runActive")}</p>}
       <div className="work-composer__box">
+        <AttachmentDraftList
+          resources={availableResources}
+          selectedIds={selectedResourceIds}
+          onRemove={(resource) => {
+            setSelectedResourceIds((current) => current.filter((id) => id !== resource.id));
+            setAttachmentResults((current) => current.filter(({ id }) => id !== resource.id));
+          }}
+        />
         <ProjectPromptEditor
           editorRef={promptRef}
           id="work-prompt"
@@ -105,14 +120,6 @@ export function WorkComposer({
             setReferencedFiles(nextReferences);
           }}
           onSubmit={() => void submit()}
-        />
-        <AttachmentDraftList
-          resources={availableResources}
-          selectedIds={selectedResourceIds}
-          onRemove={(resource) => {
-            setSelectedResourceIds((current) => current.filter((id) => id !== resource.id));
-            setAttachmentResults((current) => current.filter(({ id }) => id !== resource.id));
-          }}
         />
         <div className="work-composer__actions">
           <AttachmentButton
@@ -132,8 +139,14 @@ export function WorkComposer({
             onSelectedIdsChange={setSelectedResourceIds}
           />
           <ComposerModelIndicator modelLabel={modelLabel} />
-          <button aria-label={actionLabel} className="button button--primary" type="button" disabled={!canSubmit || submitting || (loading && !shouldQueue)} onClick={() => void submit()}>
-            <ArrowUp aria-hidden="true" size={16} />
+          <button
+            aria-label={runActive ? t("composer.stop") : actionLabel}
+            className={`button button--primary composer-submit${runActive ? " composer-submit--stop" : ""}`}
+            type="button"
+            disabled={runActive ? stopping || loading : !canSubmit || submitting || loading}
+            onClick={() => void (runActive ? stop() : submit())}
+          >
+            {runActive ? <Square aria-hidden="true" fill="currentColor" size={11} /> : <ArrowUp aria-hidden="true" size={16} />}
           </button>
         </div>
       </div>
