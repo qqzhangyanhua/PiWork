@@ -38,6 +38,7 @@ const workTitle = (prompt: string) => {
 };
 
 export function NewWorkStart({
+  initialPrompt,
   initialRootPath,
   modelLabel,
   works,
@@ -47,6 +48,7 @@ export function NewWorkStart({
   variant = "standalone",
   dashboardExtras,
 }: {
+  initialPrompt?: string;
   initialRootPath?: string;
   modelLabel: string;
   works: WorkSummary[];
@@ -61,7 +63,7 @@ export function NewWorkStart({
   const startWork = useWorkStore((state) => state.startWork);
   const { client } = useWorkStoreContext();
   const error = useWorkStore((state) => state.error);
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(initialPrompt ?? "");
   const [referencedFiles, setReferencedFiles] = useState<string[]>([]);
   const draftIdRef = useRef<string>(crypto.randomUUID());
   const draftId = draftIdRef.current;

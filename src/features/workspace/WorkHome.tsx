@@ -17,6 +17,7 @@ import { projectGroups } from "./WorkList";
 
 export function WorkHome({
   draftRevision,
+  initialPrompt,
   initialRootPath,
   modelLabel,
   works,
@@ -27,6 +28,7 @@ export function WorkHome({
   onAllWorks,
 }: {
   draftRevision?: number;
+  initialPrompt?: string;
   initialRootPath?: string;
   modelLabel: string;
   works: WorkSummary[];
@@ -71,6 +73,7 @@ export function WorkHome({
                   <EnvironmentStatusPanel client={client} />
                 </div>
               }
+              initialPrompt={initialPrompt}
               initialRootPath={dashboardRootPath}
               key={draftRevision}
               modelLabel={modelLabel}

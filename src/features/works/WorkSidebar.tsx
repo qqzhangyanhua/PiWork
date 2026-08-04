@@ -21,10 +21,11 @@ import { AccountMenu } from "../settings/AccountMenu";
 import { projectGroups } from "../workspace/WorkList";
 import { useWorkStore } from "./WorkStoreProvider";
 
-export type WorkspaceView = "home" | "new" | "all" | "detail" | "settings";
+export type WorkspaceView = "home" | "new" | "all" | "detail" | "agents" | "settings";
 
 type WorkSidebarProps = {
   activeView: WorkspaceView;
+  onAgentsRequest(): void;
   onCreateRequest(rootPath?: string): void;
   onSettingsRequest(): void;
   onWorkSelected(): void;
@@ -44,6 +45,7 @@ function ConversationIcon({ status }: { status: WorkSummary["status"] }) {
 
 export function WorkSidebar({
   activeView,
+  onAgentsRequest,
   onCreateRequest,
   onSettingsRequest,
   onWorkSelected,
@@ -92,9 +94,9 @@ export function WorkSidebar({
 
       <nav className="work-sidebar__primary-nav" aria-label={t("sidebar.primary")}>
         <button
-          aria-label={t("dashboard.comingSoon", { feature: t("sidebar.nav.agents") })}
+          aria-current={activeView === "agents" ? "page" : undefined}
           className="work-sidebar__nav-item"
-          disabled
+          onClick={onAgentsRequest}
           type="button"
         >
           <Bot aria-hidden="true" size={16} />

@@ -1505,16 +1505,38 @@ describe("WorkSurface", () => {
     expect(toggle).toHaveFocus();
   });
 
-  it("首页是默认视图，未落地的导航项禁用且不产生跳转", async () => {
+  it("从侧栏进入智能体中心，同时保留未落地模块的禁用状态", async () => {
+    const user = userEvent.setup();
     const client = createMockTauriClient();
     render(<WorkSurface client={client} initialView="home" />);
 
     const sidebar = await screen.findByRole("complementary", { name: "项目与对话" });
     expect(within(sidebar).getByRole("button", { name: "新对话" })).toHaveAttribute("aria-current", "page");
     expect(within(sidebar).queryByRole("button", { name: "首页" })).not.toBeInTheDocument();
-    expect(within(sidebar).getByRole("button", { name: "智能体中心（即将推出）" })).toBeDisabled();
+    const agents = within(sidebar).getByRole("button", { name: "智能体中心" });
+    expect(agents).toBeEnabled();
+    await user.click(agents);
+    expect(await screen.findByRole("heading", { name: "智能体中心" })).toBeInTheDocument();
+    expect(agents).toHaveAttribute("aria-current", "page");
     expect(within(sidebar).getByRole("button", { name: "知识库（即将推出）" })).toBeDisabled();
     expect(within(sidebar).getByRole("button", { name: "数据源（即将推出）" })).toBeDisabled();
+  });
+
+  it("从能力详情生成可编辑的新对话草稿且不会自动发送", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    render(<WorkSurface client={client} initialView="home" />);
+
+    const sidebar = await screen.findByRole("complementary", { name: "项目与对话" });
+    await user.click(within(sidebar).getByRole("button", { name: "智能体中心" }));
+    await user.click(await screen.findByRole("button", { name: "查看需求澄清智能体详情" }));
+    await user.click(within(screen.getByRole("dialog", { name: "需求澄清智能体" })).getByRole("button", { name: "开始使用" }));
+
+    const home = await screen.findByRole("region", { name: "对话主页" });
+    const editor = within(home).getByLabelText("首个任务");
+    expect(editor).toHaveTextContent("需求澄清智能体");
+    expect(editor).toHaveTextContent("业务目标：");
+    expect(client.createWork).not.toHaveBeenCalled();
   });
 
   it("侧栏设置导航项打开设置页", async () => {

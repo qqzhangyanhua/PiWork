@@ -10,6 +10,8 @@ import { pickProjectDirectory as openProjectDirectory, type PickProjectDirectory
 import { appErrorMessageKey, formatAppErrorDiagnostics } from "../../domain/appError";
 import { AnimatedSurfaceState } from "../../components/motion/AnimatedSurfaceState";
 import { WorkSidebar, type WorkspaceView } from "../works/WorkSidebar";
+import { AgentCenterPage } from "../agent-center/AgentCenterPage";
+import { buildCapabilityPrompt, type AgentCapability } from "../agent-center/agentCapabilities";
 import { useWorkEvents } from "../works/useWorkEvents";
 import { WorkStoreProvider, useWorkStore } from "../works/WorkStoreProvider";
 import { SettingsPage } from "../settings/SettingsPage";
@@ -45,7 +47,7 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
   const error = useWorkStore((state) => state.error);
   const hydrationError = useWorkStore((state) => state.hydrationError);
   const [activeView, setActiveView] = useState<WorkspaceView>(initialView === "new" ? "home" : initialView);
-  const [homeDraft, setHomeDraft] = useState<{ revision: number; rootPath?: string }>({
+  const [homeDraft, setHomeDraft] = useState<{ revision: number; rootPath?: string; prompt?: string }>({
     revision: 0,
   });
   const composerRef = useRef<HTMLDivElement>(null);
@@ -120,7 +122,15 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
     setActiveView("detail");
   };
   const openHomeDraft = (rootPath?: string) => {
-    setHomeDraft(({ revision }) => ({ revision: revision + 1, rootPath }));
+    setHomeDraft(({ revision }) => ({ revision: revision + 1, rootPath, prompt: undefined }));
+    setActiveView("home");
+  };
+  const startCapability = (capability: AgentCapability) => {
+    setHomeDraft(({ revision, rootPath }) => ({
+      revision: revision + 1,
+      rootPath: selectedWork?.rootPath ?? rootPath,
+      prompt: buildCapabilityPrompt(capability),
+    }));
     setActiveView("home");
   };
   const defaultRootPath = selectedWork?.rootPath ?? Object.values(works)[0]?.rootPath;
@@ -151,6 +161,7 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
       <WorkSidebar
         activeView={activeView}
         newWorkTriggerRef={newWorkTriggerRef}
+        onAgentsRequest={() => setActiveView("agents")}
         onCreateRequest={openHomeDraft}
         onSettingsRequest={() => setActiveView("settings")}
         onWorkSelected={() => {
@@ -178,6 +189,8 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
           <div className="surface-state__actions"><button className="button button--primary" type="button" onClick={() => void hydrate()}>{t("common.retry")}</button><button className="button" type="button" onClick={() => setDiagnosticsOpen((open) => !open)}>{t("diagnostics.open")}</button></div>
           {diagnosticsOpen && <pre className="diagnostics">{formatAppErrorDiagnostics(pageError, t("diagnostics.unavailable"))}</pre>}
         </AnimatedSurfaceState>
+      ) : activeView === "agents" ? (
+        <AgentCenterPage onStartCapability={startCapability} />
       ) : activeView === "settings" ? (
         <SettingsPage
           client={client}
@@ -189,6 +202,7 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
       ) : activeView === "home" || !selectedWork ? (
         <WorkHome
           draftRevision={homeDraft.revision}
+          initialPrompt={homeDraft.prompt}
           initialRootPath={homeDraft.rootPath}
           modelLabel={modelLabel}
           onAllWorks={() => setActiveView("all")}
