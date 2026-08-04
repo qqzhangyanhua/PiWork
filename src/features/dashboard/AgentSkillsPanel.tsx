@@ -8,16 +8,15 @@ const SKILLS = [
   { key: "docsAssistant", icon: FileText },
 ] as const;
 
-export function AgentSkillsPanel() {
+export function AgentSkillsPanel({ onAgentsRequest }: { onAgentsRequest(): void }) {
   const { t } = useTranslation();
   return (
     <section aria-labelledby="agent-skills-heading" className="dashboard-panel dashboard-panel--agent-skills">
       <header className="dashboard-panel__header">
         <h2 id="agent-skills-heading">{t("dashboard.agentSkills.title")}</h2>
         <button
-          aria-label={t("dashboard.comingSoon", { feature: t("dashboard.agentSkills.moreSkills") })}
           className="text-button"
-          disabled
+          onClick={onAgentsRequest}
           type="button"
         >
           {t("dashboard.agentSkills.moreSkills")}

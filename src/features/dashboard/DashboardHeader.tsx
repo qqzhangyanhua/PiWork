@@ -3,7 +3,13 @@ import { useTranslation } from "react-i18next";
 
 import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
 
-export function DashboardHeader({ onImportProject }: { onImportProject(): void }) {
+export function DashboardHeader({
+  onAgentsRequest,
+  onImportProject,
+}: {
+  onAgentsRequest(): void;
+  onImportProject(): void;
+}) {
   const { t } = useTranslation();
   return (
     <header className="dashboard-header">
@@ -17,9 +23,8 @@ export function DashboardHeader({ onImportProject }: { onImportProject(): void }
           <span>{t("dashboard.header.importProject")}</span>
         </button>
         <button
-          aria-label={t("dashboard.comingSoon", { feature: t("dashboard.header.exploreAgents") })}
           className="dashboard-header__action"
-          disabled
+          onClick={onAgentsRequest}
           type="button"
         >
           <Bot aria-hidden="true" size={15} />

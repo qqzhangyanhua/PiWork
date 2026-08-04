@@ -24,6 +24,7 @@ export function WorkHome({
   pickProjectDirectory,
   pickAttachments,
   onStarted,
+  onAgentsRequest,
   onWorkSelected,
   onAllWorks,
 }: {
@@ -35,6 +36,7 @@ export function WorkHome({
   pickProjectDirectory: PickProjectDirectory;
   pickAttachments: PickAttachments;
   onStarted(): void;
+  onAgentsRequest(): void;
   onWorkSelected(work: WorkSummary): void;
   onAllWorks(): void;
 }) {
@@ -61,7 +63,7 @@ export function WorkHome({
   return (
     <div aria-label={t("workspace.home")} className="work-home" role="region">
       <div className="work-home__main">
-        <DashboardHeader onImportProject={() => void handleImportProject()} />
+        <DashboardHeader onAgentsRequest={onAgentsRequest} onImportProject={() => void handleImportProject()} />
         <div className="work-home__scroll">
           <div className="work-home__dashboard-content">
             <DashboardGreeting />
@@ -69,7 +71,7 @@ export function WorkHome({
               dashboardExtras={
                 <div className="dashboard-panels-row" data-testid="dashboard-panels-row">
                   <RecentProjectsPanel groups={groups} onSelectProject={handleSelectProject} onViewAll={onAllWorks} />
-                  <AgentSkillsPanel />
+                  <AgentSkillsPanel onAgentsRequest={onAgentsRequest} />
                   <EnvironmentStatusPanel client={client} />
                 </div>
               }

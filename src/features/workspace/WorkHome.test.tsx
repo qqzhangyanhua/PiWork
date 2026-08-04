@@ -31,18 +31,21 @@ const renderHome = ({
   pickProjectDirectory = vi.fn().mockResolvedValue(null),
   onWorkSelected = vi.fn(),
   onAllWorks = vi.fn(),
+  onAgentsRequest = vi.fn(),
   client = createMockTauriClient(),
 }: {
   works?: WorkSummary[];
   pickProjectDirectory?: PickProjectDirectory;
   onWorkSelected?: (work: WorkSummary) => void;
   onAllWorks?: () => void;
+  onAgentsRequest?: () => void;
   client?: ReturnType<typeof createMockTauriClient>;
 } = {}) => {
   render(
     <WorkStoreProvider client={client}>
       <WorkHome
         modelLabel="Pi"
+        onAgentsRequest={onAgentsRequest}
         onAllWorks={onAllWorks}
         onStarted={vi.fn()}
         onWorkSelected={onWorkSelected}
@@ -120,10 +123,19 @@ describe("WorkHome", () => {
     expect(within(panel).getByText("已就绪")).toBeInTheDocument();
   });
 
-  it("renders not-yet-available modules as disabled controls rather than misleading live features", () => {
+  it("opens the live agent center from both homepage discovery entries", async () => {
+    const user = userEvent.setup();
+    const onAgentsRequest = vi.fn();
+    renderHome({ onAgentsRequest });
+
+    await user.click(screen.getByRole("button", { name: "探索智能体" }));
+    await user.click(screen.getByRole("button", { name: "更多技能" }));
+    expect(onAgentsRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps not-yet-available modules as disabled controls rather than misleading live features", () => {
     renderHome();
 
-    expect(screen.getByRole("button", { name: "探索智能体（即将推出）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "通知（即将推出）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "需求分析师（即将推出）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "智能体（即将推出）" })).toBeDisabled();
