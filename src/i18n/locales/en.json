@@ -113,6 +113,30 @@
     "newProject": "New project",
     "nav": { "home": "Home", "agents": "Agent Hub", "knowledge": "Knowledge Base", "dataSources": "Data Sources", "settings": "Settings" }
   },
+  "agentCenter": {
+    "title": "Agent Hub",
+    "headerKicker": "Industrial engineering intelligence platform",
+    "eyebrow": "MAGIC FACTORY · CAPABILITY PLATFORM",
+    "description": "Not 96 disconnected bots, but a professional capability system that coordinates people, AI, knowledge, and tools at real business checkpoints.",
+    "stats": { "label": "Capability catalog statistics", "domains": "capability domains", "capabilities": "capabilities", "p0": "launch capabilities" },
+    "views": { "label": "Agent hub views", "recommended": "Launch collection", "all": "All capabilities" },
+    "paths": { "kicker": "Build paths", "title": "Discover capabilities by business loop", "description": "Choose the stage you need to advance, then see the professional capabilities composed for that stage." },
+    "recommended": { "kicker": "Path capabilities", "count": "{{count}} capabilities in this path" },
+    "catalog": { "kicker": "Capability catalog", "title": "Explore all 96 capabilities", "description": "Combine keyword, domain, and delivery-priority filters." },
+    "filters": {
+      "search": "Search capabilities", "searchPlaceholder": "Search capability, audience, or output…",
+      "domain": "Capability domain", "allDomains": "All domains",
+      "priority": "Priority", "allPriorities": "All priorities"
+    },
+    "results": "{{count}} capabilities found",
+    "empty": { "title": "No matching capabilities", "body": "Try another keyword or clear the current domain and priority filters.", "clear": "Clear filters" },
+    "capability": { "open": "View {{name}} details", "viewDetails": "View details" },
+    "drawer": {
+      "close": "Close details", "catalogId": "Capability #{{id}}", "audiences": "Intended users",
+      "coreCapability": "Core capability", "outputs": "Primary outputs", "implementation": "Implementation approach",
+      "preparation": "What to prepare", "startHint": "PiWork will create an editable task draft. Confirm the inputs and constraints before sending.", "start": "Start using"
+    }
+  },
   "workspace": {
     "home": "Conversation home",
     "detailExperience": "Conversation interface version",

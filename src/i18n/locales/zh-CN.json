@@ -113,6 +113,30 @@
     "newProject": "新建项目",
     "nav": { "home": "首页", "agents": "智能体中心", "knowledge": "知识库", "dataSources": "数据源", "settings": "设置" }
   },
+  "agentCenter": {
+    "title": "智能体中心",
+    "headerKicker": "制造业工程化智能工作平台",
+    "eyebrow": "MAGIC FACTORY · 能力中台",
+    "description": "不是 96 个彼此独立的机器人，而是一套按真实业务节点组合人、AI、知识与工具的专业能力系统。",
+    "stats": { "label": "能力目录统计", "domains": "大能力域", "capabilities": "项能力", "p0": "项首期能力" },
+    "views": { "label": "能力中心视图", "recommended": "首期推荐", "all": "全部能力" },
+    "paths": { "kicker": "建设路径", "title": "从业务闭环发现能力", "description": "先选择要推进的业务阶段，再查看这一阶段会组合调用的专业能力。" },
+    "recommended": { "kicker": "路径能力", "count": "当前路径包含 {{count}} 项能力" },
+    "catalog": { "kicker": "能力目录", "title": "探索全部 96 项能力", "description": "按关键词、能力域和建设优先级组合筛选。" },
+    "filters": {
+      "search": "搜索能力", "searchPlaceholder": "搜索能力、使用对象或输出…",
+      "domain": "能力域", "allDomains": "全部能力域",
+      "priority": "优先级", "allPriorities": "全部优先级"
+    },
+    "results": "找到 {{count}} 项能力",
+    "empty": { "title": "没有匹配的能力", "body": "换一个关键词，或清除当前领域和优先级筛选。", "clear": "清除筛选" },
+    "capability": { "open": "查看{{name}}详情", "viewDetails": "查看详情" },
+    "drawer": {
+      "close": "关闭详情", "catalogId": "能力编号 #{{id}}", "audiences": "使用对象",
+      "coreCapability": "核心能力", "outputs": "主要输出", "implementation": "实现方式",
+      "preparation": "使用前准备", "startHint": "将生成一份可编辑任务草稿，确认资料和约束后再发送。", "start": "开始使用"
+    }
+  },
   "workspace": {
     "home": "对话主页",
     "detailExperience": "对话界面版本",
