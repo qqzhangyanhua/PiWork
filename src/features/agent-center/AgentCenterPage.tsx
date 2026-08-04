@@ -27,7 +27,9 @@ export function AgentCenterPage({
 }) {
   const { t } = useTranslation();
   const [activeView, setActiveView] = useState<AgentCenterView>("recommended");
-  const [selectedPath, setSelectedPath] = useState(AGENT_CAPABILITY_PATHS[0].id);
+  const [selectedPath, setSelectedPath] = useState<(typeof AGENT_CAPABILITY_PATHS)[number]["id"]>(
+    AGENT_CAPABILITY_PATHS[0].id,
+  );
   const [filters, setFilters] = useState<CapabilityFilters>({
     query: "",
     domainId: "all",

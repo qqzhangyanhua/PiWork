@@ -33,6 +33,7 @@ import {
 import "../../styles/workspace.css";
 import "../../styles/linear-fidelity.css";
 import "../../styles/dashboard.css";
+import "../../styles/agent-center.css";
 
 function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, onModelConfigured, pickProjectDirectory, pickAttachments }: { client: PiWorkClient; initialView: WorkspaceView; modelConfiguration: ModelConfigurationSummary | null; modelLabel: string; onModelConfigured?(configuration: ModelConfigurationSummary): void; pickProjectDirectory: PickProjectDirectory; pickAttachments: PickAttachments }) {
   const { t } = useTranslation();
@@ -205,6 +206,7 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
           initialPrompt={homeDraft.prompt}
           initialRootPath={homeDraft.rootPath}
           modelLabel={modelLabel}
+          onAgentsRequest={() => setActiveView("agents")}
           onAllWorks={() => setActiveView("all")}
           onStarted={() => setActiveView("detail")}
           onWorkSelected={(work) => openWork(work.id)}
