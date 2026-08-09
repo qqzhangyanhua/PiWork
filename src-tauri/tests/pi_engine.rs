@@ -87,6 +87,220 @@ fn rpc_text_and_tool_events_are_translated_into_work_events() {
 }
 
 #[test]
+fn rpc_existing_summaries_preserve_full_limit_before_ellipsis() {
+    let mut translator = RpcEventTranslator::default();
+    let long_text = "x".repeat(2_001);
+    let expected_text = format!("{}…", "x".repeat(2_000));
+    let long_command = format!("test{}", "x".repeat(1_997));
+    let expected_command = format!("test{}…", "x".repeat(1_996));
+
+    assert_eq!(
+        translator.translate(json!({
+            "type": "tool_execution_end",
+            "toolCallId": "call-output",
+            "toolName": "read",
+            "result": {"content": [{"type": "text", "text": long_text.clone()}]}
+        })),
+        Some(EngineEvent::ToolFinished {
+            tool_call_id: "call-output".into(),
+            tool_name: "read".into(),
+            output_summary: expected_text.clone(),
+            success: true,
+        })
+    );
+
+    translator.translate(json!({
+        "type": "tool_execution_start",
+        "toolCallId": "call-edit",
+        "toolName": "edit",
+        "args": {"path": long_text}
+    }));
+    translator.translate(json!({
+        "type": "tool_execution_start",
+        "toolCallId": "call-test",
+        "toolName": "bash",
+        "args": {"command": long_command}
+    }));
+
+    assert!(matches!(
+        translator.translate(json!({"type": "agent_end", "messages": []})),
+        Some(EngineEvent::RunCompleted { artifacts, validation, .. })
+            if artifacts == vec![expected_text] && validation == vec![expected_command]
+    ));
+}
+
+#[test]
+fn rpc_rich_activity_is_translated_without_fabricating_capabilities() {
+    let mut translator = RpcEventTranslator::default();
+
+    assert_eq!(
+        translator.translate(json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "thinking_delta", "delta": "checking"}
+        })),
+        Some(EngineEvent::ThoughtDelta {
+            text: "checking".into()
+        })
+    );
+    assert_eq!(
+        translator.translate(json!({
+            "type": "tool_execution_update",
+            "toolCallId": "call-1",
+            "toolName": "bash",
+            "partialResult": {"content": [{"type": "text", "text": "12/20 tests"}]}
+        })),
+        Some(EngineEvent::ToolProgress {
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            output_summary: "12/20 tests".into(),
+        })
+    );
+    assert_eq!(
+        translator.translate(json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "usage": {
+                "input": 10, "output": 20, "cacheRead": 3,
+                "cacheWrite": 4, "totalTokens": 37
+            }}
+        })),
+        Some(EngineEvent::UsageUpdated {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 3,
+            cache_write_tokens: 4,
+            total_tokens: 37,
+        })
+    );
+    assert!(matches!(
+        translator.translate(json!({"type": "compaction_start", "reason": "overflow"})),
+        Some(EngineEvent::RawEngineEvent { kind, payload_json })
+            if kind == "compaction_start" && payload_json.contains("overflow")
+    ));
+}
+
+#[test]
+fn rpc_usage_missing_fields_default_to_zero() {
+    let mut translator = RpcEventTranslator::default();
+
+    assert_eq!(
+        translator.translate(json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "usage": {"input": 10}}
+        })),
+        Some(EngineEvent::UsageUpdated {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            total_tokens: 0,
+        })
+    );
+}
+
+#[test]
+fn rpc_invalid_usage_numbers_are_preserved_as_raw_events() {
+    let mut translator = RpcEventTranslator::default();
+
+    for usage in [
+        json!({
+            "input": -1,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0
+        }),
+        json!({
+            "input": u64::from(u32::MAX) + 1,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 0
+        }),
+    ] {
+        assert!(matches!(
+            translator.translate(json!({
+                "type": "message_end",
+                "message": {"role": "assistant", "usage": usage}
+            })),
+            Some(EngineEvent::RawEngineEvent { kind, .. }) if kind == "message_end"
+        ));
+    }
+}
+
+#[test]
+fn rpc_malformed_usage_is_preserved_as_raw() {
+    let mut translator = RpcEventTranslator::default();
+
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "usage": "not token counts"}
+        })),
+        Some(EngineEvent::RawEngineEvent { kind, payload_json })
+            if kind == "message_end" && payload_json.contains("not token counts")
+    ));
+}
+
+#[test]
+fn rpc_unknown_event_without_a_type_uses_the_unknown_kind() {
+    let mut translator = RpcEventTranslator::default();
+
+    assert!(matches!(
+        translator.translate(json!({"reason": "future Pi event"})),
+        Some(EngineEvent::RawEngineEvent { kind, payload_json })
+            if kind == "unknown" && payload_json.contains("future Pi event")
+    ));
+}
+
+#[test]
+fn rpc_raw_event_unicode_is_truncated_to_the_character_limit() {
+    let mut translator = RpcEventTranslator::default();
+    let payload = "界".repeat(40_000);
+    let message = json!({"type": "future_event", "payload": payload});
+    let serialized = serde_json::to_string(&message).unwrap();
+    let retained_prefix = serialized.chars().take(31_999).collect::<String>();
+
+    let Some(EngineEvent::RawEngineEvent { payload_json, .. }) = translator.translate(message)
+    else {
+        panic!("unknown Pi output must be preserved as a raw event");
+    };
+
+    assert_eq!(payload_json.chars().count(), 32_000);
+    assert_eq!(payload_json, format!("{retained_prefix}…"));
+}
+
+#[test]
+fn rpc_raw_event_kind_is_unicode_safely_bounded() {
+    let mut translator = RpcEventTranslator::default();
+    let original_kind = format!("future-{}", "界".repeat(300));
+    let retained_prefix = original_kind.chars().take(255).collect::<String>();
+
+    let Some(EngineEvent::RawEngineEvent { kind, .. }) =
+        translator.translate(json!({"type": original_kind}))
+    else {
+        panic!("unknown Pi output must be preserved as a raw event");
+    };
+
+    assert_eq!(kind.chars().count(), 256);
+    assert_eq!(kind, format!("{retained_prefix}…"));
+}
+
+#[test]
+fn rpc_malformed_known_tool_event_is_preserved_as_raw() {
+    let mut translator = RpcEventTranslator::default();
+
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "tool_execution_update",
+            "toolName": "bash",
+            "partialResult": {"content": [{"type": "text", "text": "still running"}]}
+        })),
+        Some(EngineEvent::RawEngineEvent { kind, payload_json })
+            if kind == "tool_execution_update" && payload_json.contains("still running")
+    ));
+}
+
+#[test]
 fn rpc_agent_end_is_terminal_and_reports_real_tool_activity() {
     let mut translator = RpcEventTranslator::default();
     translator.translate(json!({

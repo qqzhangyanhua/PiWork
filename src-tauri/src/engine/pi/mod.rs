@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{Mutex, mpsc},
 };
@@ -87,7 +87,102 @@ fn escape_xml_attribute(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 const RPC_START_TIMEOUT: Duration = Duration::from_secs(15);
+// Pi lifecycle records may contain cumulative/full assistant output up to the
+// configured 32,768-token ceiling. 1 MiB admits those records while retaining
+// a hard bound before UTF-8 validation and JSON parsing.
+const MAX_RPC_RECORD_BYTES: usize = 1_024 * 1_024;
+const INITIAL_RPC_RECORD_BYTES: usize = 8 * 1_024;
 const MAX_SUMMARY_CHARS: usize = 2_000;
+const MAX_RAW_EVENT_CHARS: usize = 32_000;
+const MAX_RAW_EVENT_KIND_CHARS: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RpcRecordReadError {
+    Read,
+    TooLarge,
+    InvalidUtf8,
+}
+
+struct RpcRecordReader<R> {
+    inner: R,
+    record: Vec<u8>,
+}
+
+impl<R> RpcRecordReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            record: Vec::with_capacity(INITIAL_RPC_RECORD_BYTES),
+        }
+    }
+
+    fn finish_record(&mut self) -> Result<String, RpcRecordReadError> {
+        while self.record.last() == Some(&b'\r') {
+            self.record.pop();
+        }
+        std::str::from_utf8(&self.record)
+            .map(str::to_owned)
+            .map_err(|_| RpcRecordReadError::InvalidUtf8)
+    }
+}
+
+impl<R: AsyncBufRead + Unpin> RpcRecordReader<R> {
+    async fn next_record(&mut self) -> Result<Option<String>, RpcRecordReadError> {
+        self.record.clear();
+        loop {
+            let available = self
+                .inner
+                .fill_buf()
+                .await
+                .map_err(|_| RpcRecordReadError::Read)?;
+            if available.is_empty() {
+                return if self.record.is_empty() {
+                    Ok(None)
+                } else {
+                    self.finish_record().map(Some)
+                };
+            }
+
+            if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+                let remaining = MAX_RPC_RECORD_BYTES - self.record.len();
+                if newline > remaining {
+                    return Err(RpcRecordReadError::TooLarge);
+                }
+                self.record.extend_from_slice(&available[..newline]);
+                self.inner.consume(newline + 1);
+                return self.finish_record().map(Some);
+            }
+
+            let available_len = available.len();
+            let remaining = MAX_RPC_RECORD_BYTES - self.record.len();
+            if available_len > remaining {
+                return Err(RpcRecordReadError::TooLarge);
+            }
+            self.record.extend_from_slice(available);
+            self.inner.consume(available_len);
+        }
+    }
+}
+
+type PiRpcRecordReader = RpcRecordReader<BufReader<tokio::process::ChildStdout>>;
+
+fn rpc_record_error_message(error: RpcRecordReadError) -> &'static str {
+    match error {
+        RpcRecordReadError::Read => "Pi RPC output could not be read",
+        RpcRecordReadError::TooLarge => "Pi RPC output exceeded the safe record limit",
+        RpcRecordReadError::InvalidUtf8 => "Pi RPC returned malformed UTF-8 output",
+    }
+}
+
+fn startup_rpc_record_error(error: RpcRecordReadError) -> EngineError {
+    EngineError::Start(rpc_record_error_message(error).into())
+}
+
+fn steady_rpc_record_error(error: RpcRecordReadError) -> EngineEvent {
+    EngineEvent::RunFailed {
+        message: rpc_record_error_message(error).into(),
+    }
+}
 
 pub struct PiProviderConfig {
     value: Value,
@@ -196,6 +291,11 @@ pub struct RpcEventTranslator {
 
 impl RpcEventTranslator {
     pub fn translate(&mut self, message: Value) -> Option<EngineEvent> {
+        let semantic = self.translate_known(&message);
+        Some(semantic.unwrap_or_else(|| raw_event(message)))
+    }
+
+    fn translate_known(&mut self, message: &Value) -> Option<EngineEvent> {
         match message.get("type").and_then(Value::as_str)? {
             "message_update"
                 if message
@@ -213,6 +313,18 @@ impl RpcEventTranslator {
                 if message
                     .pointer("/assistantMessageEvent/type")
                     .and_then(Value::as_str)
+                    == Some("thinking_delta") =>
+            {
+                message
+                    .pointer("/assistantMessageEvent/delta")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .map(|text| EngineEvent::ThoughtDelta { text: text.into() })
+            }
+            "message_update"
+                if message
+                    .pointer("/assistantMessageEvent/type")
+                    .and_then(Value::as_str)
                     == Some("error") =>
             {
                 Some(EngineEvent::RunFailed {
@@ -220,8 +332,8 @@ impl RpcEventTranslator {
                 })
             }
             "tool_execution_start" => {
-                let tool_call_id = required_string(&message, "toolCallId")?;
-                let tool_name = required_string(&message, "toolName")?;
+                let tool_call_id = required_string(message, "toolCallId")?;
+                let tool_name = required_string(message, "toolName")?;
                 let args = message.get("args").cloned().unwrap_or(Value::Null);
                 self.tool_count += 1;
                 self.capture_outcome_hints(&tool_name, &args);
@@ -231,9 +343,14 @@ impl RpcEventTranslator {
                     input_summary: summarize_json(&args),
                 })
             }
+            "tool_execution_update" => Some(EngineEvent::ToolProgress {
+                tool_call_id: required_string(message, "toolCallId")?,
+                tool_name: required_string(message, "toolName")?,
+                output_summary: summarize_tool_result(message.get("partialResult")),
+            }),
             "tool_execution_end" => Some(EngineEvent::ToolFinished {
-                tool_call_id: required_string(&message, "toolCallId")?,
-                tool_name: required_string(&message, "toolName")?,
+                tool_call_id: required_string(message, "toolCallId")?,
+                tool_name: required_string(message, "toolName")?,
                 output_summary: summarize_tool_result(message.get("result")),
                 success: !message
                     .get("isError")
@@ -250,6 +367,12 @@ impl RpcEventTranslator {
                 validation: self.validation.clone(),
                 limitations: Vec::new(),
             }),
+            "message_end"
+                if message.pointer("/message/role").and_then(Value::as_str)
+                    == Some("assistant") =>
+            {
+                usage_event(message)
+            }
             "response" if message.get("success").and_then(Value::as_bool) == Some(false) => {
                 Some(EngineEvent::RunFailed {
                     message: "Pi rejected the Run request".into(),
@@ -282,6 +405,39 @@ impl RpcEventTranslator {
     }
 }
 
+fn usage_event(message: &Value) -> Option<EngineEvent> {
+    let usage = message.pointer("/message/usage")?;
+    usage.as_object()?;
+    Some(EngineEvent::UsageUpdated {
+        input_tokens: usage_field(usage, "input")?,
+        output_tokens: usage_field(usage, "output")?,
+        cache_read_tokens: usage_field(usage, "cacheRead")?,
+        cache_write_tokens: usage_field(usage, "cacheWrite")?,
+        total_tokens: usage_field(usage, "totalTokens")?,
+    })
+}
+
+fn usage_field(usage: &Value, field: &str) -> Option<u32> {
+    usage
+        .get(field)
+        .map_or(Some(0), |value| u32::try_from(value.as_u64()?).ok())
+}
+
+fn raw_event(message: Value) -> EngineEvent {
+    let kind = message
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|kind| summarize_to_limit(kind, MAX_RAW_EVENT_KIND_CHARS))
+        .unwrap_or_else(|| "unknown".into());
+    EngineEvent::RawEngineEvent {
+        kind,
+        payload_json: summarize_to_limit(
+            &serde_json::to_string(&message).unwrap_or_else(|_| "null".into()),
+            MAX_RAW_EVENT_CHARS,
+        ),
+    }
+}
+
 fn required_string(message: &Value, field: &str) -> Option<String> {
     message.get(field)?.as_str().map(str::to_owned)
 }
@@ -291,19 +447,53 @@ fn summarize_json(value: &Value) -> String {
 }
 
 fn summarize_tool_result(result: Option<&Value>) -> String {
-    let text = result
+    let text_parts = result
         .and_then(|result| result.get("content"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.is_empty() {
-        result.map(summarize_json).unwrap_or_default()
-    } else {
-        summarize(&text)
+        .filter_map(|part| part.get("text").and_then(Value::as_str));
+    summarize_text_parts(text_parts)
+        .unwrap_or_else(|| result.map(summarize_json).unwrap_or_default())
+}
+
+fn summarize_text_parts<'a>(text_parts: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let mut summary = String::with_capacity(MAX_SUMMARY_CHARS);
+    let mut summary_chars = 0;
+    let mut part_count = 0;
+    let mut joined_has_content = false;
+    let mut truncated = false;
+
+    'parts: for text in text_parts {
+        if part_count > 0 {
+            joined_has_content = true;
+            if summary_chars == MAX_SUMMARY_CHARS {
+                truncated = true;
+                break;
+            }
+            summary.push('\n');
+            summary_chars += 1;
+        }
+        part_count += 1;
+        joined_has_content |= !text.is_empty();
+
+        for character in text.chars() {
+            if summary_chars == MAX_SUMMARY_CHARS {
+                truncated = true;
+                break 'parts;
+            }
+            summary.push(character);
+            summary_chars += 1;
+        }
     }
+
+    if !joined_has_content {
+        return None;
+    }
+    if truncated {
+        summary.push('…');
+    }
+    Some(summary)
 }
 
 fn summarize(value: &str) -> String {
@@ -314,6 +504,19 @@ fn summarize(value: &str) -> String {
     } else {
         text
     }
+}
+
+fn summarize_to_limit(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut text = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        if max_chars == 0 {
+            return text;
+        }
+        text.pop();
+        text.push('…');
+    }
+    text
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -556,11 +759,11 @@ impl EngineAdapter for PiEngineAdapter {
 
         let request_id = format!("run-{}", context.run_id);
         write_rpc(&mut stdin, &prompt_command(&request_id, &input)).await?;
-        let mut lines = BufReader::new(stdout).lines();
+        let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
         let mut translator = RpcEventTranslator::default();
         await_prompt_acceptance(
             &mut child,
-            &mut lines,
+            &mut stdout,
             &request_id,
             &mut translator,
             &sink,
@@ -583,7 +786,7 @@ impl EngineAdapter for PiEngineAdapter {
         tokio::spawn(run_rpc_loop(
             child,
             stdin,
-            lines,
+            stdout,
             translator,
             sink,
             control_receiver,
@@ -612,7 +815,7 @@ impl EngineAdapter for PiEngineAdapter {
 
 async fn await_prompt_acceptance(
     child: &mut Child,
-    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    stdout: &mut PiRpcRecordReader,
     request_id: &str,
     translator: &mut RpcEventTranslator,
     sink: &mpsc::Sender<EngineEvent>,
@@ -620,11 +823,11 @@ async fn await_prompt_acceptance(
 ) -> Result<(), EngineError> {
     tokio::time::timeout(RPC_START_TIMEOUT, async {
         loop {
-            let line = lines
-                .next_line()
+            let record = stdout
+                .next_record()
                 .await
-                .map_err(|_| EngineError::Start("Pi RPC output could not be read".into()))?;
-            let Some(line) = line else {
+                .map_err(startup_rpc_record_error)?;
+            let Some(record) = record else {
                 let status = child.wait().await.ok();
                 tokio::task::yield_now().await;
                 let stderr = summarize_startup_stderr(&startup_stderr.lock().await);
@@ -638,7 +841,7 @@ async fn await_prompt_acceptance(
                 };
                 return Err(EngineError::Start(diagnostic));
             };
-            let message: Value = serde_json::from_str(line.trim_end_matches('\r'))
+            let message: Value = serde_json::from_str(&record)
                 .map_err(|_| EngineError::Start("Pi RPC returned malformed JSON".into()))?;
             if message.get("type").and_then(Value::as_str) == Some("response")
                 && message.get("id").and_then(Value::as_str) == Some(request_id)
@@ -664,7 +867,7 @@ async fn await_prompt_acceptance(
 async fn run_rpc_loop(
     mut child: Child,
     mut stdin: ChildStdin,
-    mut lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    mut stdout: PiRpcRecordReader,
     mut translator: RpcEventTranslator,
     sink: mpsc::Sender<EngineEvent>,
     mut control: mpsc::Receiver<RunControl>,
@@ -682,9 +885,17 @@ async fn run_rpc_loop(
                 }
                 break;
             }
-            line = lines.next_line() => {
-                let Ok(Some(line)) = line else { break };
-                let Ok(message) = serde_json::from_str::<Value>(line.trim_end_matches('\r')) else {
+            record = stdout.next_record() => {
+                let record = match record {
+                    Ok(Some(record)) => record,
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = sink.send(steady_rpc_record_error(error)).await;
+                        terminal = true;
+                        break;
+                    }
+                };
+                let Ok(message) = serde_json::from_str::<Value>(&record) else {
                     let _ = sink.send(EngineEvent::RunFailed {
                         message: "Pi RPC returned malformed output".into(),
                     }).await;
@@ -749,6 +960,127 @@ use std::os::windows::process::CommandExt as _;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn rpc_record_reader_accepts_a_large_pi_message_update() {
+        let delta = "x".repeat(128 * 1_024);
+        let mut input = serde_json::to_vec(&serde_json::json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": delta.clone()}
+        }))
+        .unwrap();
+        input.push(b'\n');
+        assert!(input.len() > 64 * 1_024);
+        let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::new(input.as_slice()));
+
+        let record = reader.next_record().await.unwrap().unwrap();
+        let message = serde_json::from_str(&record).unwrap();
+        let mut translator = super::RpcEventTranslator::default();
+
+        assert_eq!(
+            translator.translate(message),
+            Some(super::EngineEvent::AssistantDelta { text: delta })
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_accepts_the_exact_byte_limit() {
+        let mut input = vec![b'x'; super::MAX_RPC_RECORD_BYTES];
+        input.push(b'\n');
+        let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(
+            1_024,
+            input.as_slice(),
+        ));
+
+        let record = reader.next_record().await.unwrap().unwrap();
+
+        assert_eq!(record.len(), super::MAX_RPC_RECORD_BYTES);
+        assert!(record.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_rejects_over_limit_before_buffer_growth() {
+        let mut input = vec![b'x'; super::MAX_RPC_RECORD_BYTES + 1];
+        input.push(b'\n');
+        let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(
+            super::MAX_RPC_RECORD_BYTES + 2,
+            input.as_slice(),
+        ));
+        let initial_capacity = reader.record.capacity();
+        assert!(initial_capacity <= super::INITIAL_RPC_RECORD_BYTES);
+
+        let error = reader.next_record().await.unwrap_err();
+
+        assert_eq!(error, super::RpcRecordReadError::TooLarge);
+        assert_eq!(reader.record.len(), 0);
+        assert_eq!(reader.record.capacity(), initial_capacity);
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_handles_unicode_crlf_and_eof_final_record() {
+        let input = "界🙂\r\n尾";
+        let mut reader =
+            super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(3, input.as_bytes()));
+
+        assert_eq!(reader.next_record().await.unwrap().as_deref(), Some("界🙂"));
+        assert_eq!(reader.next_record().await.unwrap().as_deref(), Some("尾"));
+        assert_eq!(reader.next_record().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_rejects_malformed_utf8() {
+        let input = [0xff, b'\n'];
+        let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::new(input.as_slice()));
+
+        assert_eq!(
+            reader.next_record().await.unwrap_err(),
+            super::RpcRecordReadError::InvalidUtf8
+        );
+    }
+
+    #[test]
+    fn rpc_record_errors_are_safe_in_startup_and_steady_state() {
+        for (error, expected) in [
+            (
+                super::RpcRecordReadError::TooLarge,
+                "Pi RPC output exceeded the safe record limit",
+            ),
+            (
+                super::RpcRecordReadError::InvalidUtf8,
+                "Pi RPC returned malformed UTF-8 output",
+            ),
+            (
+                super::RpcRecordReadError::Read,
+                "Pi RPC output could not be read",
+            ),
+        ] {
+            let super::EngineError::Start(startup_message) = super::startup_rpc_record_error(error)
+            else {
+                panic!("startup record errors must fail engine startup");
+            };
+            let super::EngineEvent::RunFailed {
+                message: steady_message,
+            } = super::steady_rpc_record_error(error)
+            else {
+                panic!("steady-state record errors must fail the run");
+            };
+
+            assert_eq!(startup_message, expected);
+            assert_eq!(steady_message, expected);
+        }
+    }
+
+    #[test]
+    fn tool_result_text_summary_preserves_newlines_and_legacy_ellipsis() {
+        let first = "界".repeat(1_999);
+
+        assert_eq!(
+            super::summarize_text_parts([first.as_str(), "tail"]),
+            Some(format!("{first}\n…"))
+        );
+        assert_eq!(super::summarize_text_parts(["", ""]), Some("\n".into()));
+        assert_eq!(super::summarize_text_parts([""]), None);
+    }
+
     #[cfg(windows)]
     #[test]
     fn node_entrypoint_removes_the_windows_verbatim_disk_prefix() {
