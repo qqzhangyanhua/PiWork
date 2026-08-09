@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::domain::work::PermissionMode;
 
+pub mod activity_observer;
 pub mod fake;
 pub mod pi;
 pub mod publisher;

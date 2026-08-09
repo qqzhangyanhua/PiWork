@@ -191,9 +191,19 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         runtime_dir.clone(),
                         bundled_pi.clone(),
                     )?);
-                    let publisher = Arc::new(engine::publisher::TauriEventPublisher::new(
-                        app.handle().clone(),
-                    ));
+                    let observer = engine::activity_observer::ActivityObserverHandle::in_process();
+                    let publisher =
+                        Arc::new(engine::publisher::TauriEventPublisher::with_observer(
+                            app.handle().clone(),
+                            observer.clone(),
+                        ));
+                    if !app.manage(observer.clone()) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "PiWork activity observer is already managed",
+                        )
+                        .into());
+                    }
                     let supervisor = Arc::new(engine::supervisor::EngineSupervisor::new(
                         repository.clone(),
                         engine,
@@ -322,6 +332,36 @@ mod tests {
             .unwrap();
         assert!(assembly.contains("engine::pi::PiEngineAdapter::production_with_executable"));
         assert!(!assembly.contains("ConfiguredModelEngineAdapter::new"));
+    }
+
+    #[test]
+    fn production_manages_the_publishers_shared_activity_observer() {
+        let source = include_str!("lib.rs");
+        let assembly = source
+            .split("fn application_builder()")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg_attr(mobile")
+            .next()
+            .unwrap();
+        let observer = assembly
+            .find("engine::activity_observer::ActivityObserverHandle::in_process()")
+            .expect("production activity observer construction is missing");
+        let publisher = assembly
+            .find("engine::publisher::TauriEventPublisher::with_observer")
+            .expect("publisher does not receive the shared activity observer");
+        let manage = assembly
+            .find("app.manage(observer.clone())")
+            .expect("shared activity observer is not retained in Tauri managed state");
+        let erase = assembly
+            .find("engine::supervisor::EngineSupervisor::new")
+            .expect("publisher is not erased into the supervisor");
+
+        assert!(observer < publisher && publisher < manage && manage < erase);
+        assert!(assembly[publisher..manage].contains("observer.clone()"));
+        let management = &assembly[manage..erase];
+        assert!(management.contains("std::io::ErrorKind::AlreadyExists"));
+        assert!(management.contains("PiWork activity observer is already managed"));
     }
 
     #[test]
