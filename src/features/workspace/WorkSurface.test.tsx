@@ -632,7 +632,7 @@ describe("WorkSurface", () => {
     expect(screen.queryByText(/work_already_running/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开诊断" }));
     expect(screen.getByLabelText("对话检查器", { selector: "aside" })).toHaveAttribute("aria-hidden", "false");
-    expect(screen.getByRole("tab", { name: "日志" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "活动原始记录" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText(/work_already_running/)).toBeInTheDocument();
     expect(client.getWork).toHaveBeenCalledTimes(2);
     expect(composer).toHaveTextContent("开始");
@@ -791,7 +791,7 @@ describe("WorkSurface", () => {
     expect(within(artifactPanel).queryByText("还没有产物")).not.toBeInTheDocument();
     await user.click(within(tabs).getByRole("tab", { name: "验证" }));
     await user.keyboard("{ArrowRight}");
-    expect(within(tabs).getByRole("tab", { name: "日志" })).toHaveFocus();
+    expect(within(tabs).getByRole("tab", { name: "活动原始记录" })).toHaveFocus();
   });
 
   it("交付检查器在已完成 Run 没有产物时提供不重复摘要的下一步", async () => {
@@ -830,7 +830,7 @@ describe("WorkSurface", () => {
     expect(within(artifactPanel).getByText("生成文件后，产物会显示在这里。先在下方输入一条指令。")).toBeInTheDocument();
   });
 
-  it("日志检查器使用产品语言而不暴露事件 discriminator", async () => {
+  it("活动原始记录逐条显示 journal event discriminator", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     const detail = seededDetail("completed");
@@ -847,19 +847,17 @@ describe("WorkSurface", () => {
     render(<WorkSurface client={client} />);
 
     await user.click(await screen.findByRole("button", { name: "打开检查器" }));
-    await user.click(screen.getByRole("tab", { name: "日志" }));
-    const logs = screen.getByRole("tabpanel", { name: "日志" });
+    await user.click(screen.getByRole("tab", { name: "活动原始记录" }));
+    const logs = screen.getByRole("tabpanel", { name: "活动原始记录" });
 
-    for (const label of ["开始处理", "Agent 输出", "工具开始", "工具完成", "处理完成", "执行未完成"]) {
-      expect(within(logs).getByText(label)).toBeInTheDocument();
-    }
+    expect(within(logs).getAllByTestId("raw-activity-event")).toHaveLength(
+      detail.events.length,
+    );
     for (const discriminator of ["runStarted", "assistantDelta", "toolStarted", "toolFinished", "runCompleted", "runFailed"]) {
-      expect(within(logs).queryByText(discriminator)).not.toBeInTheDocument();
+      expect(within(logs).getAllByText(discriminator)).toHaveLength(
+        discriminator === "assistantDelta" ? 2 : 1,
+      );
     }
-    const outputEntry = within(logs).getByText("Agent 输出").closest("li");
-    expect(within(logs).getAllByText("Agent 输出")).toHaveLength(1);
-    expect(outputEntry).toHaveTextContent("回复已显示在时间线中");
-    expect(outputEntry).not.toHaveTextContent("正在分析收入");
   });
 
   it("检查器展示整个 Work 的结构化结果，不提供执行批次切换", async () => {

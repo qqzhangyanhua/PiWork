@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { formatAppErrorDiagnostics } from "../../domain/appError";
 import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../../domain/work";
 import type { ResourceSummary } from "../../bindings";
+import { RawActivityRail } from "../activity/RawActivityRail";
 import { AttachmentChips } from "./AttachmentChips";
 
 const tabs = ["delivery", "attachments", "validation", "logs"] as const;
@@ -97,27 +98,7 @@ export function WorkInspector({
       return validations.length ? <ul className="inspector-list">{validations.map(({ item, runId }, index) => <li key={`${runId}:${index}`}>{item}</li>)}</ul> : <p className="inspector-empty">{t("inspector.noValidation")}</p>;
     }
     if (active === "logs") {
-      const assistantRuns = new Set<string>();
-      const logEvents = events.filter(({ payload, runId }) => {
-        if (payload.type !== "assistantDelta") return true;
-        if (assistantRuns.has(runId)) return false;
-        assistantRuns.add(runId);
-        return true;
-      });
-      return <div className="inspector-logs">{error && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}{logEvents.length ? <ol className="inspector-log">{logEvents.map(({ payload, sequence, runId }) => {
-        const description = payload.type === "toolStarted"
-          ? payload.inputSummary
-          : payload.type === "toolFinished"
-            ? payload.outputSummary
-            : payload.type === "runFailed"
-              ? payload.message
-              : payload.type === "runCompleted"
-                ? payload.summary
-                : payload.type === "runStarted"
-                  ? payload.modelLabel
-                  : t("inspector.logOutputSummary");
-        return <li key={`${runId}:${sequence}`}><span>{t(`inspector.logEvents.${payload.type}`)}</span><p>{description}</p></li>;
-      })}</ol> : !error && <p className="inspector-empty">{t("inspector.noLogs")}</p>}</div>;
+      return <div className="inspector-logs">{error && <pre className="diagnostics">{formatAppErrorDiagnostics(error, t("diagnostics.unavailable"))}</pre>}<RawActivityRail events={events} /></div>;
     }
     return null;
   };
