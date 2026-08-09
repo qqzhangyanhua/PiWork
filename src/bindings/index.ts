@@ -1,7 +1,9 @@
 export type { CreateWorkInput } from "./CreateWorkInput";
+export type { LivenessState } from "./LivenessState";
 export type { MessageRole } from "./MessageRole";
 export type { MessageSummary } from "./MessageSummary";
 export type { PermissionMode } from "./PermissionMode";
+export type { PermissionOutcome } from "./PermissionOutcome";
 export type { ProjectFileSummary } from "./ProjectFileSummary";
 export type { ImportResourcesInput } from "./ImportResourcesInput";
 export type { RuntimeCheck } from "./RuntimeCheck";
@@ -12,6 +14,7 @@ export type { ResourceSummary } from "./ResourceSummary";
 export type { ResourceThumbnail } from "./ResourceThumbnail";
 export type { RunStatus } from "./RunStatus";
 export type { RunSummary } from "./RunSummary";
+export type { SessionTransition } from "./SessionTransition";
 export type { StartWorkOutput } from "./StartWorkOutput";
 export type { StartWorkInput } from "./StartWorkInput";
 export type { WorkDetail } from "./WorkDetail";

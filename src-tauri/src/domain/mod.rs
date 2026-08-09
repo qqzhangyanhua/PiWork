@@ -11,7 +11,10 @@ mod tests {
 
     use super::{
         environment::{RuntimeCheck, RuntimeStatus},
-        event::{WorkEventEnvelope, WorkEventPayload},
+        event::{
+            LivenessState, PermissionOutcome, SessionTransition, WorkEventEnvelope,
+            WorkEventPayload,
+        },
         resource::{
             ImportResourcesInput, ResourceOrigin, ResourceStatus, ResourceSummary,
             ResourceThumbnail,
@@ -41,6 +44,9 @@ mod tests {
         ResourceSummary::export().unwrap();
         ResourceThumbnail::export().unwrap();
         ImportResourcesInput::export().unwrap();
+        PermissionOutcome::export().unwrap();
+        SessionTransition::export().unwrap();
+        LivenessState::export().unwrap();
         WorkEventEnvelope::export().unwrap();
         WorkEventPayload::export().unwrap();
 
@@ -65,6 +71,9 @@ mod tests {
             "ImportResourcesInput",
             "WorkEventEnvelope",
             "WorkEventPayload",
+            "PermissionOutcome",
+            "SessionTransition",
+            "LivenessState",
         ] {
             assert!(
                 output_dir.join(format!("{type_name}.ts")).is_file(),
@@ -76,8 +85,55 @@ mod tests {
         assert!(
             envelope.contains("workId: string")
                 && envelope.contains("runId: string")
-                && envelope.contains("sequence: number"),
+                && envelope.contains("sequence: number")
+                && envelope.contains("eventId?: string")
+                && envelope.contains("turnId?: string")
+                && envelope.contains("sessionId?: string")
+                && envelope.contains("correlationId?: string"),
             "event identifiers and sequence must be JSON-safe in TypeScript"
+        );
+
+        let payload = std::fs::read_to_string(output_dir.join("WorkEventPayload.ts")).unwrap();
+        for discriminator in [
+            "thoughtDelta",
+            "planChanged",
+            "toolPending",
+            "toolProgress",
+            "permissionRequested",
+            "permissionResolved",
+            "waiting",
+            "liveness",
+            "sessionChanged",
+            "artifactProduced",
+            "validationProduced",
+            "usageUpdated",
+            "rawEngineEvent",
+        ] {
+            assert!(
+                payload.contains(&format!("\"type\": \"{discriminator}\"")),
+                "missing generated payload discriminator {discriminator}"
+            );
+        }
+
+        let generated_type = |type_name: &str| {
+            std::fs::read_to_string(output_dir.join(format!("{type_name}.ts")))
+                .unwrap()
+                .lines()
+                .find(|line| line.starts_with("export type "))
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            generated_type("PermissionOutcome"),
+            "export type PermissionOutcome = \"allowed_once\" | \"allowed_for_run\" | \"denied\" | \"cancelled\";"
+        );
+        assert_eq!(
+            generated_type("SessionTransition"),
+            "export type SessionTransition = \"created\" | \"resumed\" | \"rotated\";"
+        );
+        assert_eq!(
+            generated_type("LivenessState"),
+            "export type LivenessState = \"alive\" | \"stalled\";"
         );
 
         let work = std::fs::read_to_string(output_dir.join("WorkSummary.ts")).unwrap();
