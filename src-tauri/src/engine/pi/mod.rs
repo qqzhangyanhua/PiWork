@@ -108,6 +108,14 @@ struct RpcRecordReader<R> {
     record: Vec<u8>,
 }
 
+fn rpc_record_would_exceed_limit(record: &[u8], incoming: &[u8]) -> bool {
+    let ends_with_cr = incoming
+        .last()
+        .or_else(|| record.last())
+        .is_some_and(|byte| *byte == b'\r');
+    record.len() + incoming.len() - usize::from(ends_with_cr) > MAX_RPC_RECORD_BYTES
+}
+
 impl<R> RpcRecordReader<R> {
     fn new(inner: R) -> Self {
         Self {
@@ -144,8 +152,7 @@ impl<R: AsyncBufRead + Unpin> RpcRecordReader<R> {
             }
 
             if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
-                let remaining = MAX_RPC_RECORD_BYTES - self.record.len();
-                if newline > remaining {
+                if rpc_record_would_exceed_limit(&self.record, &available[..newline]) {
                     return Err(RpcRecordReadError::TooLarge);
                 }
                 self.record.extend_from_slice(&available[..newline]);
@@ -154,8 +161,7 @@ impl<R: AsyncBufRead + Unpin> RpcRecordReader<R> {
             }
 
             let available_len = available.len();
-            let remaining = MAX_RPC_RECORD_BYTES - self.record.len();
-            if available_len > remaining {
+            if rpc_record_would_exceed_limit(&self.record, available) {
                 return Err(RpcRecordReadError::TooLarge);
             }
             self.record.extend_from_slice(available);
@@ -981,11 +987,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_record_reader_accepts_the_exact_byte_limit() {
+    async fn rpc_record_reader_accepts_the_exact_byte_limit_with_lf_or_crlf() {
         let mut input = vec![b'x'; super::MAX_RPC_RECORD_BYTES];
-        input.push(b'\n');
+
+        for ending in [&b"\n"[..], &b"\r\n"[..]] {
+            input.truncate(super::MAX_RPC_RECORD_BYTES);
+            input.extend_from_slice(ending);
+            let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(
+                1_024,
+                input.as_slice(),
+            ));
+
+            let record = reader.next_record().await.unwrap().unwrap();
+
+            assert_eq!(record.len(), super::MAX_RPC_RECORD_BYTES);
+            assert!(record.bytes().all(|byte| byte == b'x'));
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_accepts_exact_limit_crlf_across_a_buffer_boundary() {
+        const BUFFER_BYTES: usize = 61_681;
+        assert_eq!((super::MAX_RPC_RECORD_BYTES + 1) % BUFFER_BYTES, 0);
+        let mut input = vec![b'x'; super::MAX_RPC_RECORD_BYTES];
+        input.extend_from_slice(b"\r\n");
         let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(
-            1_024,
+            BUFFER_BYTES,
             input.as_slice(),
         ));
 
@@ -993,6 +1020,36 @@ mod tests {
 
         assert_eq!(record.len(), super::MAX_RPC_RECORD_BYTES);
         assert!(record.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_rejects_true_over_limit_payload_with_crlf() {
+        let mut input = vec![b'x'; super::MAX_RPC_RECORD_BYTES + 1];
+        input.extend_from_slice(b"\r\n");
+        let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(
+            1_024,
+            input.as_slice(),
+        ));
+
+        assert_eq!(
+            reader.next_record().await.unwrap_err(),
+            super::RpcRecordReadError::TooLarge
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_record_reader_counts_a_trailing_cr_when_the_next_byte_is_not_lf() {
+        let mut input = vec![b'x'; super::MAX_RPC_RECORD_BYTES];
+        input.extend_from_slice(b"\ry\n");
+        let mut reader = super::RpcRecordReader::new(tokio::io::BufReader::with_capacity(
+            1_024,
+            input.as_slice(),
+        ));
+
+        assert_eq!(
+            reader.next_record().await.unwrap_err(),
+            super::RpcRecordReadError::TooLarge
+        );
     }
 
     #[tokio::test]
