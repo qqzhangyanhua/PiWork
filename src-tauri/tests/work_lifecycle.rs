@@ -703,6 +703,14 @@ async fn event_is_persisted_before_it_is_published() {
         .unwrap();
     let event = published.recv().await.unwrap();
     assert_eq!(event.run_id, run.id);
+    let persisted = harness.repository.events_for_run(&run.id).await.unwrap();
+    assert!(event.event_id.is_some());
+    assert!(
+        persisted
+            .iter()
+            .any(|candidate| candidate.event_id == event.event_id),
+        "the Publisher receiver observed an event before its exact eventId was queryable"
+    );
 }
 
 #[tokio::test]

@@ -477,7 +477,7 @@ describe("projectActivity", () => {
     expect(events.map(({ sequence }) => sequence)).toEqual([2, 1]);
   });
 
-  it("matches incremental projection for representative events", () => {
+  it("reconstructs persisted events exactly like same-order live increments", () => {
     const events = [
       event(1, { type: "assistantDelta", text: "A" }),
       event(2, { type: "assistantDelta", text: "B" }),
@@ -507,8 +507,31 @@ describe("projectActivity", () => {
       processActivityEvent,
       createEmptyActivityProjection(),
     ).items;
+    const reconstructed = projectActivity(events);
 
-    expect(projectActivity(events)).toEqual(incremental);
+    expect(reconstructed).toEqual(incremental);
+    expect(reconstructed.filter((item) => item.type === "tool")).toMatchObject([
+      {
+        id: "tool:run-1:t1",
+        workId: "work-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        sessionId: "session-1",
+        status: "completed",
+        result: "done",
+      },
+    ]);
+    expect(reconstructed.filter((item) => item.type === "raw")).toMatchObject([
+      {
+        id: "raw:event-7",
+        workId: "work-1",
+        runId: "run-1",
+        turnId: "turn-1",
+        sessionId: "session-1",
+        renderClass: "raw-rail",
+        kind: "turn_end",
+      },
+    ]);
   });
 
   it("makes projection storage mutable once for a batch", () => {
