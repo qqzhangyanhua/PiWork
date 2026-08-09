@@ -638,7 +638,7 @@ describe("WorkSurface", () => {
     expect(composer).toHaveTextContent("开始");
   });
 
-  it("为六类事件提供独立的可读渲染", async () => {
+  it("为投影后的高信号事件提供独立的可读渲染", async () => {
     const client = createMockTauriClient();
     client.seed(seededDetail("running"));
     render(<WorkSurface client={client} />);
@@ -678,7 +678,7 @@ describe("WorkSurface", () => {
     await userEvent.setup().click(
       await screen.findByRole("button", { name: "展开执行详情" }),
     );
-    expect(screen.getByText("开始处理")).toBeInTheDocument();
+    expect(screen.queryByText("开始处理")).not.toBeInTheDocument();
     expect(screen.getByText("正在分析收入数据")).toBeInTheDocument();
     expect(screen.getByText("读取 revenue.csv")).toBeInTheDocument();
     expect(screen.getByText("读取 120 行")).toBeInTheDocument();

@@ -74,6 +74,51 @@ describe("WorkTimeline", () => {
     ).toBe("STRONG");
   });
 
+  it("projects each Run into one assistant message and one consolidated activity feed", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, { type: "assistantDelta", text: "正在**检查" }),
+          event(3, {
+            type: "toolStarted",
+            toolCallId: "tool-1",
+            toolName: "read_file",
+            inputSummary: '{"path":"src/app.tsx"}',
+          }),
+          event(4, {
+            type: "toolProgress",
+            toolCallId: "tool-1",
+            toolName: "read_file",
+            outputSummary: "读取一半",
+          }),
+          event(5, {
+            type: "toolFinished",
+            toolCallId: "tool-1",
+            toolName: "read_file",
+            outputSummary: "读取完成",
+            success: true,
+          }),
+          event(6, { type: "assistantDelta", text: "完成**" }),
+          event(7, {
+            type: "rawEngineEvent",
+            kind: "queue_update",
+            payloadJson: '{"size":1}',
+          }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".timeline-event--assistant")).toHaveLength(1);
+    expect(screen.getByText("检查完成").tagName).toBe("STRONG");
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+    expect(container.querySelectorAll(".activity-feed__tool")).toHaveLength(1);
+    expect(screen.getAllByText("src/app.tsx")).toHaveLength(1);
+    expect(screen.getByText("读取完成")).toBeVisible();
+    expect(screen.queryByText("queue_update")).not.toBeInTheDocument();
+  });
+
   it("separates process details from delivery without exposing Run containers", () => {
     const { container } = render(
       <WorkTimeline

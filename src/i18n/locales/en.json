@@ -286,6 +286,37 @@
     "idle": "Idle", "completed": "Completed", "failed": "Failed", "stopped": "Stopped",
     "interrupted": "Interrupted", "archived": "Archived"
   },
+  "activity": {
+    "label": "Activity ledger",
+    "expandThought": "Show reasoning",
+    "collapseThought": "Hide reasoning",
+    "expandPlan": "Show plan",
+    "collapsePlan": "Hide plan",
+    "permissionRequired": "Permission required",
+    "permissionResolved": "Permission result",
+    "permissionOutcomes": {
+      "allowed_once": "Allowed once",
+      "allowed_for_run": "Allowed for this run",
+      "denied": "Denied",
+      "cancelled": "Cancelled"
+    },
+    "toolPending": "Waiting to run",
+    "toolRunning": "Running",
+    "toolCompleted": "Completed",
+    "toolFailed": "Failed",
+    "toolBurst": "{{action}} {{count}} items",
+    "actions": {
+      "read": "Read",
+      "write": "Changed",
+      "execute": "Ran",
+      "invoke": "Called"
+    },
+    "lifecycle": {
+      "waiting": "Waiting to continue",
+      "sessionChanged": "Session changed",
+      "runFailed": "Run did not complete"
+    }
+  },
   "timeline": {
     "label": "Conversation timeline",
     "emptyTitle": "Ready to start this conversation",

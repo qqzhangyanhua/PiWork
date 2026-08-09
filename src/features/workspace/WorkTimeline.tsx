@@ -1,4 +1,4 @@
-import { ArrowDown, Check, CircleAlert, CircleCheck, LoaderCircle, Wrench } from "lucide-react";
+import { ArrowDown, CircleAlert, CircleCheck } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import { useTranslation } from "react-i18next";
@@ -7,6 +7,9 @@ import remarkGfm from "remark-gfm";
 import { appErrorMessageKey, appErrorMessageValues } from "../../domain/appError";
 import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../../domain/work";
 import type { MessageSummary, ResourceSummary, WorkEventEnvelope, WorkSummary } from "../../bindings";
+import { ActivityFeed } from "../activity/ActivityFeed";
+import { projectActivity } from "../activity/activityProjector";
+import type { ActivityItem } from "../activity/activityTypes";
 import { AttachmentChips } from "./AttachmentChips";
 import { ExecutionProgressCard } from "./ExecutionProgressCard";
 
@@ -63,25 +66,6 @@ const presentableCompletionSummary = (summary: string) => {
   return /^Pi completed this Run with \d+ tool calls?$/iu.test(value) ? "" : value;
 };
 
-function ActivityRow({ event }: { event: WorkEventEnvelope }) {
-  const { t } = useTranslation();
-  const payload = event.payload;
-  if (payload.type === "runStarted") {
-    return <div className="agent-activity__row agent-activity__row--muted"><LoaderCircle aria-hidden="true" /><span>{t("timeline.runStarted")}</span><small>{payload.modelLabel}</small></div>;
-  }
-  if (payload.type === "toolStarted") {
-    return <div className="agent-activity__row"><Wrench aria-hidden="true" /><span><strong>{payload.toolName}</strong><small>{payload.inputSummary}</small></span></div>;
-  }
-  if (payload.type === "toolFinished") {
-    return <div className={`agent-activity__row agent-activity__row--${payload.success ? "success" : "failure"}`}>
-      {payload.success ? <Check aria-hidden="true" /> : <CircleAlert aria-hidden="true" />}
-      <span><strong>{payload.toolName}</strong><small>{payload.outputSummary}</small></span>
-      <em>{t(payload.success ? "timeline.succeeded" : "timeline.failed")}</em>
-    </div>;
-  }
-  return null;
-}
-
 function AssistantMessage({ text }: { text: string }) {
   return (
     <article className="timeline-event--assistant">
@@ -106,12 +90,15 @@ function ConversationSegment({
     (item): item is MessageSummary => !isWorkEventTimelineItem(item),
   );
   const events = group.items.filter(isWorkEventTimelineItem);
-  const assistantText = events
-    .flatMap(({ payload }) => payload.type === "assistantDelta" ? [payload.text] : [])
+  const projected = projectActivity(events);
+  const assistantText = projected
+    .filter(
+      (item): item is Extract<ActivityItem, { type: "message" }> =>
+        item.type === "message",
+    )
+    .map((item) => item.text)
     .join("");
-  const activity = events.filter(({ payload }) =>
-    payload.type === "runStarted" || payload.type === "toolStarted" || payload.type === "toolFinished",
-  );
+  const activityItems = projected.filter((item) => item.type !== "message");
   const completion = events.find(
     (event): event is WorkEventEnvelope & { payload: Extract<WorkEventEnvelope["payload"], { type: "runCompleted" }> } =>
       event.payload.type === "runCompleted",
@@ -151,16 +138,9 @@ function ConversationSegment({
           />
         </article>
       ))}
-      {(activity.length > 0 || completion || failure) && (
+      {(activityItems.length > 0 || completion || failure) && (
         <ExecutionProgressCard events={events}>
-          {activity.length > 0
-            ? activity.map((event) => (
-                <ActivityRow
-                  event={event}
-                  key={`${event.runId}:${event.sequence}`}
-                />
-              ))
-            : undefined}
+          <ActivityFeed items={activityItems} />
         </ExecutionProgressCard>
       )}
       {assistantText && <AssistantMessage text={assistantText} />}

@@ -286,6 +286,37 @@
     "idle": "空闲", "completed": "已完成", "failed": "失败", "stopped": "已停止",
     "interrupted": "已中断", "archived": "已归档"
   },
+  "activity": {
+    "label": "活动记录",
+    "expandThought": "展开思考",
+    "collapseThought": "收起思考",
+    "expandPlan": "展开计划",
+    "collapsePlan": "收起计划",
+    "permissionRequired": "需要权限",
+    "permissionResolved": "权限结果",
+    "permissionOutcomes": {
+      "allowed_once": "本次允许",
+      "allowed_for_run": "本次执行期间允许",
+      "denied": "已拒绝",
+      "cancelled": "已取消"
+    },
+    "toolPending": "等待执行",
+    "toolRunning": "正在执行",
+    "toolCompleted": "已完成",
+    "toolFailed": "失败",
+    "toolBurst": "{{action}}了 {{count}} 项",
+    "actions": {
+      "read": "读取",
+      "write": "修改",
+      "execute": "执行",
+      "invoke": "调用"
+    },
+    "lifecycle": {
+      "waiting": "等待继续",
+      "sessionChanged": "会话已切换",
+      "runFailed": "执行未完成"
+    }
+  },
   "timeline": {
     "label": "对话时间线",
     "emptyTitle": "准备开始这个对话",
