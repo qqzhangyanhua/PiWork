@@ -1650,14 +1650,14 @@
 .raw-activity-event > summary > svg { color: var(--pw-text-tertiary); }
 .raw-activity-event[open] > summary > svg { transform: rotate(90deg); }
 .raw-activity-event > summary strong { min-width: 0; overflow: hidden; color: var(--pw-text-primary); font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-.raw-activity-event > summary time { min-width: 0; overflow: hidden; color: var(--pw-text-tertiary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.raw-activity-event__sequence { color: var(--pw-text-tertiary); }
+.raw-activity-event > summary time { min-width: 0; overflow: hidden; color: var(--pw-text-secondary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.raw-activity-event__sequence { color: var(--pw-text-secondary); }
 .raw-activity-event__body { display: grid; gap: 9px; padding: 0 10px 10px 31px; }
 .raw-activity-event__identity { display: grid; gap: 7px; }
 .raw-activity-event__legacy { justify-self: start; padding: 2px 6px; border: 1px solid var(--pw-border-default); border-radius: var(--pw-radius-round); background: var(--pw-surface-subtle); color: var(--pw-text-secondary); font-size: 10px; font-weight: 650; }
 .raw-activity-event__identity dl { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; }
 .raw-activity-event__identity dl > div { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr); gap: 4px; }
-.raw-activity-event__identity dt { color: var(--pw-text-tertiary); font-size: 10px; }
+.raw-activity-event__identity dt { color: var(--pw-text-secondary); font-size: 10px; }
 .raw-activity-event__identity dd { min-width: 0; margin: 0; color: var(--pw-text-secondary); font-size: 10px; overflow-wrap: anywhere; }
 .raw-activity-event pre { max-height: 320px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--pw-border-subtle); border-radius: var(--pw-radius-sm); background: var(--pw-surface-code); color: var(--pw-text-secondary); font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; tab-size: 2; white-space: pre-wrap; word-break: break-word; }
 .inspector-scrim { display: none; }

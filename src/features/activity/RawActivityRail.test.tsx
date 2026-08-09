@@ -1,9 +1,44 @@
 import { render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+// @ts-expect-error Vitest runs this visual contract in Node; the app omits global Node typings.
+import { readFileSync } from "node:fs";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkEventEnvelope, WorkEventPayload } from "../../bindings";
 import { i18n } from "../../i18n";
 import { RawActivityRail } from "./RawActivityRail";
+
+const workspaceStyles = readFileSync("src/styles/workspace.css", "utf8");
+const tokenStyles = readFileSync("src/styles/tokens.css", "utf8");
+
+const tokenHex = (source: string, token: string): string => {
+  const match = source.match(new RegExp(`${token}:\\s*(#[0-9a-f]{6})`, "iu"));
+  if (!match) throw new Error(`Missing color token ${token}`);
+  return match[1]!;
+};
+
+const relativeLuminance = (hex: string): number => {
+  const channel = (start: number): number =>
+    Number.parseInt(hex.slice(start, start + 2), 16) / 255;
+  const [red, green, blue] = [channel(1), channel(3), channel(5)].map((value) =>
+    value <= 0.04045
+      ? value / 12.92
+      : ((value + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+};
+
+const contrastRatio = (foreground: string, background: string): number => {
+  const lighter = Math.max(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  const darker = Math.min(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+};
 
 const event = (
   sequence: number,
@@ -28,7 +63,8 @@ describe("RawActivityRail", () => {
     await i18n.changeLanguage("zh-CN");
   });
 
-  it("renders every journal event in tuple order and formats raw JSON", () => {
+  it("renders every journal event in tuple order and formats raw JSON", async () => {
+    const user = userEvent.setup();
     render(
       <RawActivityRail
         events={[
@@ -45,11 +81,13 @@ describe("RawActivityRail", () => {
     const rows = screen.getAllByTestId("raw-activity-event");
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveTextContent("assistantDelta");
+    await user.click(rows[1]!.querySelector("summary")!);
     expect(rows[1]).toHaveTextContent("queue_update");
     expect(within(rows[1]!).getByText(/"size": 1/u)).toBeInTheDocument();
   });
 
-  it("marks identity-poor v1 events as legacy without inventing identifiers", () => {
+  it("marks v1 events with database event ids as legacy without inventing identifiers", async () => {
+    const user = userEvent.setup();
     render(
       <RawActivityRail
         events={[
@@ -68,13 +106,31 @@ describe("RawActivityRail", () => {
     );
 
     const row = screen.getByTestId("raw-activity-event");
+    await user.click(row.querySelector("summary")!);
     expect(within(row).getByText("旧版事件")).toBeInTheDocument();
     expect(row).not.toHaveTextContent("session-unknown");
     expect(row).not.toHaveTextContent("turn-unknown");
     expect(row).not.toHaveTextContent("correlation-unknown");
   });
 
-  it("renders malformed raw payload text safely", () => {
+  it("does not mark a v2 event as legacy when one optional identity is absent", async () => {
+    const user = userEvent.setup();
+    render(
+      <RawActivityRail
+        events={[
+          event(1, { type: "assistantDelta", text: "current" }, {
+            sessionId: undefined,
+          }),
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByText("#1").closest("summary")!);
+    expect(screen.queryByText("旧版事件")).not.toBeInTheDocument();
+  });
+
+  it("renders malformed raw payload text safely", async () => {
+    const user = userEvent.setup();
     const malformed = '<img src=x onerror="alert(1)">';
     const { container } = render(
       <RawActivityRail
@@ -88,13 +144,15 @@ describe("RawActivityRail", () => {
       />,
     );
 
+    await user.click(container.querySelector("summary")!);
     expect(container.querySelector("pre")?.textContent).toContain(
       JSON.stringify(malformed),
     );
     expect(container.querySelector("img")).toBeNull();
   });
 
-  it("sorts multiple runs by occurredAt, runId, sequence, and eventId", () => {
+  it("sorts multiple runs by occurredAt, runId, sequence, and eventId", async () => {
+    const user = userEvent.setup();
     const { container } = render(
       <RawActivityRail
         events={[
@@ -125,11 +183,151 @@ describe("RawActivityRail", () => {
     const rows = Array.from(
       container.querySelectorAll<HTMLElement>("[data-testid='raw-activity-event']"),
     );
+    for (const row of rows) await user.click(row.querySelector("summary")!);
     expect(rows.map((row) => row.textContent)).toEqual([
       expect.stringContaining("earliest"),
       expect.stringContaining("run-a-a"),
       expect.stringContaining("run-a-z"),
       expect.stringContaining("run-b"),
     ]);
+  });
+
+  it("defers raw payload materialization and reuses an expanded row", async () => {
+    const user = userEvent.setup();
+    const journal = [
+      event(1, {
+        type: "rawEngineEvent",
+        kind: "first",
+        payloadJson: '{"first":1}',
+      }),
+      event(2, {
+        type: "rawEngineEvent",
+        kind: "second",
+        payloadJson: '{"second":2}',
+      }),
+    ];
+    const parse = vi.spyOn(JSON, "parse");
+    const { container, rerender } = render(<RawActivityRail events={journal} />);
+
+    expect(parse).not.toHaveBeenCalled();
+    expect(container.querySelectorAll(".raw-activity-event pre")).toHaveLength(0);
+
+    const summaries = Array.from(container.querySelectorAll("summary"));
+    await user.click(summaries[1]!);
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledWith('{"second":2}');
+    expect(container.querySelectorAll(".raw-activity-event pre")).toHaveLength(1);
+
+    rerender(<RawActivityRail events={journal} />);
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an expanded legacy row open when an older event is prepended", async () => {
+    const user = userEvent.setup();
+    const legacy = event(2, { type: "assistantDelta", text: "kept-open" }, {
+      eventId: undefined,
+      version: 1,
+    });
+    const { rerender } = render(<RawActivityRail events={[legacy]} />);
+
+    await user.click(screen.getByText("#2").closest("summary")!);
+    expect(screen.getByText("#2").closest("details")).toHaveAttribute("open");
+
+    rerender(
+      <RawActivityRail
+        events={[
+          event(1, { type: "assistantDelta", text: "older" }),
+          legacy,
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("#2").closest("details")).toHaveAttribute("open");
+  });
+
+  it("does not collide when separate runs reuse an event id", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    render(
+      <RawActivityRail
+        events={[
+          event(1, { type: "assistantDelta", text: "run a" }, {
+            eventId: "shared-event",
+            runId: "run-a",
+          }),
+          event(1, { type: "assistantDelta", text: "run b" }, {
+            eventId: "shared-event",
+            runId: "run-b",
+          }),
+        ]}
+      />,
+    );
+
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain(
+      "Encountered two children with the same key",
+    );
+    consoleError.mockRestore();
+  });
+
+  it("does not mutate its event input while sorting", () => {
+    const journal = [
+      event(2, { type: "assistantDelta", text: "second" }),
+      event(1, { type: "assistantDelta", text: "first" }),
+    ];
+
+    render(<RawActivityRail events={journal} />);
+
+    expect(journal.map(({ sequence }) => sequence)).toEqual([2, 1]);
+  });
+
+  it("shows only metadata fields that exist", async () => {
+    const user = userEvent.setup();
+    render(
+      <RawActivityRail
+        events={[
+          event(1, { type: "assistantDelta", text: "metadata" }, {
+            agentId: "agent-1",
+            assignmentId: undefined,
+            causationId: "cause-1",
+            sessionId: undefined,
+          }),
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByText("#1").closest("summary")!);
+    expect(screen.getAllByRole("term").map((term) => term.textContent)).toEqual([
+      "event",
+      "work",
+      "run",
+      "turn",
+      "agent",
+      "causation",
+      "correlation",
+    ]);
+    expect(screen.getByText("agent-1")).toBeInTheDocument();
+    expect(screen.getByText("cause-1")).toBeInTheDocument();
+    expect(screen.queryByText("旧版事件")).not.toBeInTheDocument();
+  });
+
+  it("renders the localized empty state", () => {
+    render(<RawActivityRail events={[]} />);
+
+    expect(screen.getByText("还没有活动事件。")).toBeVisible();
+    expect(screen.queryByTestId("raw-activity-event")).not.toBeInTheDocument();
+  });
+
+  it("keeps compact raw ledger labels at AA contrast in the light theme", () => {
+    for (const rule of [
+      /\.raw-activity-event > summary time\s*\{[^}]*color: var\(--pw-text-secondary\)/su,
+      /\.raw-activity-event__sequence\s*\{[^}]*color: var\(--pw-text-secondary\)/su,
+      /\.raw-activity-event__identity dt\s*\{[^}]*color: var\(--pw-text-secondary\)/su,
+    ]) {
+      expect(workspaceStyles).toMatch(rule);
+    }
+
+    const lightTokens = tokenStyles.slice(0, tokenStyles.indexOf("@media"));
+    const copy = tokenHex(lightTokens, "--pw-text-secondary");
+    const panel = tokenHex(lightTokens, "--pw-surface-panel");
+    expect(contrastRatio(copy, panel)).toBeGreaterThanOrEqual(4.5);
   });
 });

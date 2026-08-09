@@ -408,19 +408,12 @@
   },
   "inspector": {
     "label": "对话检查器", "open": "打开检查器", "close": "关闭检查器",
-    "title": "检查器", "currentRun": "最新结果", "allWork": "全部记录", "resize": "调整检查器宽度", "resizeHint": "拖拽调整宽度，双击恢复默认",
+    "title": "检查器", "resize": "调整检查器宽度", "resizeHint": "拖拽调整宽度，双击恢复默认",
     "delivery": "交付", "attachments": "附件", "artifacts": "产物", "validation": "验证", "logs": "活动原始记录",
     "noValidation": "完成验证后，结果会显示在这里。当前没有验证记录。",
     "noDeliveries": "生成文件后，产物会显示在这里。先在下方输入一条指令。",
     "noArtifacts": "最新一次执行没有产物。继续对话并生成文件后，这里会列出可查看的产物。",
-    "noAttachments": "上传的持久附件会显示在这里。当前没有附件。",
-    "noLogs": "开始处理后，执行事件会显示在这里。",
-    "logEvents": {
-      "runStarted": "开始处理", "assistantDelta": "Agent 输出", "toolStarted": "工具开始",
-      "toolFinished": "工具完成", "runCompleted": "处理完成", "runFailed": "执行未完成"
-    },
-    "logOutputSummary": "回复已显示在时间线中",
-    "runEvents": "{{count}} 条执行事件", "toolEvents": "{{count}} 次工具调用"
+    "noAttachments": "上传的持久附件会显示在这里。当前没有附件。"
   },
   "rawActivity": {
     "label": "活动原始记录",

@@ -408,19 +408,12 @@
   },
   "inspector": {
     "label": "Conversation inspector", "open": "Open inspector", "close": "Close inspector",
-    "title": "Inspector", "currentRun": "Latest result", "allWork": "All activity", "resize": "Resize inspector", "resizeHint": "Drag to resize; double-click to reset",
+    "title": "Inspector", "resize": "Resize inspector", "resizeHint": "Drag to resize; double-click to reset",
     "delivery": "Delivery", "attachments": "Attachments", "artifacts": "Artifacts", "validation": "Validation", "logs": "Raw activity",
     "noValidation": "Validation results will appear here when checks finish. There are no records yet.",
     "noDeliveries": "Artifacts will appear here after files are created. Start by entering an instruction below.",
     "noArtifacts": "The latest execution has no artifacts. Continue the conversation and create a file to make it available here.",
-    "noAttachments": "Durable uploads will appear here. This conversation has no attachments yet.",
-    "noLogs": "Execution events will appear here after Pi starts working.",
-    "logEvents": {
-      "runStarted": "Started working", "assistantDelta": "Agent output", "toolStarted": "Tool started",
-      "toolFinished": "Tool finished", "runCompleted": "Task completed", "runFailed": "The task did not finish"
-    },
-    "logOutputSummary": "The response is available in the timeline",
-    "runEvents": "{{count}} execution events", "toolEvents": "{{count}} tool calls"
+    "noAttachments": "Durable uploads will appear here. This conversation has no attachments yet."
   },
   "rawActivity": {
     "label": "Raw activity journal",

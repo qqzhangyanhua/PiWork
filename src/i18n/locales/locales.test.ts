@@ -19,4 +19,21 @@ describe("workspace locale resources", () => {
     expect(englishKeys).toContain("composer.continue");
     expect(chineseKeys).toEqual(englishKeys);
   });
+
+  it("does not retain locale keys from the retired summarized log renderer", () => {
+    const retiredKeys = [
+      "currentRun",
+      "allWork",
+      "noLogs",
+      "logEvents",
+      "logOutputSummary",
+      "runEvents",
+      "toolEvents",
+    ];
+
+    for (const key of retiredKeys) {
+      expect(en.inspector).not.toHaveProperty(key);
+      expect(zhCN.inspector).not.toHaveProperty(key);
+    }
+  });
 });

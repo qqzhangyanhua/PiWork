@@ -1,7 +1,7 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkEventEnvelope, WorkEventPayload } from "../../bindings";
 import { i18n } from "../../i18n";
@@ -35,8 +35,8 @@ const events = [
   }),
 ];
 
-function Harness() {
-  const [active, setActive] = useState<InspectorTab>("delivery");
+function Harness({ initialActive = "delivery" }: { initialActive?: InspectorTab }) {
+  const [active, setActive] = useState<InspectorTab>(initialActive);
   return (
     <WorkInspector
       active={active}
@@ -58,6 +58,10 @@ function Harness() {
 }
 
 describe("WorkInspector", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   beforeEach(async () => {
     await i18n.changeLanguage("zh-CN");
   });
@@ -75,6 +79,36 @@ describe("WorkInspector", () => {
     expect(screen.getByText(/engine_faulted/u)).toBeInTheDocument();
   });
 
+  it("reuses derived journal events when only the inspector width changes", () => {
+    let runIdReads = 0;
+    const trackedEvent: WorkEventEnvelope = {
+      ...event(1, { type: "assistantDelta", text: "tracked" }),
+      get runId() {
+        runIdReads += 1;
+        return "run-1";
+      },
+    };
+    const props = {
+      active: "logs" as const,
+      error: null,
+      onActiveChange: vi.fn(),
+      onClose: vi.fn(),
+      onResizeReset: vi.fn(),
+      onResizeStart: vi.fn(),
+      open: true,
+      resources: [],
+      timeline: [trackedEvent],
+      widthPercent: 36,
+    };
+    const { rerender } = render(<WorkInspector {...props} />);
+    const readsAfterInitialRender = runIdReads;
+
+    expect(readsAfterInitialRender).toBeGreaterThan(0);
+    rerender(<WorkInspector {...props} widthPercent={44} />);
+
+    expect(runIdReads).toBe(readsAfterInitialRender);
+  });
+
   it("keeps ArrowRight and ArrowLeft tab navigation after renaming logs", async () => {
     const user = userEvent.setup();
     render(<Harness />);
@@ -90,6 +124,48 @@ describe("WorkInspector", () => {
     await user.keyboard("{ArrowLeft}");
     expect(rawActivityTab).toHaveFocus();
     expect(rawActivityTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("traps modal focus across the active logs tab and native summaries", async () => {
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      matches: true,
+      media: "(max-width: 1150px)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })));
+    const user = userEvent.setup();
+    const { container } = render(
+      <>
+        <button type="button">Outside inspector</button>
+        <Harness initialActive="logs" />
+      </>,
+    );
+
+    const close = screen.getByRole("button", { name: "关闭检查器" });
+    await waitFor(() => expect(close).toHaveFocus());
+    const rawActivityTab = screen.getByRole("tab", { name: "活动原始记录" });
+    const inactiveTabs = screen
+      .getAllByRole("tab")
+      .filter((tab) => tab !== rawActivityTab);
+    const summaries = Array.from(container.querySelectorAll("summary"));
+    expect(summaries).toHaveLength(events.length);
+
+    rawActivityTab.focus();
+    await user.tab();
+    expect(summaries[0]).toHaveFocus();
+    for (const tab of inactiveTabs) expect(tab).not.toHaveFocus();
+
+    summaries.at(-1)?.focus();
+    await user.tab();
+    expect(close).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Outside inspector" })).not.toHaveFocus();
+
+    await user.tab({ shift: true });
+    expect(summaries.at(-1)).toHaveFocus();
   });
 
   it("labels the retained logs tab as Raw activity in English", async () => {

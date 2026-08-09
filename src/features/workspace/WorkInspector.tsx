@@ -1,5 +1,5 @@
 import { GripVertical, X } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { formatAppErrorDiagnostics } from "../../domain/appError";
@@ -9,6 +9,15 @@ import { RawActivityRail } from "../activity/RawActivityRail";
 import { AttachmentChips } from "./AttachmentChips";
 
 const tabs = ["delivery", "attachments", "validation", "logs"] as const;
+const tabbableSelector = [
+  'button:not([disabled]):not([tabindex="-1"])',
+  '[href]:not([tabindex="-1"])',
+  'input:not([disabled]):not([type="hidden"]):not([tabindex="-1"])',
+  'select:not([disabled]):not([tabindex="-1"])',
+  'textarea:not([disabled]):not([tabindex="-1"])',
+  'summary:not([tabindex="-1"])',
+  '[tabindex]:not([tabindex="-1"])',
+].join(", ");
 export type InspectorTab = (typeof tabs)[number];
 
 export function WorkInspector({
@@ -43,10 +52,16 @@ export function WorkInspector({
       ? window.matchMedia("(max-width: 1150px)").matches
       : false,
   );
-  const events = timeline.filter(isWorkEventTimelineItem);
-  const completions = events.filter(
-    (event): event is typeof event & { payload: Extract<typeof event.payload, { type: "runCompleted" }> } =>
-      event.payload.type === "runCompleted",
+  const events = useMemo(
+    () => timeline.filter(isWorkEventTimelineItem),
+    [timeline],
+  );
+  const completions = useMemo(
+    () => events.filter(
+      (event): event is typeof event & { payload: Extract<typeof event.payload, { type: "runCompleted" }> } =>
+        event.payload.type === "runCompleted",
+    ),
+    [events],
   );
   const hidden = !open;
   useEffect(() => {
@@ -121,19 +136,22 @@ export function WorkInspector({
         }
         if (event.key === "Tab" && open && modal) {
           const focusable = Array.from(inspectorRef.current?.querySelectorAll<HTMLElement>(
-            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          ) ?? []);
+            tabbableSelector,
+          ) ?? []).filter((element) =>
+            element.tabIndex >= 0 &&
+            !element.matches(":disabled") &&
+            !element.hidden &&
+            element.getAttribute("aria-hidden") !== "true",
+          );
           const first = focusable[0];
           const last = focusable.at(-1);
           if (!first || !last) return;
-          const active = document.activeElement;
-          if (event.shiftKey && (active === first || !inspectorRef.current?.contains(active))) {
-            event.preventDefault();
-            last.focus();
-          } else if (!event.shiftKey && (active === last || !inspectorRef.current?.contains(active))) {
-            event.preventDefault();
-            first.focus();
-          }
+          const activeIndex = focusable.indexOf(document.activeElement as HTMLElement);
+          const nextIndex = event.shiftKey
+            ? activeIndex <= 0 ? focusable.length - 1 : activeIndex - 1
+            : activeIndex < 0 || activeIndex === focusable.length - 1 ? 0 : activeIndex + 1;
+          event.preventDefault();
+          focusable[nextIndex]?.focus();
         }
       }}
     >
@@ -147,7 +165,7 @@ export function WorkInspector({
         onDoubleClick={onResizeReset}
         onPointerDown={onResizeStart}
         role="separator"
-        tabIndex={open ? 0 : -1}
+        tabIndex={open && !modal ? 0 : -1}
         title={t("inspector.resizeHint")}
       >
         <GripVertical aria-hidden="true" size={14} />
