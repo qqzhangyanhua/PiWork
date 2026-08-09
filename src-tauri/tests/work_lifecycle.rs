@@ -33,7 +33,10 @@ struct StartCountingEngine {
     start_count: std::sync::atomic::AtomicUsize,
 }
 
-struct PreReturnEventEngine {
+struct PostReturnOverflowEngine {
+    started: Arc<tokio::sync::Semaphore>,
+    release_start: Arc<tokio::sync::Semaphore>,
+    overflowed: Arc<tokio::sync::Semaphore>,
     abort_calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -60,6 +63,14 @@ impl EngineAdapter for PromptRecordingEngine {
         })
         .await
         .map_err(|_| EngineError::ChannelClosed)?;
+        sink.send(EngineEvent::RunCompleted {
+            summary: "prompt recorded".into(),
+            artifacts: Vec::new(),
+            validation: Vec::new(),
+            limitations: Vec::new(),
+        })
+        .await
+        .map_err(|_| EngineError::ChannelClosed)?;
         Ok(EngineSessionRef {
             engine_kind: self.kind().into(),
             session_id: "recording-session".into(),
@@ -83,11 +94,30 @@ impl StartCountingEngine {
     }
 }
 
-impl PreReturnEventEngine {
+impl PostReturnOverflowEngine {
     fn new() -> Self {
         Self {
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release_start: Arc::new(tokio::sync::Semaphore::new(0)),
+            overflowed: Arc::new(tokio::sync::Semaphore::new(0)),
             abort_calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    async fn wait_started(&self) {
+        self.started.acquire().await.unwrap().forget();
+    }
+
+    fn release_start(&self) {
+        self.release_start.add_permits(1);
+    }
+
+    async fn wait_overflowed(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), self.overflowed.acquire())
+            .await
+            .expect("engine did not overflow the startup event buffer")
+            .unwrap()
+            .forget();
     }
 
     fn abort_calls(&self) -> usize {
@@ -118,9 +148,9 @@ impl EngineAdapter for StartCountingEngine {
 }
 
 #[async_trait]
-impl EngineAdapter for PreReturnEventEngine {
+impl EngineAdapter for PostReturnOverflowEngine {
     fn kind(&self) -> &'static str {
-        "pre-return-event"
+        "post-return-overflow"
     }
 
     async fn start(
@@ -129,12 +159,31 @@ impl EngineAdapter for PreReturnEventEngine {
         _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
-        sink.send(EngineEvent::RunStarted {
-            model_label: "Pre-return model".into(),
+        self.started.add_permits(1);
+        self.release_start
+            .acquire()
+            .await
+            .map_err(|_| EngineError::Start("start gate closed".into()))?
+            .forget();
+        let overflowed = Arc::clone(&self.overflowed);
+        tokio::spawn(async move {
+            for index in 0..=1_000 {
+                if sink
+                    .send(EngineEvent::AssistantDelta {
+                        text: format!("startup-chunk-{index}"),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            overflowed.add_permits(1);
+        });
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: "overflow-session".into(),
         })
-        .await
-        .map_err(|_| EngineError::ChannelClosed)?;
-        std::future::pending().await
     }
 
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
@@ -867,20 +916,33 @@ async fn supervisor_times_out_and_terminates_an_engine_start_that_never_returns(
 }
 
 #[tokio::test]
-async fn consumer_failure_before_start_returns_keeps_the_authoritative_prompt() {
+async fn startup_buffer_overflow_before_readiness_returns_error_and_keeps_prompt() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Fail consumer during startup").await;
-    let engine = Arc::new(PreReturnEventEngine::new());
-    let supervisor = EngineSupervisor::new(
+    let engine = Arc::new(PostReturnOverflowEngine::new());
+    let (publisher, _published) = ChannelEventPublisher::channel(1);
+    let supervisor = Arc::new(EngineSupervisor::with_timeouts(
         harness.repository.clone(),
         engine.clone(),
-        Arc::new(PanickingPublisher::new()),
-        "Pre-return model",
-    );
+        Arc::new(publisher),
+        "Overflow model",
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(100),
+    ));
+    let start_supervisor = Arc::clone(&supervisor);
+    let work_id = work.summary.id.clone();
+    let start =
+        tokio::spawn(async move { start_supervisor.start(&work_id, "Consumer prompt").await });
+    engine.wait_started().await;
+    let attachment_blocker = harness.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    engine.release_start();
+    engine.wait_overflowed().await;
+    attachment_blocker.commit().await.unwrap();
 
-    let error = supervisor
-        .start(&work.summary.id, "Consumer prompt")
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), start)
         .await
+        .expect("startup readiness race did not resolve promptly")
+        .unwrap()
         .unwrap_err();
     let detail = harness
         .repository
@@ -895,6 +957,17 @@ async fn consumer_failure_before_start_returns_keeps_the_authoritative_prompt() 
     );
     assert_eq!(engine.abort_calls(), 1);
     assert_eq!(detail.summary.status, WorkStatus::Failed);
+    assert_eq!(detail.runs[0].status, RunStatus::Failed);
+    assert_eq!(detail.events.len(), 1);
+    assert!(matches!(
+        detail.events[0].payload,
+        WorkEventPayload::RunFailed { .. }
+    ));
+    assert_eq!(
+        detail.events[0].session_id.as_deref(),
+        Some("overflow-session")
+    );
+    assert_eq!(detail.events[0].causation_id, None);
     assert_authoritative_prompt(&detail, "Consumer prompt", RunStatus::Failed);
 }
 
@@ -1140,7 +1213,21 @@ async fn abort_panic_becomes_unconfirmed_without_stranding_waiters() {
     assert_eq!(engine.abort_calls(), 1);
 }
 
-struct EarlyClosingEngine;
+#[derive(Default)]
+struct EarlyClosingEngine {
+    sink: tokio::sync::Mutex<Option<mpsc::Sender<EngineEvent>>>,
+}
+
+impl EarlyClosingEngine {
+    async fn close_after_started_event(&self) {
+        let sink = self.sink.lock().await.take().unwrap();
+        sink.send(EngineEvent::RunStarted {
+            model_label: "early-closing".into(),
+        })
+        .await
+        .unwrap();
+    }
+}
 
 #[async_trait]
 impl EngineAdapter for EarlyClosingEngine {
@@ -1154,13 +1241,7 @@ impl EngineAdapter for EarlyClosingEngine {
         _input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
-        tokio::spawn(async move {
-            let _ = sink
-                .send(EngineEvent::RunStarted {
-                    model_label: "early-closing".into(),
-                })
-                .await;
-        });
+        *self.sink.lock().await = Some(sink);
         Ok(EngineSessionRef {
             engine_kind: self.kind().into(),
             session_id: "early-close-session".into(),
@@ -1176,10 +1257,11 @@ impl EngineAdapter for EarlyClosingEngine {
 async fn channel_close_before_terminal_is_journaled_as_a_failed_run() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Close early").await;
+    let engine = Arc::new(EarlyClosingEngine::default());
     let (publisher, mut published) = ChannelEventPublisher::channel(16);
     let supervisor = EngineSupervisor::new(
         harness.repository.clone(),
-        Arc::new(EarlyClosingEngine),
+        engine.clone(),
         Arc::new(publisher),
         "Early close model",
     );
@@ -1188,6 +1270,7 @@ async fn channel_close_before_terminal_is_journaled_as_a_failed_run() {
         .start(&work.summary.id, "Build it")
         .await
         .unwrap();
+    engine.close_after_started_event().await;
     let first = published.recv().await.unwrap();
     let failed = tokio::time::timeout(std::time::Duration::from_secs(1), published.recv())
         .await
@@ -1211,6 +1294,7 @@ async fn channel_close_before_terminal_is_journaled_as_a_failed_run() {
         .start(&work.summary.id, "Retry after natural stop")
         .await
         .expect("a naturally stopped engine left the active slot faulted");
+    engine.close_after_started_event().await;
     receive_complete_run(&mut published).await;
 }
 
@@ -1238,16 +1322,16 @@ async fn fake_run_completes_with_the_stable_result_payload_and_terminal_state() 
         .unwrap()
         .unwrap();
 
-    assert_eq!(events.len(), 6);
+    assert_eq!(events.len(), 8);
     assert_eq!(
         events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5, 6]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
     assert!(matches!(
-        &events[5].payload,
+        &events[7].payload,
         WorkEventPayload::RunCompleted {
             summary,
             artifacts,
@@ -1581,7 +1665,7 @@ async fn publisher_failure_does_not_stop_the_persisted_event_stream() {
     let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let events = harness.repository.events_for_run(&run.id).await.unwrap();
-            if events.len() == 6 {
+            if events.len() == 8 {
                 return events;
             }
             tokio::task::yield_now().await;
@@ -1596,7 +1680,7 @@ async fn publisher_failure_does_not_stop_the_persisted_event_stream() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(events.last().unwrap().sequence, 6);
+    assert_eq!(events.last().unwrap().sequence, 8);
     assert_eq!(detail.summary.status, WorkStatus::Completed);
     assert_eq!(detail.runs[0].status, RunStatus::Completed);
 }

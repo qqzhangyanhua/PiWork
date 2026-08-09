@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 use tokio::{
@@ -21,6 +26,7 @@ use super::publisher::EventPublisher;
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_EVENT_BUFFER_CAP: usize = 1000;
 
 type ActiveRuns = Arc<Mutex<HashMap<String, ActiveEntry>>>;
 
@@ -43,13 +49,14 @@ enum ActiveState {
     Faulted { reason: String },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum StartSignal {
     Pending,
-    Ready,
+    Ready { session_id: String },
     Failed,
 }
 
+#[derive(Debug)]
 enum ConsumerOutcome {
     Terminal,
     Stopped,
@@ -393,6 +400,7 @@ async fn run_lifecycle(
     set_termination(&active, &work_id, generation, Arc::clone(&termination)).await;
     let (event_sender, event_receiver) = mpsc::channel(16);
     let (signal_sender, signal_receiver) = watch::channel(StartSignal::Pending);
+    let (readiness_sender, readiness_receiver) = oneshot::channel();
     let mut consumer = tokio::spawn(consume_events(
         repository.clone(),
         Arc::clone(&publisher),
@@ -402,6 +410,7 @@ async fn run_lifecycle(
         run.id.clone(),
         event_receiver,
         signal_receiver,
+        readiness_sender,
     ));
 
     let start_phase = {
@@ -424,7 +433,7 @@ async fn run_lifecycle(
     let session = match start_phase {
         StartPhaseOutcome::Returned(Ok(session)) => session,
         StartPhaseOutcome::Returned(Err(_)) | StartPhaseOutcome::TimedOut => {
-            let _ = signal_sender.send(StartSignal::Failed);
+            signal_sender.send_replace(StartSignal::Failed);
             stop_consumer(&mut consumer, abort_timeout).await;
             let outcome = terminate_abnormally(
                 &termination,
@@ -452,7 +461,7 @@ async fn run_lifecycle(
         }
         StartPhaseOutcome::ConsumerFinished(result) => {
             let reason = consumer_failure_reason(result);
-            let _ = signal_sender.send(StartSignal::Failed);
+            signal_sender.send_replace(StartSignal::Failed);
             let outcome = terminate_abnormally(
                 &termination,
                 &repository,
@@ -480,7 +489,7 @@ async fn run_lifecycle(
     {
         Ok(attached) => attached,
         Err(_) => {
-            let _ = signal_sender.send(StartSignal::Failed);
+            signal_sender.send_replace(StartSignal::Failed);
             stop_consumer(&mut consumer, abort_timeout).await;
             let outcome = terminate_abnormally(
                 &termination,
@@ -502,8 +511,41 @@ async fn run_lifecycle(
             return;
         }
     };
+    let session_id = session.session_id.clone();
     set_running(&active, &work_id, generation, session).await;
-    let _ = signal_sender.send(StartSignal::Ready);
+    signal_sender.send_replace(StartSignal::Ready { session_id });
+    let consumer_before_readiness = tokio::select! {
+        biased;
+        result = &mut consumer => Some(result),
+        readiness = readiness_receiver => {
+            match readiness {
+                Ok(()) => None,
+                Err(_) => Some((&mut consumer).await),
+            }
+        }
+    };
+    if let Some(result) = consumer_before_readiness {
+        let reason = consumer_failure_reason(result);
+        signal_sender.send_replace(StartSignal::Failed);
+        let outcome = terminate_abnormally(
+            &termination,
+            &repository,
+            &publisher,
+            &active,
+            &work_id,
+            &run.id,
+            generation,
+            reason,
+        )
+        .await;
+        let response = if outcome == AbortOutcome::Confirmed {
+            AppError::engine_start_failed(&work_id)
+        } else {
+            AppError::engine_faulted(&work_id)
+        };
+        let _ = result_sender.send(Err(response));
+        return;
+    }
     let _ = result_sender.send(Ok(StartWorkOutput {
         run: attached,
         user_message,
@@ -551,60 +593,43 @@ async fn consume_events(
     run_id: String,
     mut receiver: mpsc::Receiver<EngineEvent>,
     mut start_signal: watch::Receiver<StartSignal>,
+    readiness_sender: oneshot::Sender<()>,
 ) -> ConsumerOutcome {
+    let (session_id, mut startup_events) =
+        match wait_for_engine_session(&mut receiver, &mut start_signal).await {
+            Ok(ready) => ready,
+            Err(outcome) => return outcome,
+        };
+    let _ = readiness_sender.send(());
     let mut sequence = 1_u32;
+    let mut previous_event_id = None;
     loop {
-        let current_start_signal = *start_signal.borrow();
-        let event = match current_start_signal {
-            StartSignal::Failed => return ConsumerOutcome::StartFailed,
-            StartSignal::Pending => {
-                tokio::select! {
-                    biased;
-                    changed = start_signal.changed() => {
-                        if changed.is_err() || *start_signal.borrow() == StartSignal::Failed {
-                            return ConsumerOutcome::StartFailed;
-                        }
-                        continue;
-                    }
-                    event = receiver.recv() => event,
-                }
-            }
-            StartSignal::Ready => receiver.recv().await,
+        let event = match startup_events.pop_front() {
+            Some(event) => Some(event),
+            None => receiver.recv().await,
         };
         let Some(event) = event else {
             if is_stopping(&active, &work_id, generation).await {
                 return ConsumerOutcome::Stopped;
             }
-            return match await_start_signal(&mut start_signal).await {
-                StartSignal::Ready => {
-                    ConsumerOutcome::Abnormal("Engine event stream closed before a terminal event")
-                }
-                StartSignal::Failed | StartSignal::Pending => ConsumerOutcome::StartFailed,
-            };
+            return ConsumerOutcome::Abnormal("Engine event stream closed before a terminal event");
         };
         if is_stopping(&active, &work_id, generation).await {
             return ConsumerOutcome::Stopped;
         }
         let terminal = event.is_terminal();
-        if terminal {
-            match await_start_signal_while_draining(&mut start_signal, &mut receiver).await {
-                StartSignal::Ready => {}
-                StartSignal::Failed | StartSignal::Pending => {
-                    return ConsumerOutcome::StartFailed;
-                }
-            }
-        }
+        let event_id = Uuid::new_v4().to_string();
         let envelope = WorkEventEnvelope {
-            version: 1,
-            event_id: Some(Uuid::new_v4().to_string()),
+            version: 2,
+            event_id: Some(event_id.clone()),
             work_id: work_id.clone(),
             run_id: run_id.clone(),
-            turn_id: None,
-            session_id: None,
+            turn_id: Some(run_id.clone()),
+            session_id: Some(session_id.clone()),
             agent_id: None,
             assignment_id: None,
-            causation_id: None,
-            correlation_id: None,
+            causation_id: previous_event_id.clone(),
+            correlation_id: Some(run_id.clone()),
             sequence,
             occurred_at: Utc::now(),
             payload: event.into(),
@@ -614,15 +639,9 @@ async fn consume_events(
             .await
             .is_err()
         {
-            if *start_signal.borrow() == StartSignal::Pending {
-                let signal =
-                    await_start_signal_while_draining(&mut start_signal, &mut receiver).await;
-                if signal != StartSignal::Ready {
-                    return ConsumerOutcome::StartFailed;
-                }
-            }
             return ConsumerOutcome::Abnormal("Engine event could not be journaled");
         }
+        previous_event_id = Some(event_id);
         if terminal {
             remove_active(&active, &work_id, generation).await;
             let _ = publisher.publish(envelope).await;
@@ -633,6 +652,57 @@ async fn consume_events(
             return ConsumerOutcome::Abnormal("Engine event sequence limit was reached");
         };
         sequence = next;
+    }
+}
+
+async fn wait_for_engine_session(
+    receiver: &mut mpsc::Receiver<EngineEvent>,
+    signal: &mut watch::Receiver<StartSignal>,
+) -> Result<(String, VecDeque<EngineEvent>), ConsumerOutcome> {
+    let mut buffered = VecDeque::new();
+    let mut receiver_closed = false;
+    loop {
+        match signal.borrow().clone() {
+            StartSignal::Pending => {}
+            StartSignal::Ready { session_id } => {
+                if receiver_closed && !buffered.back().is_some_and(EngineEvent::is_terminal) {
+                    return Err(ConsumerOutcome::Abnormal(
+                        "Engine event stream closed before a terminal event",
+                    ));
+                }
+                return Ok((session_id, buffered));
+            }
+            StartSignal::Failed => return Err(ConsumerOutcome::StartFailed),
+        }
+
+        if receiver_closed {
+            if signal.changed().await.is_err() {
+                return Err(ConsumerOutcome::StartFailed);
+            }
+            continue;
+        }
+
+        tokio::select! {
+            biased;
+            changed = signal.changed() => {
+                if changed.is_err() {
+                    return Err(ConsumerOutcome::StartFailed);
+                }
+            }
+            event = receiver.recv() => {
+                match event {
+                    Some(event) if buffered.len() < STARTUP_EVENT_BUFFER_CAP => {
+                        buffered.push_back(event);
+                    }
+                    Some(_) => {
+                        return Err(ConsumerOutcome::Abnormal(
+                            "Engine emitted too many events before session attachment",
+                        ));
+                    }
+                    None => receiver_closed = true,
+                }
+            }
+        }
     }
 }
 
@@ -650,42 +720,6 @@ fn consumer_failure_reason(result: Result<ConsumerOutcome, JoinError>) -> &'stat
         Ok(ConsumerOutcome::Stopped) => "Engine stopped before its session was attached",
         Ok(ConsumerOutcome::StartFailed) => "Engine startup failed",
         Err(_) => "Engine event consumer stopped unexpectedly",
-    }
-}
-
-async fn await_start_signal(signal: &mut watch::Receiver<StartSignal>) -> StartSignal {
-    loop {
-        let current = *signal.borrow();
-        if current != StartSignal::Pending {
-            return current;
-        }
-        if signal.changed().await.is_err() {
-            return StartSignal::Failed;
-        }
-    }
-}
-
-async fn await_start_signal_while_draining(
-    signal: &mut watch::Receiver<StartSignal>,
-    receiver: &mut mpsc::Receiver<EngineEvent>,
-) -> StartSignal {
-    loop {
-        let current = *signal.borrow();
-        if current != StartSignal::Pending {
-            return current;
-        }
-        tokio::select! {
-            changed = signal.changed() => {
-                if changed.is_err() {
-                    return StartSignal::Failed;
-                }
-            }
-            event = receiver.recv() => {
-                if event.is_none() {
-                    return await_start_signal(signal).await;
-                }
-            }
-        }
     }
 }
 
@@ -707,12 +741,12 @@ async fn terminate_abnormally(
     match (abort, finalized) {
         (AbortOutcome::Confirmed, Ok(envelope)) => {
             remove_active(active, work_id, generation).await;
-            let _ = publisher.publish(envelope).await;
+            publish_failure_without_panicking(publisher, envelope).await;
             AbortOutcome::Confirmed
         }
         (abort, Ok(envelope)) => {
             set_faulted(active, work_id, generation, reason).await;
-            let _ = publisher.publish(envelope).await;
+            publish_failure_without_panicking(publisher, envelope).await;
             abort
         }
         (_, Err(_)) => {
@@ -737,7 +771,7 @@ async fn finalize_without_abort(
     {
         Ok(envelope) => {
             remove_active(active, work_id, generation).await;
-            let _ = publisher.publish(envelope).await;
+            publish_failure_without_panicking(publisher, envelope).await;
             AbortOutcome::Confirmed
         }
         Err(_) => {
@@ -745,6 +779,14 @@ async fn finalize_without_abort(
             AbortOutcome::Unconfirmed
         }
     }
+}
+
+async fn publish_failure_without_panicking(
+    publisher: &Arc<dyn EventPublisher>,
+    envelope: WorkEventEnvelope,
+) {
+    let publisher = Arc::clone(publisher);
+    let _ = tokio::spawn(async move { publisher.publish(envelope).await }).await;
 }
 
 async fn monitor_lifecycle(
@@ -912,6 +954,83 @@ impl From<EngineEvent> for WorkEventPayload {
                 limitations,
             },
             EngineEvent::RunFailed { message } => Self::RunFailed { message },
+            EngineEvent::ThoughtDelta { text } => Self::ThoughtDelta { text },
+            EngineEvent::PlanChanged {
+                plan_id,
+                revision,
+                text,
+            } => Self::PlanChanged {
+                plan_id,
+                revision,
+                text,
+            },
+            EngineEvent::ToolPending {
+                tool_call_id,
+                tool_name,
+                input_summary,
+            } => Self::ToolPending {
+                tool_call_id,
+                tool_name,
+                input_summary,
+            },
+            EngineEvent::ToolProgress {
+                tool_call_id,
+                tool_name,
+                output_summary,
+            } => Self::ToolProgress {
+                tool_call_id,
+                tool_name,
+                output_summary,
+            },
+            EngineEvent::PermissionRequested {
+                request_id,
+                tool_call_id,
+                title,
+                detail,
+            } => Self::PermissionRequested {
+                request_id,
+                tool_call_id,
+                title,
+                detail,
+            },
+            EngineEvent::PermissionResolved {
+                request_id,
+                outcome,
+            } => Self::PermissionResolved {
+                request_id,
+                outcome,
+            },
+            EngineEvent::Waiting { reason } => Self::Waiting { reason },
+            EngineEvent::Liveness { state } => Self::Liveness { state },
+            EngineEvent::SessionChanged { transition, reason } => {
+                Self::SessionChanged { transition, reason }
+            }
+            EngineEvent::ArtifactProduced { path } => Self::ArtifactProduced { path },
+            EngineEvent::ValidationProduced {
+                command,
+                success,
+                summary,
+            } => Self::ValidationProduced {
+                command,
+                success,
+                summary,
+            },
+            EngineEvent::UsageUpdated {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
+            } => Self::UsageUpdated {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
+            },
+            EngineEvent::RawEngineEvent { kind, payload_json } => {
+                Self::RawEngineEvent { kind, payload_json }
+            }
         }
     }
 }
@@ -921,11 +1040,23 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use async_trait::async_trait;
-    use tokio::{sync::mpsc, task::JoinSet};
+    use tokio::{
+        sync::{mpsc, watch},
+        task::JoinSet,
+    };
 
-    use super::{AbortOutcome, TerminationOwner};
-    use crate::engine::{
-        EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
+    use super::{
+        AbortOutcome, ConsumerOutcome, EngineSupervisor, STARTUP_EVENT_BUFFER_CAP, StartSignal,
+        TerminationOwner, wait_for_engine_session,
+    };
+    use crate::{
+        domain::work::{CreateWorkInput, PermissionMode},
+        engine::{
+            EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext,
+            EngineSessionRef, fake::FakeEngineAdapter, publisher::ChannelEventPublisher,
+        },
+        storage::sqlite::Database,
+        work::repository::WorkRepository,
     };
 
     #[derive(Default)]
@@ -953,6 +1084,139 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn startup_events_are_buffered_until_the_engine_session_is_ready() {
+        let (event_sender, mut event_receiver) = mpsc::channel(1);
+        let (signal_sender, mut signal_receiver) = watch::channel(StartSignal::Pending);
+        event_sender
+            .send(EngineEvent::RunStarted {
+                model_label: "Fake model".into(),
+            })
+            .await
+            .unwrap();
+        let waiter = tokio::spawn(async move {
+            wait_for_engine_session(&mut event_receiver, &mut signal_receiver).await
+        });
+
+        event_sender
+            .send(EngineEvent::AssistantDelta {
+                text: "queued after the buffered event".into(),
+            })
+            .await
+            .unwrap();
+        signal_sender.send_replace(StartSignal::Ready {
+            session_id: "fake-session".into(),
+        });
+
+        let (session_id, buffered) = waiter.await.unwrap().unwrap();
+        assert_eq!(session_id, "fake-session");
+        assert!(matches!(
+            buffered.front(),
+            Some(EngineEvent::RunStarted { model_label }) if model_label == "Fake model"
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_event_buffer_rejects_more_than_its_capacity() {
+        let (event_sender, mut event_receiver) = mpsc::channel(STARTUP_EVENT_BUFFER_CAP + 1);
+        let (_signal_sender, mut signal_receiver) = watch::channel(StartSignal::Pending);
+        for index in 0..=STARTUP_EVENT_BUFFER_CAP {
+            event_sender
+                .send(EngineEvent::AssistantDelta {
+                    text: format!("chunk-{index}"),
+                })
+                .await
+                .unwrap();
+        }
+
+        let outcome = wait_for_engine_session(&mut event_receiver, &mut signal_receiver).await;
+
+        assert!(matches!(
+            outcome,
+            Err(ConsumerOutcome::Abnormal(
+                "Engine emitted too many events before session attachment"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_stream_closure_without_terminal_fails_after_ready() {
+        let (event_sender, mut event_receiver) = mpsc::channel(1);
+        let (signal_sender, mut signal_receiver) = watch::channel(StartSignal::Pending);
+        drop(event_sender);
+        let waiter = tokio::spawn(async move {
+            wait_for_engine_session(&mut event_receiver, &mut signal_receiver).await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        signal_sender.send_replace(StartSignal::Ready {
+            session_id: "fake-session".into(),
+        });
+        let outcome = waiter.await.unwrap();
+
+        assert!(matches!(
+            outcome,
+            Err(ConsumerOutcome::Abnormal(
+                "Engine event stream closed before a terminal event"
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn published_events_include_session_and_causal_context() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let workspace = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = Database::open_in_memory().await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Causal context".into(),
+                goal: "Publish connected activity events".into(),
+                root_path: workspace.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let engine = FakeEngineAdapter::new_with_session(Duration::ZERO, "fake-session");
+        let (publisher, mut published) = ChannelEventPublisher::channel(16);
+        let supervisor = EngineSupervisor::new(
+            repository,
+            Arc::new(engine),
+            Arc::new(publisher),
+            "Fake model",
+        );
+
+        let started = supervisor
+            .start(&work.summary.id, "Inspect it")
+            .await
+            .unwrap();
+        let first = published.recv().await.unwrap();
+        let second = published.recv().await.unwrap();
+
+        assert_eq!(first.version, 2);
+        assert!(first.event_id.is_some());
+        assert_eq!(first.turn_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(first.session_id.as_deref(), Some("fake-session"));
+        assert_eq!(
+            first.correlation_id.as_deref(),
+            Some(started.run.id.as_str())
+        );
+        assert_eq!(first.causation_id, None);
+        assert_eq!(second.version, 2);
+        assert!(second.event_id.is_some());
+        assert_eq!(second.turn_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(second.session_id.as_deref(), Some("fake-session"));
+        assert_eq!(
+            second.correlation_id.as_deref(),
+            Some(started.run.id.as_str())
+        );
+        assert_eq!(second.causation_id, first.event_id);
     }
 
     #[tokio::test]

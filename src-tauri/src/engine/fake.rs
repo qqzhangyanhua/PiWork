@@ -19,6 +19,8 @@ pub struct FakeEngineAdapter {
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
     #[cfg(test)]
     completion_gate: Option<Arc<FakeCompletionGate>>,
+    #[cfg(test)]
+    session_id: Option<String>,
 }
 
 struct ActiveRun {
@@ -83,6 +85,18 @@ impl FakeEngineAdapter {
             active: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
             completion_gate: None,
+            #[cfg(test)]
+            session_id: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_session(delay: Duration, session_id: &str) -> Self {
+        Self {
+            delay,
+            active: Arc::new(Mutex::new(HashMap::new())),
+            completion_gate: None,
+            session_id: Some(session_id.to_owned()),
         }
     }
 
@@ -94,6 +108,7 @@ impl FakeEngineAdapter {
                 delay,
                 active: Arc::new(Mutex::new(HashMap::new())),
                 completion_gate: Some(Arc::clone(&completion_gate)),
+                session_id: None,
             },
             completion_gate,
         )
@@ -133,7 +148,13 @@ impl EngineAdapter for FakeEngineAdapter {
 
         let session = EngineSessionRef {
             engine_kind: self.kind().into(),
+            #[cfg(not(test))]
             session_id: Uuid::new_v4().to_string(),
+            #[cfg(test)]
+            session_id: self
+                .session_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
         };
         let delay = self.delay;
         let active = Arc::clone(&self.active);
@@ -207,6 +228,14 @@ async fn emit_run(
     let events = [
         EngineEvent::RunStarted {
             model_label: "Fake model".into(),
+        },
+        EngineEvent::ThoughtDelta {
+            text: "Inspecting the Work".into(),
+        },
+        EngineEvent::PlanChanged {
+            plan_id: "default".into(),
+            revision: 1,
+            text: "- inspect\n- execute\n- validate".into(),
         },
         EngineEvent::AssistantDelta {
             text: format!("Working on: {prompt}"),
@@ -321,6 +350,8 @@ mod tests {
             kinds,
             [
                 "run_started",
+                "thought_delta",
+                "plan_changed",
                 "assistant_delta",
                 "tool_started",
                 "tool_finished",
@@ -342,6 +373,37 @@ mod tests {
             engine.abort("run-1").await,
             Err(crate::engine::EngineError::NotRunning)
         ));
+    }
+
+    #[tokio::test]
+    async fn fake_engine_emits_initial_thought_and_default_plan() {
+        let (sender, mut receiver) = mpsc::channel(16);
+        let engine = FakeEngineAdapter::new(Duration::ZERO);
+        let context = EngineRunContext::test("work-1", "run-activity");
+
+        engine
+            .start(context, text_input("Build it"), sender)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            crate::engine::EngineEvent::RunStarted { .. }
+        ));
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            crate::engine::EngineEvent::ThoughtDelta {
+                text: "Inspecting the Work".into(),
+            }
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap(),
+            crate::engine::EngineEvent::PlanChanged {
+                plan_id: "default".into(),
+                revision: 1,
+                text: "- inspect\n- execute\n- validate".into(),
+            }
+        );
     }
 
     #[tokio::test]

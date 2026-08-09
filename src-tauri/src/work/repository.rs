@@ -692,11 +692,13 @@ impl WorkRepository {
         reason: &str,
     ) -> Result<WorkEventEnvelope, AppError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
-            .bind(run_id)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or_else(|| AppError::run_not_found(run_id))?;
+        let run = sqlx::query_as::<_, FinalizeRunStateRow>(
+            "SELECT work_id, status, engine_session_id FROM runs WHERE id = ?",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| AppError::run_not_found(run_id))?;
         if run.work_id != work_id {
             return Err(AppError::run_not_found(run_id));
         }
@@ -724,29 +726,33 @@ impl WorkRepository {
             .map_err(|_| AppError::invalid_run_state(run_id, run.status, RunStatus::Failed))?;
         let next_work = transition(work_status, WorkAction::Fail)
             .map_err(|_| AppError::invalid_work_state(work_id, work_status, WorkStatus::Failed))?;
-        let current_sequence = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(sequence) FROM events WHERE run_id = ?",
+        let last_event = sqlx::query_as::<_, (String, i64)>(
+            "SELECT id, sequence FROM events \
+             WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
         )
         .bind(run_id)
-        .fetch_one(&mut *transaction)
-        .await?
-        .unwrap_or(0);
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let (causation_id, current_sequence) = match last_event {
+            Some((event_id, sequence)) => (Some(event_id), sequence),
+            None => (None, 0),
+        };
         let next_sequence = current_sequence
             .checked_add(1)
             .filter(|sequence| *sequence <= i64::from(u32::MAX))
             .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
         let event_id = Uuid::new_v4().to_string();
         let envelope = WorkEventEnvelope {
-            version: 1,
+            version: 2,
             event_id: Some(event_id.clone()),
             work_id: work_id.to_owned(),
             run_id: run_id.to_owned(),
-            turn_id: None,
-            session_id: None,
+            turn_id: Some(run_id.to_owned()),
+            session_id: run.engine_session_id,
             agent_id: None,
             assignment_id: None,
-            causation_id: None,
-            correlation_id: None,
+            causation_id,
+            correlation_id: Some(run_id.to_owned()),
             sequence: u32::try_from(next_sequence)
                 .map_err(|error| AppError::Database(sqlx::Error::Decode(Box::new(error))))?,
             occurred_at: Utc::now(),
@@ -1070,6 +1076,13 @@ struct RunStateRow {
 }
 
 #[derive(FromRow)]
+struct FinalizeRunStateRow {
+    work_id: String,
+    status: RunStatus,
+    engine_session_id: Option<String>,
+}
+
+#[derive(FromRow)]
 struct MessageRow {
     id: String,
     work_id: String,
@@ -1300,7 +1313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_run_failure_returns_the_persisted_event_id() {
+    async fn finalize_run_failure_without_prior_events_uses_v2_run_context() {
         let temporary_directory = tempfile::tempdir().unwrap();
         let database_path = temporary_directory.path().join("finalize-failure.sqlite3");
         let workspace_path = temporary_directory.path().join("workspace");
@@ -1330,6 +1343,127 @@ mod tests {
 
         assert!(failed.event_id.is_some());
         assert_eq!(failed.event_id, loaded[0].event_id);
+        assert_eq!(failed.version, 2);
+        assert_eq!(failed.turn_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(
+            failed.correlation_id.as_deref(),
+            Some(started.run.id.as_str())
+        );
+        assert_eq!(failed.session_id, None);
+        assert_eq!(failed.causation_id, None);
+    }
+
+    #[tokio::test]
+    async fn finalize_run_failure_without_prior_events_uses_the_attached_run_session() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory
+            .path()
+            .join("attached-session-failure.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Attached failure".into(),
+                goal: "Retain the authoritative engine session".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+        repository
+            .attach_engine_session(&started.run.id, "test-engine", "test-session")
+            .await
+            .unwrap();
+
+        let failed = repository
+            .finalize_run_failure(&started.run.id, &work.summary.id, "engine failed")
+            .await
+            .unwrap();
+
+        assert_eq!(failed.version, 2);
+        assert_eq!(failed.session_id.as_deref(), Some("test-session"));
+        assert_eq!(failed.causation_id, None);
+    }
+
+    #[tokio::test]
+    async fn finalize_run_failure_uses_run_session_and_last_committed_event_as_causation() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("causal-failure.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Causal failure".into(),
+                goal: "Link failure to committed activity".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+        repository
+            .attach_engine_session(&started.run.id, "test-engine", "test-session")
+            .await
+            .unwrap();
+        let committed_id = Uuid::new_v4().to_string();
+        let committed = WorkEventEnvelope {
+            version: 1,
+            event_id: Some(committed_id.clone()),
+            work_id: work.summary.id.clone(),
+            run_id: started.run.id.clone(),
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
+            sequence: 1,
+            occurred_at: Utc::now(),
+            payload: WorkEventPayload::RunStarted {
+                model_label: "test-model".into(),
+            },
+        };
+        repository
+            .append_event_and_transition(&committed)
+            .await
+            .unwrap();
+        let rejected_id = Uuid::new_v4().to_string();
+        let mut rejected = committed.clone();
+        rejected.event_id = Some(rejected_id.clone());
+        rejected.sequence = 3;
+        rejected.payload = WorkEventPayload::AssistantDelta {
+            text: "not committed".into(),
+        };
+        repository
+            .append_event_and_transition(&rejected)
+            .await
+            .unwrap_err();
+
+        let failed = repository
+            .finalize_run_failure(&started.run.id, &work.summary.id, "engine failed")
+            .await
+            .unwrap();
+        let loaded = repository.events_for_run(&started.run.id).await.unwrap();
+
+        assert_eq!(failed.version, 2);
+        assert_eq!(failed.sequence, 2);
+        assert_eq!(failed.session_id.as_deref(), Some("test-session"));
+        assert_eq!(failed.causation_id.as_deref(), Some(committed_id.as_str()));
+        assert_ne!(failed.causation_id.as_deref(), Some(rejected_id.as_str()));
+        assert_eq!(loaded, vec![committed, failed]);
     }
 
     #[tokio::test]

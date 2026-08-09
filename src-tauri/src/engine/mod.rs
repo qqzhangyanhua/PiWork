@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::domain::work::PermissionMode;
+use crate::domain::{
+    event::{LivenessState, PermissionOutcome, SessionTransition},
+    work::PermissionMode,
+};
 
 pub mod activity_observer;
 pub mod fake;
@@ -141,6 +144,63 @@ pub enum EngineEvent {
     RunFailed {
         message: String,
     },
+    ThoughtDelta {
+        text: String,
+    },
+    PlanChanged {
+        plan_id: String,
+        revision: u32,
+        text: String,
+    },
+    ToolPending {
+        tool_call_id: String,
+        tool_name: String,
+        input_summary: String,
+    },
+    ToolProgress {
+        tool_call_id: String,
+        tool_name: String,
+        output_summary: String,
+    },
+    PermissionRequested {
+        request_id: String,
+        tool_call_id: Option<String>,
+        title: String,
+        detail: String,
+    },
+    PermissionResolved {
+        request_id: String,
+        outcome: PermissionOutcome,
+    },
+    Waiting {
+        reason: String,
+    },
+    Liveness {
+        state: LivenessState,
+    },
+    SessionChanged {
+        transition: SessionTransition,
+        reason: Option<String>,
+    },
+    ArtifactProduced {
+        path: String,
+    },
+    ValidationProduced {
+        command: String,
+        success: bool,
+        summary: String,
+    },
+    UsageUpdated {
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
+        total_tokens: u32,
+    },
+    RawEngineEvent {
+        kind: String,
+        payload_json: String,
+    },
 }
 
 impl EngineEvent {
@@ -152,6 +212,19 @@ impl EngineEvent {
             Self::ToolFinished { .. } => "tool_finished",
             Self::RunCompleted { .. } => "run_completed",
             Self::RunFailed { .. } => "run_failed",
+            Self::ThoughtDelta { .. } => "thought_delta",
+            Self::PlanChanged { .. } => "plan_changed",
+            Self::ToolPending { .. } => "tool_pending",
+            Self::ToolProgress { .. } => "tool_progress",
+            Self::PermissionRequested { .. } => "permission_requested",
+            Self::PermissionResolved { .. } => "permission_resolved",
+            Self::Waiting { .. } => "waiting",
+            Self::Liveness { .. } => "liveness",
+            Self::SessionChanged { .. } => "session_changed",
+            Self::ArtifactProduced { .. } => "artifact_produced",
+            Self::ValidationProduced { .. } => "validation_produced",
+            Self::UsageUpdated { .. } => "usage_updated",
+            Self::RawEngineEvent { .. } => "raw_engine_event",
         }
     }
 
@@ -162,9 +235,140 @@ impl EngineEvent {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::work::PermissionMode;
+    use crate::domain::{
+        event::{LivenessState, PermissionOutcome, SessionTransition},
+        work::PermissionMode,
+    };
 
-    use super::EngineRunContext;
+    use super::{EngineEvent, EngineRunContext};
+
+    #[test]
+    fn only_run_terminal_events_are_terminal() {
+        assert!(
+            !EngineEvent::ThoughtDelta {
+                text: "Inspecting the Work".into(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            !EngineEvent::Waiting {
+                reason: "Waiting for input".into(),
+            }
+            .is_terminal()
+        );
+        assert!(
+            EngineEvent::RunFailed {
+                message: "failed".into(),
+            }
+            .is_terminal()
+        );
+    }
+
+    #[test]
+    fn activity_event_kinds_are_stable_snake_case() {
+        let cases = [
+            (
+                EngineEvent::ThoughtDelta {
+                    text: String::new(),
+                },
+                "thought_delta",
+            ),
+            (
+                EngineEvent::PlanChanged {
+                    plan_id: String::new(),
+                    revision: 1,
+                    text: String::new(),
+                },
+                "plan_changed",
+            ),
+            (
+                EngineEvent::ToolPending {
+                    tool_call_id: String::new(),
+                    tool_name: String::new(),
+                    input_summary: String::new(),
+                },
+                "tool_pending",
+            ),
+            (
+                EngineEvent::ToolProgress {
+                    tool_call_id: String::new(),
+                    tool_name: String::new(),
+                    output_summary: String::new(),
+                },
+                "tool_progress",
+            ),
+            (
+                EngineEvent::PermissionRequested {
+                    request_id: String::new(),
+                    tool_call_id: None,
+                    title: String::new(),
+                    detail: String::new(),
+                },
+                "permission_requested",
+            ),
+            (
+                EngineEvent::PermissionResolved {
+                    request_id: String::new(),
+                    outcome: PermissionOutcome::Denied,
+                },
+                "permission_resolved",
+            ),
+            (
+                EngineEvent::Waiting {
+                    reason: String::new(),
+                },
+                "waiting",
+            ),
+            (
+                EngineEvent::Liveness {
+                    state: LivenessState::Alive,
+                },
+                "liveness",
+            ),
+            (
+                EngineEvent::SessionChanged {
+                    transition: SessionTransition::Created,
+                    reason: None,
+                },
+                "session_changed",
+            ),
+            (
+                EngineEvent::ArtifactProduced {
+                    path: String::new(),
+                },
+                "artifact_produced",
+            ),
+            (
+                EngineEvent::ValidationProduced {
+                    command: String::new(),
+                    success: true,
+                    summary: String::new(),
+                },
+                "validation_produced",
+            ),
+            (
+                EngineEvent::UsageUpdated {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    cache_read_tokens: 3,
+                    cache_write_tokens: 4,
+                    total_tokens: 10,
+                },
+                "usage_updated",
+            ),
+            (
+                EngineEvent::RawEngineEvent {
+                    kind: String::new(),
+                    payload_json: String::new(),
+                },
+                "raw_engine_event",
+            ),
+        ];
+
+        for (event, expected_kind) in cases {
+            assert_eq!(event.kind(), expected_kind);
+        }
+    }
 
     #[test]
     fn run_context_stores_the_canonical_workspace_directory() {
