@@ -171,6 +171,43 @@ describe("ActivityFeed", () => {
     expect(screen.getByRole("button", { name: "展开计划" })).toBeVisible();
   });
 
+  it("keeps an expanded thought open when same-identity history is prepended", async () => {
+    const user = userEvent.setup();
+    const thought = event(2, {
+      type: "thoughtDelta",
+      text: "private reasoning detail",
+    });
+    const { rerender } = render(
+      <ActivityFeed items={projectActivity([thought])} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "展开思考" }));
+    expect(screen.getByRole("button", { name: "收起思考" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    rerender(
+      <ActivityFeed
+        items={projectActivity([
+          event(1, {
+            type: "planChanged",
+            planId: "older-plan",
+            revision: 1,
+            text: "older history",
+          }),
+          thought,
+        ])}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "收起思考" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByText("private reasoning detail")).toBeVisible();
+  });
+
   it("omits message, usage, raw, suppressed, and duplicate delivery activity", () => {
     render(
       <ActivityFeed

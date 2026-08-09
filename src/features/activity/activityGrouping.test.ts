@@ -123,10 +123,19 @@ describe("buildActivityDisplayGroups", () => {
       tool("a", "s2", "t2"),
     ]);
 
-    expect(current[0]?.key).toBe(
-      "session:s2:turn:t2:segment:tool:run-1:a",
-    );
+    expect(current[0]?.key).toBe("session:s2:turn:t2");
     expect(withHistory.at(-1)?.key).toBe(current[0]?.key);
+  });
+
+  it("keeps the group key when older history has the same session and turn", () => {
+    const current = buildActivityDisplayGroups([tool("current", "s2", "t2")]);
+    const withHistory = buildActivityDisplayGroups([
+      tool("older", "s2", "t2", { descriptorGroupKey: "read:older" }),
+      tool("current", "s2", "t2"),
+    ]);
+
+    expect(current[0]?.key).toBe("session:s2:turn:t2");
+    expect(withHistory[0]?.key).toBe(current[0]?.key);
   });
 
   it("uses the legacy session and run fallback exactly", () => {
@@ -136,7 +145,7 @@ describe("buildActivityDisplayGroups", () => {
 
     expect(groups).toMatchObject([
       {
-        key: "session:legacy:turn:run-legacy:segment:tool:run-legacy:legacy",
+        key: "session:legacy:turn:run-legacy",
         sessionId: null,
         turnId: null,
       },
@@ -151,9 +160,9 @@ describe("buildActivityDisplayGroups", () => {
     ]);
 
     expect(groups.map(({ key }) => key)).toEqual([
-      "session:s1:turn:t1:segment:tool:run-1:a",
-      "session:s2:turn:t2:segment:tool:run-1:b",
-      "session:s1:turn:t1:segment:tool:run-1:c",
+      "session:s1:turn:t1",
+      "session:s2:turn:t2",
+      "session:s1:turn:t1",
     ]);
     expect(
       groups.flatMap(({ blocks }) =>
@@ -168,7 +177,7 @@ describe("buildActivityDisplayGroups", () => {
       "tool:run-1:b",
       "tool:run-1:c",
     ]);
-    expect(new Set(groups.map(({ key }) => key)).size).toBe(3);
+    expect(new Set(groups.map(({ key }) => key)).size).toBe(2);
   });
 
   it("escapes reserved identity values without colliding with legacy groups", () => {
@@ -180,10 +189,10 @@ describe("buildActivityDisplayGroups", () => {
     ]);
 
     expect(groups.map(({ key }) => key)).toEqual([
-      "session:legacy:turn:t1:segment:tool:run-1:null-session",
-      "session:%6Cegacy:turn:t1:segment:tool:run-1:literal-legacy",
-      "session:a%3Aturn%3Ab:turn:c:segment:tool:run-1:delimited-a",
-      "session:a:turn:b%3Aturn%3Ac:segment:tool:run-1:delimited-b",
+      "session:legacy:turn:t1",
+      "session:%6Cegacy:turn:t1",
+      "session:a%3Aturn%3Ab:turn:c",
+      "session:a:turn:b%3Aturn%3Ac",
     ]);
   });
 

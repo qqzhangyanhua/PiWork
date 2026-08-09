@@ -66,7 +66,7 @@ export function buildActivityDisplayGroups(
     const nextIdentityBase = identityBase(item);
     if (currentGroup === null || nextIdentityBase !== currentIdentityBase) {
       currentGroup = {
-        key: `${nextIdentityBase}:segment:${item.id}`,
+        key: nextIdentityBase,
         sessionId: item.sessionId,
         turnId: item.turnId,
         blocks: [],
