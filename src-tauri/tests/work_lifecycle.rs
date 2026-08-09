@@ -685,7 +685,7 @@ async fn receive_complete_run(
 }
 
 #[tokio::test]
-async fn event_is_persisted_before_it_is_published() {
+async fn receiver_observes_exact_event_id_only_after_it_is_journaled() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Persist before publish").await;
     let (publisher, mut published) =
