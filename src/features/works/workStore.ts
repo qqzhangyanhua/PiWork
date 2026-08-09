@@ -280,10 +280,10 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           : state.works,
         timelines: {
           ...state.timelines,
-          [event.workId]: sortTimeline([
-            ...(state.timelines[event.workId] ?? []),
-            event,
-          ]),
+          [event.workId]: mergeTimeline(
+            state.timelines[event.workId] ?? [],
+            [event],
+          ),
         },
         lastSequenceByRun: {
           ...state.lastSequenceByRun,

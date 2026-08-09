@@ -8,9 +8,12 @@ import { WorkStoreProvider, useWorkStore } from "./WorkStoreProvider";
 import { useWorkEvents } from "./useWorkEvents";
 
 const event: WorkEventEnvelope = {
-  version: 1,
+  version: 2,
+  eventId: "event-r1-1",
   workId: "w1",
   runId: "r1",
+  turnId: "r1",
+  correlationId: "r1",
   sequence: 1,
   occurredAt: "2026-07-28T09:00:01.000Z",
   payload: { type: "assistantDelta", text: "hello" },

@@ -14,7 +14,7 @@ export const isWorkEventTimelineItem = (
 
 export const timelineItemKey = (item: TimelineItem) =>
   isWorkEventTimelineItem(item)
-    ? `event:${item.runId}:${item.sequence}`
+    ? `event:${item.eventId ?? `${item.runId}:${item.sequence}`}`
     : `message:${item.id}`;
 
 const unknownError = (): AppError => ({

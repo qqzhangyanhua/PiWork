@@ -1,6 +1,41 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeAppError } from "./work";
+import type { WorkEventEnvelope } from "../bindings";
+import { normalizeAppError, timelineItemKey } from "./work";
+
+const event = (
+  overrides: Partial<WorkEventEnvelope> = {},
+): WorkEventEnvelope => ({
+  version: 2,
+  eventId: "event-1",
+  workId: "work-1",
+  runId: "run-1",
+  sequence: 1,
+  occurredAt: "2026-07-28T09:00:01.000Z",
+  payload: { type: "assistantDelta", text: "hello" },
+  ...overrides,
+});
+
+describe("timelineItemKey", () => {
+  it("uses the stable event ID for Activity Protocol v2 events", () => {
+    expect(
+      timelineItemKey(
+        event({ eventId: "event-1", runId: "run-1", sequence: 1 }),
+      ),
+    ).toBe("event:event-1");
+  });
+
+  it("falls back to run and sequence identity for legacy events", () => {
+    const { eventId: _eventId, ...legacyEvent } = event({
+      eventId: undefined,
+      version: 1,
+      runId: "run-1",
+      sequence: 1,
+    });
+
+    expect(timelineItemKey(legacyEvent)).toBe("event:run-1:1");
+  });
+});
 
 describe("normalizeAppError", () => {
   it("preserves a valid wire error and its structured details", () => {

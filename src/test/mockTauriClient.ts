@@ -44,21 +44,28 @@ const now = (offset: number) =>
 
 export const runCompletedEvent = (
   overrides: Partial<WorkEventEnvelope> = {},
-): WorkEventEnvelope => ({
-  version: 1,
-  workId: "work-1",
-  runId: "run-1",
-  sequence: 2,
-  occurredAt: now(20),
-  payload: {
-    type: "runCompleted",
-    summary: "任务已完成",
-    artifacts: ["dist/report.html"],
-    validation: ["Dashboard checks passed"],
-    limitations: ["Uses mock revenue data"],
-  },
-  ...overrides,
-});
+): WorkEventEnvelope => {
+  const runId = overrides.runId ?? "run-1";
+  const sequence = overrides.sequence ?? 2;
+  return {
+    version: 2,
+    eventId: `event-${runId}-${sequence}`,
+    workId: "work-1",
+    runId,
+    turnId: runId,
+    correlationId: runId,
+    sequence,
+    occurredAt: now(20),
+    payload: {
+      type: "runCompleted",
+      summary: "任务已完成",
+      artifacts: ["dist/report.html"],
+      validation: ["Dashboard checks passed"],
+      limitations: ["Uses mock revenue data"],
+    },
+    ...overrides,
+  };
+};
 
 export const createMockTauriClient = (): MockTauriClient => {
   const details = new Map<string, WorkDetail>();

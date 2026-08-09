@@ -43,13 +43,30 @@ const event = (
   sequence: number,
   payload: WorkEventEnvelope["payload"],
 ): WorkEventEnvelope => ({
-  version: 1,
+  version: 2,
+  eventId: `event-r1-${sequence}`,
   workId: "w1",
   runId: "r1",
+  turnId: "r1",
+  correlationId: "r1",
   sequence,
   occurredAt: `2026-07-28T09:00:0${sequence}.000Z`,
   payload,
 });
+
+const legacyEvent = (
+  sequence: number,
+  payload: WorkEventEnvelope["payload"],
+  overrides: Partial<WorkEventEnvelope> = {},
+): WorkEventEnvelope => {
+  const {
+    eventId: _eventId,
+    turnId: _turnId,
+    correlationId: _correlationId,
+    ...legacy
+  } = event(sequence, payload);
+  return { ...legacy, version: 1, ...overrides };
+};
 
 const unusedClient: PiWorkClient = {
   getModelConfigurationStatus: async () => ({ configured: true, configuration: { id: "openai-default", provider: "openai", baseUrl: "https://api.openai.com/v1", modelId: "gpt-5.2", active: true, credentialConfigured: true } }),
@@ -220,6 +237,107 @@ describe("createWorkStore", () => {
     expect(store.getState().lastSequenceByRun.r1).toBe(2);
   });
 
+  it("deduplicates one stable event delivered live and by detail hydration", async () => {
+    const detailResult = deferred<WorkDetail>();
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: () => detailResult.promise,
+    };
+    const store = createWorkStore(client);
+    const hydration = store.getState().hydrate();
+    await Promise.resolve();
+    const earlierEvent = {
+      ...event(0, { type: "runStarted", modelLabel: "gpt-5" }),
+      eventId: "event-earlier",
+    };
+    const sharedEvent = {
+      ...event(1, { type: "assistantDelta", text: "persisted once" }),
+      eventId: "event-shared",
+    };
+
+    store.getState().applyEvent(sharedEvent);
+    detailResult.resolve({
+      summary: work,
+      runs: [run],
+      messages: [],
+      events: [sharedEvent, earlierEvent],
+    });
+    await hydration;
+
+    expect(store.getState().timelines.w1).toEqual([earlierEvent, sharedEvent]);
+  });
+
+  it("keeps distinct stable events even when their timestamps and sequences match", async () => {
+    const first = {
+      ...event(1, { type: "assistantDelta", text: "first" }),
+      eventId: "event-first",
+    };
+    const second = {
+      ...event(1, { type: "assistantDelta", text: "second" }),
+      eventId: "event-second",
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [run],
+        messages: [],
+        events: [second, first],
+      }),
+    };
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+
+    expect(
+      store
+        .getState()
+        .timelines.w1?.filter(isWorkEventTimelineItem)
+        .map(({ eventId }) => eventId),
+    ).toEqual(["event-first", "event-second"]);
+  });
+
+  it("deduplicates legacy run sequences without colliding across runs", async () => {
+    const firstRun = legacyEvent(1, {
+      type: "assistantDelta",
+      text: "first run",
+    });
+    const duplicate = legacyEvent(1, {
+      type: "assistantDelta",
+      text: "duplicate first run",
+    });
+    const secondRun = legacyEvent(
+      1,
+      { type: "assistantDelta", text: "second run" },
+      {
+        runId: "r2",
+        occurredAt: "2026-07-28T09:00:02.000Z",
+      },
+    );
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [run, { ...run, id: "r2" }],
+        messages: [],
+        events: [firstRun, duplicate, secondRun],
+      }),
+    };
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+
+    expect(
+      store
+        .getState()
+        .timelines.w1?.filter(isWorkEventTimelineItem)
+        .map(({ runId, sequence }) => `${runId}:${sequence}`),
+    ).toEqual(["r1:1", "r2:1"]);
+  });
+
   it("hydrates the newest work and replays its persisted events in order", async () => {
     const older: WorkSummary = {
       ...work,
@@ -344,9 +462,23 @@ describe("createWorkStore", () => {
     });
     await hydration;
 
+    store.getState().applyEvent(
+      event(2, { type: "assistantDelta", text: "stale live frame" }),
+    );
+
     expect(
       store.getState().timelines.w1?.filter(isWorkEventTimelineItem).map(({ sequence }) => sequence),
     ).toEqual([1, 2, 3]);
+    expect(
+      store
+        .getState()
+        .timelines.w1?.filter(isWorkEventTimelineItem)
+        .some(
+          ({ payload }) =>
+            payload.type === "assistantDelta" &&
+            payload.text === "stale live frame",
+        ),
+    ).toBe(false);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
       status: "completed",
@@ -379,8 +511,11 @@ describe("createWorkStore", () => {
       events: [
         {
           ...event(1, { type: "runStarted", modelLabel: "gpt-5" }),
+          eventId: "event-r2-1",
           workId: "w2",
           runId: "r2",
+          turnId: "r2",
+          correlationId: "r2",
         },
       ],
     });
@@ -748,7 +883,10 @@ describe("createWorkStore", () => {
           event(1, { type: "runStarted", modelLabel: "gpt-5" }),
           {
             ...event(1, { type: "runStarted", modelLabel: "gpt-5" }),
+            eventId: "event-r2-1",
             runId: "r2",
+            turnId: "r2",
+            correlationId: "r2",
             occurredAt: "2026-07-28T09:00:04.000Z",
           },
         ],
@@ -893,7 +1031,10 @@ describe("createWorkStore", () => {
       .applyEvent(event(1, { type: "runStarted", modelLabel: "old" }));
     store.getState().applyEvent({
       ...event(1, { type: "runStarted", modelLabel: "new" }),
+      eventId: "event-r2-1",
       runId: "r2",
+      turnId: "r2",
+      correlationId: "r2",
       occurredAt: "2026-07-28T09:00:02.000Z",
     });
     store.getState().applyEvent({
@@ -904,7 +1045,10 @@ describe("createWorkStore", () => {
         validation: [],
         limitations: [],
       }),
+      eventId: "event-r2-2",
       runId: "r2",
+      turnId: "r2",
+      correlationId: "r2",
       occurredAt: "2026-07-28T09:00:03.000Z",
     });
     store.getState().applyEvent({
@@ -931,7 +1075,10 @@ describe("createWorkStore", () => {
 
     store.getState().applyEvent({
       ...event(1, { type: "runStarted", modelLabel: "second" }),
+      eventId: "event-r2-1",
       runId: "r2",
+      turnId: "r2",
+      correlationId: "r2",
       occurredAt: "2026-07-28T09:00:02.000Z",
     });
     store
