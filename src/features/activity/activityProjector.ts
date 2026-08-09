@@ -13,6 +13,7 @@ import type {
   ActivityItem,
   ToolStatus,
 } from "./activityTypes";
+import { describeTool } from "./activityPresentation";
 
 export type ActivityProjection = {
   items: ActivityItem[];
@@ -108,16 +109,13 @@ const putItem = (draft: ActivityDraft, item: ActivityItem): void => {
 const turnOrRun = (event: WorkEventEnvelope): string =>
   event.turnId ?? event.runId;
 
-const genericToolDescriptor = (
+const toolDescriptor = (
   toolName: string,
-  preview: string,
+  input: string,
+  result: string,
 ): ActivityDescriptor => ({
-  renderClass: "generic",
-  action: "execute",
-  object: toolName || null,
-  preview: preview || null,
-  tone: "neutral",
-  groupKey: null,
+  ...describeTool(toolName, input),
+  preview: result || input || null,
 });
 
 type ToolItem = Extract<ActivityItem, { type: "tool" }>;
@@ -133,18 +131,21 @@ const createToolItem = (
   input: string,
   result: string,
   isError: boolean,
-): ToolItem => ({
-  ...baseFrom(event, `tool:${event.runId}:${toolCallId}`),
-  type: "tool",
-  renderClass: "generic",
-  toolCallId,
-  toolName,
-  status,
-  input,
-  result,
-  isError,
-  descriptor: genericToolDescriptor(toolName, input || result),
-});
+): ToolItem => {
+  const descriptor = toolDescriptor(toolName, input, result);
+  return {
+    ...baseFrom(event, `tool:${event.runId}:${toolCallId}`),
+    type: "tool",
+    renderClass: descriptor.renderClass,
+    toolCallId,
+    toolName,
+    status,
+    input,
+    result,
+    isError,
+    descriptor,
+  };
+};
 
 const mergeTool = (
   draft: ActivityDraft,
@@ -168,14 +169,17 @@ const mergeTool = (
       return;
     }
 
+    const descriptor = toolDescriptor(
+      toolName,
+      input,
+      existing.item.result,
+    );
     replaceItem(draft, existing.index, {
       ...existing.item,
       toolName,
       input,
-      descriptor: genericToolDescriptor(
-        toolName,
-        input || existing.item.result,
-      ),
+      renderClass: descriptor.renderClass,
+      descriptor,
     });
     return;
   }
@@ -187,6 +191,7 @@ const mergeTool = (
   const toolName = next.toolName || existing.item.toolName;
   const input = next.input || existing.item.input;
   const result = next.result || existing.item.result;
+  const descriptor = toolDescriptor(toolName, input, result);
   replaceItem(draft, existing.index, {
     ...existing.item,
     toolName,
@@ -194,7 +199,8 @@ const mergeTool = (
     input,
     result,
     isError: next.isError,
-    descriptor: genericToolDescriptor(toolName, input || result),
+    renderClass: descriptor.renderClass,
+    descriptor,
   });
 };
 

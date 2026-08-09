@@ -134,14 +134,19 @@ describe("projectActivity", () => {
     expect(items).toMatchObject([
       {
         type: "tool",
+        renderClass: "shell",
         toolName: "bash",
         status: "completed",
         input: "pnpm test",
         result: "done",
         isError: false,
         descriptor: {
-          object: "bash",
-          preview: "pnpm test",
+          renderClass: "shell",
+          action: "execute",
+          object: "pnpm test",
+          preview: "done",
+          tone: "admin",
+          groupKey: "shell",
         },
       },
     ]);
@@ -174,14 +179,19 @@ describe("projectActivity", () => {
     expect(items).toMatchObject([
       {
         type: "tool",
+        renderClass: "shell",
         toolName: "bash",
         status: "failed",
         input: "pnpm test",
         result: "failed first",
         isError: true,
         descriptor: {
-          object: "bash",
-          preview: "pnpm test",
+          renderClass: "shell",
+          action: "execute",
+          object: "pnpm test",
+          preview: "failed first",
+          tone: "admin",
+          groupKey: "shell",
         },
       },
     ]);
@@ -208,14 +218,19 @@ describe("projectActivity", () => {
     expect(items).toMatchObject([
       {
         type: "tool",
+        renderClass: "shell",
         toolName: "bash",
         status: "failed",
         input: "",
         result: "failed first",
         isError: true,
         descriptor: {
-          object: "bash",
+          renderClass: "shell",
+          action: "execute",
+          object: "",
           preview: "failed first",
+          tone: "admin",
+          groupKey: "shell",
         },
       },
     ]);

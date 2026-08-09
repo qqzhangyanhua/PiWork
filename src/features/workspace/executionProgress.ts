@@ -1,4 +1,5 @@
 import type { WorkEventEnvelope } from "../../bindings";
+import { describeTool } from "../activity/activityPresentation";
 
 export type ExecutionPhaseId =
   | "prepare"
@@ -34,6 +35,7 @@ type ToolPhase = Exclude<ExecutionPhaseId, "prepare" | "deliver">;
 
 type ToolRecord = {
   phase: ToolPhase;
+  phaseSource: "input" | "output";
   failed: boolean;
 };
 
@@ -49,16 +51,15 @@ const toolPhaseOrder: ToolPhase[] = ["analyze", "execute", "validate"];
 
 const validationCommand = /\b(?:test|check|lint|build)\b/iu;
 
-const classifyTool = (toolName: string, inputSummary: string): ToolPhase => {
-  const normalized = toolName.trim().toLocaleLowerCase();
-  if (/(?:^|[_-])(?:read|grep|find|ls)(?:[_-]|$)/u.test(normalized)) {
+const toolPhase = (toolName: string, summary: string): ToolPhase => {
+  const descriptor = describeTool(toolName, summary);
+  if (descriptor.renderClass === "file-read") {
     return "analyze";
   }
-  if (normalized === "bash") {
-    return validationCommand.test(inputSummary) ? "validate" : "execute";
-  }
-  if (/(?:^|[_-])(?:edit|write)(?:[_-]|$)/u.test(normalized)) {
-    return "execute";
+  if (descriptor.renderClass === "shell") {
+    return validationCommand.test(descriptor.object ?? summary)
+      ? "validate"
+      : "execute";
   }
   return "execute";
 };
@@ -76,20 +77,31 @@ export function buildExecutionProgress(
   > | null = null;
 
   for (const { payload } of sortedEvents) {
-    if (payload.type === "toolStarted") {
+    if (payload.type === "toolPending" || payload.type === "toolStarted") {
       const previous = tools.get(payload.toolCallId);
       tools.set(payload.toolCallId, {
-        phase:
-          previous?.phase ??
-          classifyTool(payload.toolName, payload.inputSummary),
+        phase: toolPhase(payload.toolName, payload.inputSummary),
+        phaseSource: "input",
+        failed: previous?.failed ?? false,
+      });
+    } else if (payload.type === "toolProgress") {
+      const previous = tools.get(payload.toolCallId);
+      const hasAuthoritativePhase = previous?.phaseSource === "input";
+      tools.set(payload.toolCallId, {
+        phase: hasAuthoritativePhase
+          ? previous.phase
+          : toolPhase(payload.toolName, payload.outputSummary),
+        phaseSource: hasAuthoritativePhase ? "input" : "output",
         failed: previous?.failed ?? false,
       });
     } else if (payload.type === "toolFinished") {
       const previous = tools.get(payload.toolCallId);
+      const hasAuthoritativePhase = previous?.phaseSource === "input";
       tools.set(payload.toolCallId, {
-        phase:
-          previous?.phase ??
-          classifyTool(payload.toolName, payload.outputSummary),
+        phase: hasAuthoritativePhase
+          ? previous.phase
+          : toolPhase(payload.toolName, payload.outputSummary),
+        phaseSource: hasAuthoritativePhase ? "input" : "output",
         failed: (previous?.failed ?? false) || !payload.success,
       });
     } else if (

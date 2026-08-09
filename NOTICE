@@ -71,11 +71,10 @@ Pinned commit: 5bf78671f45178f8de02ba18d3d321cbbf19cd1f
 License: Apache License 2.0
 Copyright 2026 Block, Inc.
 
-PiWork's Buzz activity port covers the activity observer, activity types,
-transcript projector, and transcript grouping scope. The observer, types and
-projector are adapted in the current distribution; grouping remains documented
-as planned/pending. Relay, Nostr, Channel and ACP-specific transport concepts
-are replaced with PiWork Work, Run and SQLite WorkEvent semantics.
+PiWork's Buzz activity port implements the activity observer, activity types,
+transcript projector, tool presentation classifier, and transcript grouping in
+the current distribution. Relay, Nostr, Channel and ACP-specific transport
+concepts are replaced with PiWork Work, Run and SQLite WorkEvent semantics.
 
 The complete Apache License 2.0 text is shipped as licenses/Apache-2.0.txt.
 

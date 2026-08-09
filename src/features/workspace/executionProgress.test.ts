@@ -93,6 +93,172 @@ describe("buildExecutionProgress", () => {
     });
   });
 
+  it("creates one executing validation tool when progress arrives first", () => {
+    const model = buildExecutionProgress([
+      event(1, {
+        type: "toolProgress",
+        toolCallId: "test-1",
+        toolName: "bash",
+        outputSummary: '{"command":"pnpm test -- --run"}',
+      }),
+    ]);
+
+    expect(model).toMatchObject({
+      status: "running",
+      currentPhase: "validate",
+      toolCount: 1,
+      failedToolCount: 0,
+    });
+    expect(phase(model, "validate")).toMatchObject({
+      status: "active",
+      toolCount: 1,
+    });
+  });
+
+  it("lets authoritative late start input refine a progress-first phase", () => {
+    const model = buildExecutionProgress([
+      event(1, {
+        type: "toolProgress",
+        toolCallId: "test-1",
+        toolName: "bash",
+        outputSummary: "running",
+      }),
+      event(2, {
+        type: "toolStarted",
+        toolCallId: "test-1",
+        toolName: "bash",
+        inputSummary: '{"command":"pnpm test"}',
+      }),
+    ]);
+
+    expect(model).toMatchObject({
+      status: "running",
+      currentPhase: "validate",
+      toolCount: 1,
+      failedToolCount: 0,
+    });
+    expect(phase(model, "execute")?.toolCount).toBe(0);
+    expect(phase(model, "validate")).toMatchObject({
+      status: "active",
+      toolCount: 1,
+    });
+  });
+
+  it("refines a terminal tool phase from late input without erasing failure", () => {
+    const model = buildExecutionProgress([
+      event(1, {
+        type: "toolFinished",
+        toolCallId: "test-1",
+        toolName: "bash",
+        outputSummary: "exit 1",
+        success: false,
+      }),
+      event(2, {
+        type: "toolStarted",
+        toolCallId: "test-1",
+        toolName: "bash",
+        inputSummary: '{"command":"pnpm test"}',
+      }),
+      event(3, {
+        type: "runCompleted",
+        summary: "recovered",
+        artifacts: [],
+        validation: ["pnpm test"],
+        limitations: [],
+      }),
+    ]);
+
+    expect(model).toMatchObject({
+      status: "completed",
+      toolCount: 1,
+      failedToolCount: 1,
+    });
+    expect(phase(model, "execute")?.status).toBe("skipped");
+    expect(phase(model, "validate")).toMatchObject({
+      status: "completed",
+      toolCount: 1,
+      failedToolCount: 1,
+    });
+  });
+
+  it("counts pending progress and finish as one completed tool", () => {
+    const model = buildExecutionProgress([
+      event(1, {
+        type: "toolPending",
+        toolCallId: "test-1",
+        toolName: "bash",
+        inputSummary: '{"command":"pnpm test"}',
+      }),
+      event(2, {
+        type: "toolProgress",
+        toolCallId: "test-1",
+        toolName: "bash",
+        outputSummary: "running",
+      }),
+      event(3, {
+        type: "toolFinished",
+        toolCallId: "test-1",
+        toolName: "bash",
+        outputSummary: "passed",
+        success: true,
+      }),
+      event(4, {
+        type: "runCompleted",
+        summary: "done",
+        artifacts: [],
+        validation: ["pnpm test"],
+        limitations: [],
+      }),
+    ]);
+
+    expect(model).toMatchObject({
+      status: "completed",
+      currentPhase: "deliver",
+      toolCount: 1,
+      failedToolCount: 0,
+    });
+    expect(phase(model, "validate")).toMatchObject({
+      status: "completed",
+      toolCount: 1,
+    });
+  });
+
+  it("does not let late progress erase a terminal tool failure", () => {
+    const model = buildExecutionProgress([
+      event(1, {
+        type: "toolFinished",
+        toolCallId: "edit-1",
+        toolName: "edit",
+        outputSummary: "failed first",
+        success: false,
+      }),
+      event(2, {
+        type: "toolProgress",
+        toolCallId: "edit-1",
+        toolName: "edit",
+        outputSummary: "late progress",
+      }),
+      event(3, {
+        type: "runCompleted",
+        summary: "recovered",
+        artifacts: [],
+        validation: [],
+        limitations: [],
+      }),
+    ]);
+
+    expect(model).toMatchObject({
+      status: "completed",
+      toolCount: 1,
+      failedToolCount: 1,
+    });
+    expect(phase(model, "execute")).toMatchObject({
+      status: "completed",
+      toolCount: 1,
+      failedToolCount: 1,
+    });
+  });
+
   it("counts repeated start and finish records as one tool", () => {
     const started = event(1, {
       type: "toolStarted",
