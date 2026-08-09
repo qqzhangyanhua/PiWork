@@ -460,11 +460,10 @@ fn summarize_tool_result(result: Option<&Value>) -> String {
 fn summarize_text_parts<'a>(text_parts: impl IntoIterator<Item = &'a str>) -> Option<String> {
     let mut summary = String::with_capacity(MAX_SUMMARY_CHARS);
     let mut summary_chars = 0;
-    let mut part_count = 0;
     let mut joined_has_content = false;
     let mut truncated = false;
 
-    'parts: for text in text_parts {
+    'parts: for (part_count, text) in text_parts.into_iter().enumerate() {
         if part_count > 0 {
             joined_has_content = true;
             if summary_chars == MAX_SUMMARY_CHARS {
@@ -474,7 +473,6 @@ fn summarize_text_parts<'a>(text_parts: impl IntoIterator<Item = &'a str>) -> Op
             summary.push('\n');
             summary_chars += 1;
         }
-        part_count += 1;
         joined_has_content |= !text.is_empty();
 
         for character in text.chars() {

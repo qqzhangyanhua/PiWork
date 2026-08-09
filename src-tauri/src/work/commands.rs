@@ -12,7 +12,7 @@ use crate::{
 
 #[tauri::command]
 pub async fn get_default_project_directory(app: AppHandle) -> Result<String, AppError> {
-    let paths = AppPaths::from_resolver(&app.path())?;
+    let paths = AppPaths::from_resolver(app.path())?;
     Ok(paths
         .ensure_default_workspace()?
         .to_string_lossy()

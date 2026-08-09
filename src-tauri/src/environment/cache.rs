@@ -8,6 +8,12 @@ pub struct RuntimeStatusCache {
     value: OnceCell<RuntimeStatus>,
 }
 
+impl Default for RuntimeStatusCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeStatusCache {
     pub const fn new() -> Self {
         Self {
@@ -27,8 +33,8 @@ impl RuntimeStatusCache {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use crate::domain::environment::{RuntimeCheck, RuntimeStatus};
@@ -50,6 +56,24 @@ mod tests {
     #[tokio::test]
     async fn detects_only_once_per_cache() {
         let cache = RuntimeStatusCache::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let calls = Arc::clone(&calls);
+            let _ = cache
+                .get_or_init_with(|| async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    status()
+                })
+                .await;
+        }
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn default_cache_uses_the_same_lazy_initialization_semantics() {
+        let cache = RuntimeStatusCache::default();
         let calls = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {

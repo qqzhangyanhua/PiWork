@@ -360,8 +360,14 @@ async fn selecting_an_unavailable_or_unknown_saved_model_preserves_the_runtime_m
         .await
         .unwrap_err();
 
-    assert_eq!(serde_json::to_value(unavailable).unwrap()["code"], "invalid_input");
-    assert_eq!(serde_json::to_value(unknown).unwrap()["code"], "invalid_input");
+    assert_eq!(
+        serde_json::to_value(unavailable).unwrap()["code"],
+        "invalid_input"
+    );
+    assert_eq!(
+        serde_json::to_value(unknown).unwrap()["code"],
+        "invalid_input"
+    );
     assert_eq!(
         service.runtime_configuration().await.unwrap().model_id,
         "gpt-5.2"
