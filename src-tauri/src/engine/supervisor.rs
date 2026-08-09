@@ -596,7 +596,7 @@ async fn consume_events(
         }
         let envelope = WorkEventEnvelope {
             version: 1,
-            event_id: None,
+            event_id: Some(Uuid::new_v4().to_string()),
             work_id: work_id.clone(),
             run_id: run_id.clone(),
             turn_id: None,

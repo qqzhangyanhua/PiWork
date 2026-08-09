@@ -152,6 +152,38 @@ impl WorkRepository {
         .await?)
     }
 
+    async fn insert_event(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        event_id: &str,
+        envelope: &WorkEventEnvelope,
+        sequence: i64,
+    ) -> Result<(), AppError> {
+        let payload = serde_json::to_string(&envelope.payload)
+            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
+        sqlx::query(
+            "INSERT INTO events \
+             (id, work_id, run_id, turn_id, session_id, agent_id, assignment_id, causation_id, \
+              correlation_id, sequence, version, occurred_at, payload) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(event_id)
+        .bind(&envelope.work_id)
+        .bind(&envelope.run_id)
+        .bind(&envelope.turn_id)
+        .bind(&envelope.session_id)
+        .bind(&envelope.agent_id)
+        .bind(&envelope.assignment_id)
+        .bind(&envelope.causation_id)
+        .bind(&envelope.correlation_id)
+        .bind(sequence)
+        .bind(i64::from(envelope.version))
+        .bind(envelope.occurred_at)
+        .bind(payload)
+        .execute(&mut **transaction)
+        .await?;
+        Ok(())
+    }
+
     async fn load_detail(
         connection: &mut SqliteConnection,
         id: &str,
@@ -169,8 +201,10 @@ impl WorkRepository {
         .map(RunSummary::from)
         .collect();
         let events = sqlx::query_as::<_, EventRow>(
-            "SELECT events.work_id, events.run_id, events.sequence, events.version, \
-                    events.occurred_at, events.payload \
+            "SELECT events.id, events.work_id, events.run_id, events.turn_id, \
+                    events.session_id, events.agent_id, events.assignment_id, \
+                    events.causation_id, events.correlation_id, events.sequence, \
+                    events.version, events.occurred_at, events.payload \
              FROM events \
              INNER JOIN runs ON runs.id = events.run_id AND runs.work_id = events.work_id \
              WHERE events.work_id = ? \
@@ -464,6 +498,9 @@ impl WorkRepository {
         &self,
         envelope: &WorkEventEnvelope,
     ) -> Result<(), AppError> {
+        let event_id = envelope.event_id.as_deref().ok_or_else(|| {
+            AppError::invalid_input("eventId", "new Work events require an event id")
+        })?;
         if envelope.sequence == 0 {
             return Err(AppError::invalid_input(
                 "sequence",
@@ -517,21 +554,12 @@ impl WorkRepository {
             ));
         }
 
-        let payload = serde_json::to_string(&envelope.payload)
-            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
-        sqlx::query(
-            "INSERT INTO events \
-             (id, work_id, run_id, sequence, version, occurred_at, payload) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        Self::insert_event(
+            &mut transaction,
+            event_id,
+            envelope,
+            i64::from(envelope.sequence),
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(&envelope.work_id)
-        .bind(&envelope.run_id)
-        .bind(i64::from(envelope.sequence))
-        .bind(i64::from(envelope.version))
-        .bind(envelope.occurred_at)
-        .bind(payload)
-        .execute(&mut *transaction)
         .await?;
 
         let terminal = match envelope.payload {
@@ -598,7 +626,10 @@ impl WorkRepository {
 
     pub async fn events_for_run(&self, run_id: &str) -> Result<Vec<WorkEventEnvelope>, AppError> {
         sqlx::query_as::<_, EventRow>(
-            "SELECT work_id, run_id, sequence, version, occurred_at, payload \
+            "SELECT events.id, events.work_id, events.run_id, events.turn_id, \
+                    events.session_id, events.agent_id, events.assignment_id, \
+                    events.causation_id, events.correlation_id, events.sequence, \
+                    events.version, events.occurred_at, events.payload \
              FROM events WHERE run_id = ? ORDER BY sequence ASC",
         )
         .bind(run_id)
@@ -704,9 +735,10 @@ impl WorkRepository {
             .checked_add(1)
             .filter(|sequence| *sequence <= i64::from(u32::MAX))
             .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
+        let event_id = Uuid::new_v4().to_string();
         let envelope = WorkEventEnvelope {
             version: 1,
-            event_id: None,
+            event_id: Some(event_id.clone()),
             work_id: work_id.to_owned(),
             run_id: run_id.to_owned(),
             turn_id: None,
@@ -722,22 +754,7 @@ impl WorkRepository {
                 message: reason.to_owned(),
             },
         };
-        let payload = serde_json::to_string(&envelope.payload)
-            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
-        sqlx::query(
-            "INSERT INTO events \
-             (id, work_id, run_id, sequence, version, occurred_at, payload) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(work_id)
-        .bind(run_id)
-        .bind(next_sequence)
-        .bind(i64::from(envelope.version))
-        .bind(envelope.occurred_at)
-        .bind(payload)
-        .execute(&mut *transaction)
-        .await?;
+        Self::insert_event(&mut transaction, &event_id, &envelope, next_sequence).await?;
         let now = Utc::now();
         let run_update = sqlx::query(
             "UPDATE runs SET status = ?, updated_at = ?, completed_at = ? \
@@ -1094,8 +1111,15 @@ impl From<RunRow> for RunSummary {
 
 #[derive(FromRow)]
 struct EventRow {
+    id: String,
     work_id: String,
     run_id: String,
+    turn_id: Option<String>,
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    assignment_id: Option<String>,
+    causation_id: Option<String>,
+    correlation_id: Option<String>,
     sequence: i64,
     version: i64,
     occurred_at: DateTime<Utc>,
@@ -1115,15 +1139,15 @@ impl TryFrom<EventRow> for WorkEventEnvelope {
 
         Ok(Self {
             version,
-            event_id: None,
+            event_id: Some(row.id),
             work_id: row.work_id,
             run_id: row.run_id,
-            turn_id: None,
-            session_id: None,
-            agent_id: None,
-            assignment_id: None,
-            causation_id: None,
-            correlation_id: None,
+            turn_id: row.turn_id,
+            session_id: row.session_id,
+            agent_id: row.agent_id,
+            assignment_id: row.assignment_id,
+            causation_id: row.causation_id,
+            correlation_id: row.correlation_id,
             sequence,
             occurred_at: row.occurred_at,
             payload,
@@ -1188,7 +1212,7 @@ mod tests {
         let append_repository = repository.clone();
         let envelope = WorkEventEnvelope {
             version: 1,
-            event_id: None,
+            event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
             run_id: started.run.id.clone(),
             turn_id: None,
@@ -1220,6 +1244,147 @@ mod tests {
 
         let detail = repository.get(&work.summary.id).await.unwrap().unwrap();
         assert_eq!(detail.events, vec![expected]);
+    }
+
+    #[tokio::test]
+    async fn activity_context_round_trips_through_the_journal() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("activity-context.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Activity context".into(),
+                goal: "Round-trip the complete event envelope".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+        let envelope = WorkEventEnvelope {
+            version: 2,
+            event_id: Some("event-1".into()),
+            work_id: work.summary.id.clone(),
+            run_id: started.run.id.clone(),
+            turn_id: Some("turn-1".into()),
+            session_id: Some("session-1".into()),
+            agent_id: Some("agent-1".into()),
+            assignment_id: Some("assignment-1".into()),
+            causation_id: Some("event-0".into()),
+            correlation_id: Some("correlation-1".into()),
+            sequence: 1,
+            occurred_at: Utc::now(),
+            payload: WorkEventPayload::ToolProgress {
+                tool_call_id: "tool-1".into(),
+                tool_name: "read".into(),
+                output_summary: "halfway".into(),
+            },
+        };
+
+        repository
+            .append_event_and_transition(&envelope)
+            .await
+            .unwrap();
+
+        let loaded = repository.events_for_run(&started.run.id).await.unwrap();
+        assert_eq!(loaded, vec![envelope.clone()]);
+        let detail = repository.get(&work.summary.id).await.unwrap().unwrap();
+        assert_eq!(detail.events, vec![envelope]);
+    }
+
+    #[tokio::test]
+    async fn finalize_run_failure_returns_the_persisted_event_id() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("finalize-failure.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Finalize failure".into(),
+                goal: "Persist the returned event identity".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+
+        let failed = repository
+            .finalize_run_failure(&started.run.id, &work.summary.id, "engine failed")
+            .await
+            .unwrap();
+        let loaded = repository.events_for_run(&started.run.id).await.unwrap();
+
+        assert!(failed.event_id.is_some());
+        assert_eq!(failed.event_id, loaded[0].event_id);
+    }
+
+    #[tokio::test]
+    async fn new_event_without_an_id_is_rejected() {
+        let temporary_directory = tempfile::tempdir().unwrap();
+        let database_path = temporary_directory.path().join("missing-event-id.sqlite3");
+        let workspace_path = temporary_directory.path().join("workspace");
+        std::fs::create_dir(&workspace_path).unwrap();
+        let database = Database::open(&database_path).await.unwrap();
+        let repository = WorkRepository::new(database.pool().clone());
+        let work = repository
+            .create(CreateWorkInput {
+                title: "Missing event id".into(),
+                goal: "Reject incomplete event identity".into(),
+                root_path: workspace_path.to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        let started = repository
+            .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
+            .await
+            .unwrap();
+        let envelope = WorkEventEnvelope {
+            version: 2,
+            event_id: None,
+            work_id: work.summary.id,
+            run_id: started.run.id,
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
+            sequence: 1,
+            occurred_at: Utc::now(),
+            payload: WorkEventPayload::RunStarted {
+                model_label: "test-model".into(),
+            },
+        };
+
+        let error = repository
+            .append_event_and_transition(&envelope)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            serde_json::to_value(error).unwrap(),
+            serde_json::json!({
+                "code": "invalid_input",
+                "message": "new Work events require an event id",
+                "details": { "field": "eventId" }
+            })
+        );
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ use piwork_lib::{
     work::{repository::WorkRepository, service::WorkService},
 };
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 struct TestHarness {
     _temporary_directory: tempfile::TempDir,
@@ -1385,7 +1386,7 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
     repository
         .append_event_and_transition(&WorkEventEnvelope {
             version: 1,
-            event_id: None,
+            event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
             run_id: first.run.id.clone(),
             turn_id: None,
@@ -1618,7 +1619,7 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
         .unwrap();
     let preexisting = WorkEventEnvelope {
         version: 1,
-        event_id: None,
+        event_id: Some(Uuid::new_v4().to_string()),
         work_id: work.summary.id.clone(),
         run_id: run.id.clone(),
         turn_id: None,
@@ -1774,7 +1775,7 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
         .unwrap();
     let completed = WorkEventEnvelope {
         version: 1,
-        event_id: None,
+        event_id: Some(Uuid::new_v4().to_string()),
         work_id: work.summary.id.clone(),
         run_id: run.id.clone(),
         turn_id: None,
@@ -1808,7 +1809,7 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
     for payload in representative_late_payloads {
         let late = WorkEventEnvelope {
             version: 1,
-            event_id: None,
+            event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
             run_id: run.id.clone(),
             turn_id: None,
