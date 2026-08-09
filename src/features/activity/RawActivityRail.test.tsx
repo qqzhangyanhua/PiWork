@@ -58,6 +58,17 @@ const event = (
   ...identity,
 });
 
+const journal = (
+  count: number,
+  payload: WorkEventPayload = { type: "assistantDelta", text: "entry" },
+): WorkEventEnvelope[] =>
+  Array.from({ length: count }, (_, index) => {
+    const sequence = index + 1;
+    return event(sequence, payload, {
+      occurredAt: new Date(Date.UTC(2026, 7, 9, 0, 0, 0, sequence)).toISOString(),
+    });
+  });
+
 describe("RawActivityRail", () => {
   beforeEach(async () => {
     await i18n.changeLanguage("zh-CN");
@@ -279,6 +290,120 @@ describe("RawActivityRail", () => {
     expect(journal.map(({ sequence }) => sequence)).toEqual([2, 1]);
   });
 
+  it("mounts only one 200-event page while preserving access to all journal events", async () => {
+    const user = userEvent.setup();
+    const events = journal(450).reverse();
+
+    render(<RawActivityRail events={events} />);
+
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(200);
+    expect(screen.getByText("#1")).toBeVisible();
+    expect(screen.getByText("#200")).toBeVisible();
+    expect(screen.queryByText("#201")).not.toBeInTheDocument();
+    expect(screen.getByText("1–200 / 450")).toBeVisible();
+
+    const previous = screen.getByRole("button", { name: "上一页" });
+    const next = screen.getByRole("button", { name: "下一页" });
+    expect(previous.tagName).toBe("BUTTON");
+    expect(next.tagName).toBe("BUTTON");
+    expect(previous).toBeDisabled();
+    expect(next).toBeEnabled();
+
+    await user.click(next);
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(200);
+    expect(screen.getByText("#201")).toBeVisible();
+    expect(screen.getByText("#400")).toBeVisible();
+    expect(screen.queryByText("#200")).not.toBeInTheDocument();
+    expect(screen.getByText("201–400 / 450")).toBeVisible();
+
+    await user.click(next);
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(50);
+    expect(screen.getByText("#401")).toBeVisible();
+    expect(screen.getByText("#450")).toBeVisible();
+    expect(screen.getByText("401–450 / 450")).toBeVisible();
+    expect(next).toBeDisabled();
+
+    await user.click(previous);
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(200);
+    expect(screen.getByText("#201")).toBeVisible();
+    expect(screen.getByText("#400")).toBeVisible();
+  });
+
+  it("keeps a legal current page stable when new events arrive", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<RawActivityRail events={journal(450)} />);
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    rerender(<RawActivityRail events={journal(451)} />);
+
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(200);
+    expect(screen.getByText("#201")).toBeVisible();
+    expect(screen.getByText("#400")).toBeVisible();
+    expect(screen.getByText("201–400 / 451")).toBeVisible();
+  });
+
+  it("clamps the current page when the journal becomes shorter", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<RawActivityRail events={journal(450)} />);
+    const next = screen.getByRole("button", { name: "下一页" });
+
+    await user.click(next);
+    await user.click(next);
+    expect(screen.getByText("#450")).toBeVisible();
+
+    rerender(<RawActivityRail events={journal(250)} />);
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(50);
+    expect(screen.getByText("#201")).toBeVisible();
+    expect(screen.getByText("#250")).toBeVisible();
+    expect(screen.getByText("201–250 / 250")).toBeVisible();
+
+    rerender(<RawActivityRail events={journal(50)} />);
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(50);
+    expect(screen.getByText("#1")).toBeVisible();
+    expect(screen.getByText("#50")).toBeVisible();
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+
+    rerender(<RawActivityRail events={journal(450)} />);
+    expect(screen.getByText("#1")).toBeVisible();
+    expect(screen.getByText("1–200 / 450")).toBeVisible();
+  });
+
+  it("renders every short-journal row without pagination controls", () => {
+    render(<RawActivityRail events={journal(25)} />);
+
+    expect(screen.getAllByTestId("raw-activity-event")).toHaveLength(25);
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+
+  it("localizes pagination controls in English", async () => {
+    await i18n.changeLanguage("en");
+
+    render(<RawActivityRail events={journal(201)} />);
+
+    expect(screen.getByRole("navigation", { name: "Journal pages" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+    expect(screen.getByText("1–200 / 201")).toBeVisible();
+  });
+
+  it("does not materialize large raw payloads while paging collapsed rows", async () => {
+    const user = userEvent.setup();
+    const parse = vi.spyOn(JSON, "parse");
+    const events = journal(450, {
+      type: "rawEngineEvent",
+      kind: "large",
+      payloadJson: '{"large":true}',
+    });
+
+    render(<RawActivityRail events={events} />);
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+
+    expect(parse).not.toHaveBeenCalled();
+    expect(events.map(({ sequence }) => sequence)).toEqual(
+      Array.from({ length: 450 }, (_, index) => index + 1),
+    );
+  });
+
   it("shows only metadata fields that exist", async () => {
     const user = userEvent.setup();
     render(
@@ -324,6 +449,12 @@ describe("RawActivityRail", () => {
     ]) {
       expect(workspaceStyles).toMatch(rule);
     }
+    expect(workspaceStyles).toMatch(
+      /\.raw-activity-rail__pagination\s*\{[^}]*flex-wrap:\s*wrap/su,
+    );
+    expect(workspaceStyles).toMatch(
+      /\.raw-activity-rail__pagination button\s*\{[^}]*color:\s*var\(--pw-text-primary\)/su,
+    );
 
     const lightTokens = tokenStyles.slice(0, tokenStyles.indexOf("@media"));
     const copy = tokenHex(lightTokens, "--pw-text-secondary");

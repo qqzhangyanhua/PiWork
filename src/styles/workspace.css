@@ -1643,6 +1643,9 @@
 .inspector-logs .diagnostics { max-width: none; margin: 0; }
 .raw-activity-rail { display: grid; margin: 0; padding: 0; border: 1px solid var(--pw-border-default); border-radius: var(--pw-radius-md); background: var(--pw-surface-panel); list-style: none; }
 .raw-activity-rail__item + .raw-activity-rail__item { border-top: 1px solid var(--pw-border-default); }
+.raw-activity-rail__pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.raw-activity-rail__pagination p { margin: 0; color: var(--pw-text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.raw-activity-rail__pagination button { min-width: 84px; color: var(--pw-text-primary); }
 .raw-activity-event > summary { display: grid; min-width: 0; grid-template-columns: 13px minmax(42px, auto) minmax(0, 1fr) minmax(0, auto); align-items: center; gap: 8px; padding: 9px 10px; color: var(--pw-text-secondary); cursor: pointer; font-size: 11px; font-variant-numeric: tabular-nums; list-style: none; }
 .raw-activity-event > summary::-webkit-details-marker { display: none; }
 .raw-activity-event > summary:hover { background: var(--pw-surface-hover); }

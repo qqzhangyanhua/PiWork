@@ -419,6 +419,10 @@
     "label": "活动原始记录",
     "empty": "还没有活动事件。",
     "sequence": "#{{sequence}}",
-    "legacyEvent": "旧版事件"
+    "legacyEvent": "旧版事件",
+    "paginationLabel": "事件记录分页",
+    "previousPage": "上一页",
+    "nextPage": "下一页",
+    "range": "{{start}}–{{end}} / {{total}}"
   }
 }

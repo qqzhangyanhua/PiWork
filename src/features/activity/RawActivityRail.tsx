@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkEventEnvelope } from "../../bindings";
@@ -7,6 +7,8 @@ import type { WorkEventEnvelope } from "../../bindings";
 export type RawActivityRailProps = {
   events: WorkEventEnvelope[];
 };
+
+const PAGE_SIZE = 200;
 
 const compareText = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
@@ -110,22 +112,68 @@ const RawActivityEventRow = memo(function RawActivityEventRow({
 
 export function RawActivityRail({ events }: RawActivityRailProps) {
   const { t } = useTranslation();
-  const rows = useMemo<RawActivityRowModel[]>(
-    () => [...events]
-      .sort(compareEvents)
-      .map((event) => ({ event, key: eventKey(event) })),
+  const [page, setPage] = useState(0);
+  const sortedEvents = useMemo(
+    () => [...events].sort(compareEvents),
     [events],
   );
+  const lastPage = Math.max(0, Math.ceil(sortedEvents.length / PAGE_SIZE) - 1);
+  const currentPage = Math.min(page, lastPage);
+  const pageStart = currentPage * PAGE_SIZE;
+  const rows = useMemo<RawActivityRowModel[]>(
+    () => sortedEvents
+      .slice(pageStart, pageStart + PAGE_SIZE)
+      .map((event) => ({ event, key: eventKey(event) })),
+    [pageStart, sortedEvents],
+  );
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, lastPage));
+  }, [lastPage]);
 
   if (rows.length === 0) {
     return <p className="inspector-empty">{t("rawActivity.empty")}</p>;
   }
 
+  const pageEnd = Math.min(pageStart + PAGE_SIZE, sortedEvents.length);
+
   return (
-    <ol aria-label={t("rawActivity.label")} className="raw-activity-rail">
-      {rows.map((row) => (
-        <RawActivityEventRow event={row.event} key={row.key} />
-      ))}
-    </ol>
+    <>
+      <ol aria-label={t("rawActivity.label")} className="raw-activity-rail">
+        {rows.map((row) => (
+          <RawActivityEventRow event={row.event} key={row.key} />
+        ))}
+      </ol>
+      {lastPage > 0 ? (
+        <nav
+          aria-label={t("rawActivity.paginationLabel")}
+          className="raw-activity-rail__pagination"
+        >
+          <button
+            className="button"
+            disabled={currentPage === 0}
+            onClick={() => setPage(currentPage - 1)}
+            type="button"
+          >
+            {t("rawActivity.previousPage")}
+          </button>
+          <p aria-live="polite">
+            {t("rawActivity.range", {
+              start: pageStart + 1,
+              end: pageEnd,
+              total: sortedEvents.length,
+            })}
+          </p>
+          <button
+            className="button"
+            disabled={currentPage === lastPage}
+            onClick={() => setPage(currentPage + 1)}
+            type="button"
+          >
+            {t("rawActivity.nextPage")}
+          </button>
+        </nav>
+      ) : null}
+    </>
   );
 }

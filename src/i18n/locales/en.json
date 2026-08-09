@@ -419,6 +419,10 @@
     "label": "Raw activity journal",
     "empty": "No activity events recorded yet.",
     "sequence": "#{{sequence}}",
-    "legacyEvent": "Legacy event"
+    "legacyEvent": "Legacy event",
+    "paginationLabel": "Journal pages",
+    "previousPage": "Previous page",
+    "nextPage": "Next page",
+    "range": "{{start}}–{{end}} / {{total}}"
   }
 }
