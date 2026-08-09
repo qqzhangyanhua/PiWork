@@ -1,3 +1,10 @@
+/*
+ * Regression invariants adapted from block/buzz at
+ * 5bf78671f45178f8de02ba18d3d321cbbf19cd1f, Apache-2.0.
+ * Original: desktop/src/features/agents/ui/agentSessionToolClassifier.ts.
+ * PiWork changes: typed WorkEvent fixtures exercise Pi read/write/bash
+ * descriptors without Buzz, Relay, or MCP-specific provider metadata.
+ */
 import type { WorkEventEnvelope, WorkEventPayload } from "../../bindings";
 import { describe, expect, it } from "vitest";
 

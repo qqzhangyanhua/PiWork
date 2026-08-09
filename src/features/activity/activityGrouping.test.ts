@@ -1,3 +1,10 @@
+/*
+ * Regression invariants adapted from block/buzz at
+ * 5bf78671f45178f8de02ba18d3d321cbbf19cd1f, Apache-2.0.
+ * Original: desktop/src/features/agents/ui/agentSessionTranscriptGrouping.ts.
+ * PiWork changes: fixtures cover protocol-derived Session/Turn keys and
+ * semantic Pi tool bursts without Channel or Relay transport framing.
+ */
 import { describe, expect, it } from "vitest";
 
 import type {
