@@ -26,6 +26,12 @@ fn document_derivative_migration_uses_stable_lf_line_endings() {
     assert!(!migration.contains(&b'\r'));
 }
 
+#[test]
+fn activity_protocol_migration_uses_stable_lf_line_endings() {
+    let migration = include_bytes!("../migrations/0004_activity_protocol_v2.sql");
+    assert!(!migration.contains(&b'\r'));
+}
+
 async fn insert_work(database: &Database, id: &str) {
     insert_work_with_permission_mode(database, id, "balanced")
         .await
@@ -112,6 +118,96 @@ async fn migration_creates_foundation_tables() {
     for expected in ["works", "runs", "messages", "events", "settings"] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");
     }
+}
+
+#[tokio::test]
+async fn activity_protocol_migration_adds_nullable_event_context_and_indexes() {
+    let database = Database::open_in_memory().await.unwrap();
+    let columns = sqlx::query_as::<_, (String, String, i64, Option<String>)>(
+        "SELECT name, type, \"notnull\", dflt_value \
+         FROM pragma_table_info('events') \
+         WHERE name IN ( \
+             'turn_id', 'session_id', 'agent_id', 'assignment_id', \
+             'causation_id', 'correlation_id' \
+         ) \
+         ORDER BY cid",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let column_contract = columns
+        .iter()
+        .map(|(name, column_type, not_null, default)| {
+            (
+                name.as_str(),
+                column_type.as_str(),
+                *not_null,
+                default.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        column_contract,
+        vec![
+            ("turn_id", "TEXT", 0, None),
+            ("session_id", "TEXT", 0, None),
+            ("agent_id", "TEXT", 0, None),
+            ("assignment_id", "TEXT", 0, None),
+            ("causation_id", "TEXT", 0, None),
+            ("correlation_id", "TEXT", 0, None),
+        ]
+    );
+
+    for (index_name, expected_columns) in [
+        (
+            "idx_events_work_turn_sequence",
+            vec!["work_id", "turn_id", "sequence"],
+        ),
+        (
+            "idx_events_assignment_sequence",
+            vec!["assignment_id", "sequence"],
+        ),
+    ] {
+        let index_columns =
+            sqlx::query_scalar::<_, String>("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+                .bind(index_name)
+                .fetch_all(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(index_columns, expected_columns);
+    }
+
+    let partial_indexes = sqlx::query_as::<_, (String, i64)>(
+        "SELECT name, partial FROM pragma_index_list('events') \
+         WHERE name IN ('idx_events_work_turn_sequence', 'idx_events_assignment_sequence') \
+         ORDER BY name",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        partial_indexes,
+        vec![
+            ("idx_events_assignment_sequence".into(), 1),
+            ("idx_events_work_turn_sequence".into(), 0),
+        ]
+    );
+
+    let assignment_index_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master \
+         WHERE type = 'index' AND name = 'idx_events_assignment_sequence'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        assignment_index_sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+        "CREATE INDEX idx_events_assignment_sequence ON events(assignment_id, sequence) \
+         WHERE assignment_id IS NOT NULL"
+    );
 }
 
 #[tokio::test]

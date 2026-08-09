@@ -596,8 +596,15 @@ async fn consume_events(
         }
         let envelope = WorkEventEnvelope {
             version: 1,
+            event_id: None,
             work_id: work_id.clone(),
             run_id: run_id.clone(),
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
             sequence,
             occurred_at: Utc::now(),
             payload: event.into(),

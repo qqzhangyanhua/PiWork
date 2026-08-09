@@ -706,8 +706,15 @@ impl WorkRepository {
             .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
         let envelope = WorkEventEnvelope {
             version: 1,
+            event_id: None,
             work_id: work_id.to_owned(),
             run_id: run_id.to_owned(),
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
             sequence: u32::try_from(next_sequence)
                 .map_err(|error| AppError::Database(sqlx::Error::Decode(Box::new(error))))?,
             occurred_at: Utc::now(),
@@ -1108,8 +1115,15 @@ impl TryFrom<EventRow> for WorkEventEnvelope {
 
         Ok(Self {
             version,
+            event_id: None,
             work_id: row.work_id,
             run_id: row.run_id,
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
             sequence,
             occurred_at: row.occurred_at,
             payload,
@@ -1174,8 +1188,15 @@ mod tests {
         let append_repository = repository.clone();
         let envelope = WorkEventEnvelope {
             version: 1,
+            event_id: None,
             work_id: work.summary.id.clone(),
             run_id: started.run.id.clone(),
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
             sequence: 1,
             occurred_at: Utc::now(),
             payload: WorkEventPayload::RunStarted {

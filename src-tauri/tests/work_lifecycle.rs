@@ -1385,8 +1385,15 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
     repository
         .append_event_and_transition(&WorkEventEnvelope {
             version: 1,
+            event_id: None,
             work_id: work.summary.id.clone(),
             run_id: first.run.id.clone(),
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
             sequence: 1,
             occurred_at: chrono::Utc::now(),
             payload: WorkEventPayload::RunCompleted {
@@ -1611,8 +1618,15 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
         .unwrap();
     let preexisting = WorkEventEnvelope {
         version: 1,
+        event_id: None,
         work_id: work.summary.id.clone(),
         run_id: run.id.clone(),
+        turn_id: None,
+        session_id: None,
+        agent_id: None,
+        assignment_id: None,
+        causation_id: None,
+        correlation_id: None,
         sequence: 1,
         occurred_at: chrono::Utc::now(),
         payload: WorkEventPayload::AssistantDelta {
@@ -1750,7 +1764,7 @@ async fn publisher_panic_aborts_the_engine_once_and_gets_a_durable_failure_fallb
 }
 
 #[tokio::test]
-async fn repository_rejects_every_event_after_a_terminal_event() {
+async fn repository_rejects_late_events_before_payload_kind_matters() {
     let harness = TestHarness::new().await;
     let work = harness.create_work("Terminal is last").await;
     let run = harness
@@ -1760,8 +1774,15 @@ async fn repository_rejects_every_event_after_a_terminal_event() {
         .unwrap();
     let completed = WorkEventEnvelope {
         version: 1,
+        event_id: None,
         work_id: work.summary.id.clone(),
         run_id: run.id.clone(),
+        turn_id: None,
+        session_id: None,
+        agent_id: None,
+        assignment_id: None,
+        causation_id: None,
+        correlation_id: None,
         sequence: 1,
         occurred_at: chrono::Utc::now(),
         payload: WorkEventPayload::RunCompleted {
@@ -1776,39 +1797,26 @@ async fn repository_rejects_every_event_after_a_terminal_event() {
         .append_event_and_transition(&completed)
         .await
         .unwrap();
-    let late_payloads = [
-        WorkEventPayload::RunStarted {
-            model_label: "late".into(),
-        },
-        WorkEventPayload::AssistantDelta {
+    let representative_late_payloads = [
+        WorkEventPayload::ThoughtDelta {
             text: "too late".into(),
-        },
-        WorkEventPayload::ToolStarted {
-            tool_call_id: "late-tool".into(),
-            tool_name: "late".into(),
-            input_summary: "late".into(),
-        },
-        WorkEventPayload::ToolFinished {
-            tool_call_id: "late-tool".into(),
-            tool_name: "late".into(),
-            output_summary: "late".into(),
-            success: true,
-        },
-        WorkEventPayload::RunCompleted {
-            summary: "late terminal".into(),
-            artifacts: Vec::new(),
-            validation: Vec::new(),
-            limitations: Vec::new(),
         },
         WorkEventPayload::RunFailed {
             message: "late failure".into(),
         },
     ];
-    for payload in late_payloads {
+    for payload in representative_late_payloads {
         let late = WorkEventEnvelope {
             version: 1,
+            event_id: None,
             work_id: work.summary.id.clone(),
             run_id: run.id.clone(),
+            turn_id: None,
+            session_id: None,
+            agent_id: None,
+            assignment_id: None,
+            causation_id: None,
+            correlation_id: None,
             sequence: 2,
             occurred_at: chrono::Utc::now(),
             payload,
