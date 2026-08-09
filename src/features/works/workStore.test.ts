@@ -237,7 +237,7 @@ describe("createWorkStore", () => {
     expect(store.getState().lastSequenceByRun.r1).toBe(2);
   });
 
-  it("deduplicates one stable event delivered live and by detail hydration", async () => {
+  it("keeps the live envelope when an older detail hydrates the same event", async () => {
     const detailResult = deferred<WorkDetail>();
     const client: PiWorkClient = {
       ...unusedClient,
@@ -248,24 +248,99 @@ describe("createWorkStore", () => {
     const hydration = store.getState().hydrate();
     await Promise.resolve();
     const earlierEvent = {
-      ...event(0, { type: "runStarted", modelLabel: "gpt-5" }),
+      ...event(1, { type: "runStarted", modelLabel: "gpt-5" }),
       eventId: "event-earlier",
     };
-    const sharedEvent = {
-      ...event(1, { type: "assistantDelta", text: "persisted once" }),
+    const liveEvent = {
+      ...event(2, { type: "assistantDelta", text: "live committed envelope" }),
       eventId: "event-shared",
     };
+    const persistedSnapshot = {
+      ...liveEvent,
+      payload: {
+        type: "assistantDelta" as const,
+        text: "older persisted snapshot",
+      },
+    };
 
-    store.getState().applyEvent(sharedEvent);
+    store.getState().applyEvent(liveEvent);
     detailResult.resolve({
       summary: work,
       runs: [run],
       messages: [],
-      events: [sharedEvent, earlierEvent],
+      events: [persistedSnapshot, earlierEvent],
     });
     await hydration;
 
-    expect(store.getState().timelines.w1).toEqual([earlierEvent, sharedEvent]);
+    expect(store.getState().timelines.w1).toEqual([earlierEvent, liveEvent]);
+    expect(store.getState().timelines.w1?.[1]).toMatchObject({
+      eventId: "event-shared",
+      payload: { type: "assistantDelta", text: "live committed envelope" },
+    });
+  });
+
+  it("keeps the hydrated envelope when the same live frame arrives later", async () => {
+    const persistedEvent = {
+      ...event(1, {
+        type: "assistantDelta",
+        text: "persisted authoritative envelope",
+      }),
+      eventId: "event-shared",
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [run],
+        messages: [],
+        events: [persistedEvent],
+      }),
+    };
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+    store.getState().applyEvent({
+      ...persistedEvent,
+      payload: { type: "assistantDelta", text: "duplicate live envelope" },
+    });
+
+    expect(store.getState().timelines.w1).toEqual([persistedEvent]);
+    expect(store.getState().timelines.w1?.[0]).toMatchObject({
+      eventId: "event-shared",
+      payload: {
+        type: "assistantDelta",
+        text: "persisted authoritative envelope",
+      },
+    });
+    expect(store.getState().lastSequenceByRun.r1).toBe(1);
+  });
+
+  it("uses a hydration-only watermark to reject an older distinct live event", async () => {
+    const persistedEvent = {
+      ...event(3, { type: "assistantDelta", text: "persisted sequence 3" }),
+      eventId: "event-persisted-3",
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      listWorks: async () => [work],
+      getWork: async () => ({
+        summary: work,
+        runs: [run],
+        messages: [],
+        events: [persistedEvent],
+      }),
+    };
+    const store = createWorkStore(client);
+
+    await store.getState().hydrate();
+    store.getState().applyEvent({
+      ...event(2, { type: "assistantDelta", text: "stale sequence 2" }),
+      eventId: "event-stale-2",
+    });
+
+    expect(store.getState().timelines.w1).toEqual([persistedEvent]);
+    expect(store.getState().lastSequenceByRun.r1).toBe(3);
   });
 
   it("keeps distinct stable events even when their timestamps and sequences match", async () => {

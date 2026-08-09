@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { WorkEventEnvelope } from "../bindings";
+import type { MessageSummary, WorkEventEnvelope } from "../bindings";
 import { normalizeAppError, timelineItemKey } from "./work";
 
 const event = (
@@ -34,6 +34,20 @@ describe("timelineItemKey", () => {
     });
 
     expect(timelineItemKey(legacyEvent)).toBe("event:run-1:1");
+  });
+
+  it("uses the persisted message ID for message timeline items", () => {
+    const message: MessageSummary = {
+      id: "message-1",
+      workId: "work-1",
+      runId: "run-1",
+      role: "assistant",
+      content: "hello",
+      resourceIds: [],
+      createdAt: "2026-07-28T09:00:01.000Z",
+    };
+
+    expect(timelineItemKey(message)).toBe("message:message-1");
   });
 });
 
