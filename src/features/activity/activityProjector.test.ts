@@ -334,7 +334,8 @@ describe("projectActivity", () => {
       {
         id: "lifecycle:run-1:sessionChanged:3",
         activityKind: "sessionChanged",
-        detail: "Session rotated: context limit",
+        transition: "rotated",
+        reason: "context limit",
       },
       {
         id: "lifecycle:run-1:artifactProduced:4",
@@ -361,6 +362,7 @@ describe("projectActivity", () => {
         detail: "Delivered",
       },
     ]);
+    expect(items[2]).not.toHaveProperty("detail");
   });
 
   it("retains raw and alive liveness events while surfacing stalled liveness", () => {

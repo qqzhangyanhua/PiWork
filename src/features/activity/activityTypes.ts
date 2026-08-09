@@ -22,6 +22,16 @@ export type ActivityRenderClass =
 export type ActivityTone = "read" | "write" | "admin" | "neutral";
 export type ActivityAction = "read" | "write" | "execute" | "invoke";
 export type ToolStatus = "pending" | "executing" | "completed" | "failed";
+export type ActivitySessionTransition = "created" | "resumed" | "rotated";
+export type ActivityLifecycleKind =
+  | "runStarted"
+  | "waiting"
+  | "liveness"
+  | "sessionChanged"
+  | "artifactProduced"
+  | "validationProduced"
+  | "runCompleted"
+  | "runFailed";
 
 export type ActivityIdentity = {
   workId: string;
@@ -78,20 +88,20 @@ export type ActivityItem = ActivityBase &
         status: "requested" | "resolved";
         outcome: PermissionOutcome | null;
       }
-    | {
+    | ({
         type: "lifecycle";
         renderClass: "status" | "error" | "suppressed";
-        activityKind:
-          | "runStarted"
-          | "waiting"
-          | "liveness"
-          | "sessionChanged"
-          | "artifactProduced"
-          | "validationProduced"
-          | "runCompleted"
-          | "runFailed";
-        detail: string | null;
-      }
+      } & (
+        | {
+            activityKind: "sessionChanged";
+            transition: ActivitySessionTransition;
+            reason: string | null;
+          }
+        | {
+            activityKind: Exclude<ActivityLifecycleKind, "sessionChanged">;
+            detail: string | null;
+          }
+      ))
     | {
         type: "usage";
         renderClass: "suppressed";

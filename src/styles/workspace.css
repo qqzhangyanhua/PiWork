@@ -1161,7 +1161,7 @@
 
 .activity-feed__tool-copy small {
   margin-top: 3px;
-  color: var(--pw-text-tertiary);
+  color: var(--pw-text-secondary);
   font-size: 10px;
   line-height: 1.45;
 }
@@ -1171,7 +1171,7 @@
   align-items: center;
   gap: 4px;
   padding-top: 1px;
-  color: var(--pw-text-tertiary);
+  color: var(--pw-text-secondary);
   font-size: 10px;
   font-weight: 600;
   white-space: nowrap;
@@ -1182,15 +1182,15 @@
   height: 12px;
 }
 
-.activity-feed__status[data-status="executing"] {
+.activity-feed__status[data-status="executing"] svg {
   color: var(--pw-accent-700);
 }
 
-.activity-feed__status[data-status="completed"] {
+.activity-feed__status[data-status="completed"] svg {
   color: var(--pw-success-500);
 }
 
-.activity-feed__status[data-status="failed"] {
+.activity-feed__status[data-status="failed"] svg {
   color: var(--pw-failure-500);
 }
 
@@ -1212,7 +1212,7 @@
   justify-content: space-between;
   gap: 10px;
   padding: 6px 9px;
-  color: var(--pw-text-tertiary);
+  color: var(--pw-text-secondary);
   font-size: 10px;
   font-weight: 600;
   line-height: 1.4;
@@ -1336,7 +1336,7 @@
   border-left-width: 2px;
   border-left-color: var(--pw-waiting-500);
   background: var(--pw-surface-subtle);
-  color: var(--pw-text-tertiary);
+  color: var(--pw-text-secondary);
 }
 
 .activity-feed__lifecycle[data-kind="runFailed"] {

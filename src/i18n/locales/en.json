@@ -314,6 +314,12 @@
     "lifecycle": {
       "waiting": "Waiting to continue",
       "sessionChanged": "Session changed",
+      "sessionWithReason": "{{transition}}: {{reason}}",
+      "sessionTransitions": {
+        "created": "Created a new session",
+        "resumed": "Resumed session",
+        "rotated": "Rotated session"
+      },
       "runFailed": "Run did not complete"
     }
   },

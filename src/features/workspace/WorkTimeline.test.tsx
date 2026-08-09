@@ -119,6 +119,90 @@ describe("WorkTimeline", () => {
     expect(screen.queryByText("queue_update")).not.toBeInTheDocument();
   });
 
+  it("surfaces an unresolved permission alert without opening execution details", () => {
+    render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, {
+            type: "permissionRequested",
+            requestId: "permission-1",
+            toolCallId: "tool-1",
+            title: "Write file",
+            detail: "src/app.tsx",
+          }),
+        ]}
+      />,
+    );
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toBeVisible();
+    expect(alert).toHaveTextContent("需要权限");
+    expect(alert).toHaveTextContent("Write file");
+    expect(alert.closest(".execution-progress")).toBeNull();
+    expect(screen.getAllByText("需要权限")).toHaveLength(1);
+  });
+
+  it("keeps resolved permissions inside details without an emergency alert role", () => {
+    render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, {
+            type: "permissionRequested",
+            requestId: "permission-1",
+            title: "Write file",
+            detail: "src/app.tsx",
+          }),
+          event(3, {
+            type: "permissionResolved",
+            requestId: "permission-1",
+            outcome: "allowed_once",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("本次允许")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+    expect(screen.getByText("本次允许")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      label: "raw-only",
+      payload: {
+        type: "rawEngineEvent",
+        kind: "queue_update",
+        payloadJson: '{"size":1}',
+      } as WorkEventPayload,
+    },
+    {
+      label: "usage-only",
+      payload: {
+        type: "usageUpdated",
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 2,
+        cacheWriteTokens: 1,
+        totalTokens: 18,
+      } as WorkEventPayload,
+    },
+  ])("does not render an empty progress card for a $label journal", ({ payload }) => {
+    const { container } = render(
+      <WorkTimeline resources={[]} timeline={[event(1, payload)]} />,
+    );
+
+    expect(container.querySelector(".execution-progress")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "展开执行详情" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("separates process details from delivery without exposing Run containers", () => {
     const { container } = render(
       <WorkTimeline
@@ -198,6 +282,55 @@ describe("WorkTimeline", () => {
     expect(container.querySelector(".execution-progress")).not.toHaveTextContent("网络不可用");
     fireEvent.click(screen.getByRole("button", { name: "打开诊断" }));
     expect(onOpenDiagnostics).toHaveBeenCalledTimes(1);
+  });
+
+  it("announces a failed Run once when execution details are expanded", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, { type: "runFailed", message: "网络不可用" }),
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+    expect(
+      container.querySelector(
+        '.activity-feed__lifecycle[data-kind="runFailed"]',
+      ),
+    ).toBeVisible();
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toBe(container.querySelector(".timeline-failure"));
+  });
+
+  it("keeps an unresolved permission as non-urgent history after a Run fails", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, {
+            type: "permissionRequested",
+            requestId: "permission-1",
+            title: "Write file",
+            detail: "src/app.tsx",
+          }),
+          event(3, { type: "runFailed", message: "网络不可用" }),
+        ]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+    const permission = container.querySelector(".activity-feed__permission");
+    expect(permission).toBeVisible();
+    expect(permission).toHaveAttribute("role", "status");
+    expect(permission?.closest(".execution-progress")).not.toBeNull();
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toBe(container.querySelector(".timeline-failure"));
   });
 
   it("keeps the current Pi activity group collapsed while a Run is active", () => {

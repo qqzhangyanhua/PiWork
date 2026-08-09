@@ -206,7 +206,10 @@ const mergeTool = (
 
 const lifecycleItem = (
   event: WorkEventEnvelope,
-  activityKind: Extract<ActivityItem, { type: "lifecycle" }>["activityKind"],
+  activityKind: Exclude<
+    Extract<ActivityItem, { type: "lifecycle" }>["activityKind"],
+    "sessionChanged"
+  >,
   renderClass: Extract<ActivityItem, { type: "lifecycle" }>["renderClass"],
   detail: string | null,
 ): ActivityItem => ({
@@ -434,17 +437,17 @@ const processActivityEventIntoDraft = (
       return;
 
     case "sessionChanged":
-      putItem(
-        draft,
-        lifecycleItem(
+      putItem(draft, {
+        ...baseFrom(
           event,
-          "sessionChanged",
-          "status",
-          payload.reason
-            ? `Session ${payload.transition}: ${payload.reason}`
-            : `Session ${payload.transition}`,
+          `lifecycle:${event.runId}:${event.payload.type}:${event.sequence}`,
         ),
-      );
+        type: "lifecycle",
+        renderClass: "status",
+        activityKind: "sessionChanged",
+        transition: payload.transition,
+        reason: payload.reason ?? null,
+      });
       return;
 
     case "artifactProduced":

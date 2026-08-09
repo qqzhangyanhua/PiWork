@@ -314,6 +314,12 @@
     "lifecycle": {
       "waiting": "等待继续",
       "sessionChanged": "会话已切换",
+      "sessionWithReason": "{{transition}}：{{reason}}",
+      "sessionTransitions": {
+        "created": "已创建新会话",
+        "resumed": "已恢复会话",
+        "rotated": "已轮换会话"
+      },
       "runFailed": "执行未完成"
     }
   },

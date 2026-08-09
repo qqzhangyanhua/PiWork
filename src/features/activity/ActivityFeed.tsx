@@ -19,6 +19,7 @@ import type { ActivityItem, ToolStatus } from "./activityTypes";
 
 export type ActivityFeedProps = {
   items: ActivityItem[];
+  permissionRequestRole?: "alert" | "status";
 };
 
 type ThoughtOrPlan = Extract<ActivityItem, { type: "thought" | "plan" }>;
@@ -139,8 +140,10 @@ function ToolRow({ item }: { item: ToolItem }) {
 
 function PermissionRow({
   item,
+  requestRole,
 }: {
   item: Extract<ActivityItem, { type: "permission" }>;
+  requestRole: "alert" | "status";
 }) {
   const { t } = useTranslation();
   const status =
@@ -155,7 +158,7 @@ function PermissionRow({
       <article
         className="activity-feed__permission"
         data-status={item.status}
-        role="alert"
+        role={item.status === "requested" ? requestRole : "status"}
       >
         <ShieldAlert aria-hidden="true" />
         <div>
@@ -185,6 +188,20 @@ function LifecycleRow({ item }: { item: LifecycleItem }) {
       ? RefreshCw
       : Clock3;
   const label = t(`activity.lifecycle.${item.activityKind}`);
+  let detail: string | null = null;
+  if (item.activityKind === "sessionChanged") {
+    const transition = t(
+      `activity.lifecycle.sessionTransitions.${item.transition}`,
+    );
+    detail = item.reason
+      ? t("activity.lifecycle.sessionWithReason", {
+          reason: item.reason,
+          transition,
+        })
+      : transition;
+  } else if (!isFailure) {
+    detail = item.detail;
+  }
 
   return (
     <li
@@ -193,19 +210,19 @@ function LifecycleRow({ item }: { item: LifecycleItem }) {
       <article
         className="activity-feed__lifecycle"
         data-kind={item.activityKind}
-        role={isFailure ? "alert" : "status"}
+        role={isFailure ? undefined : "status"}
       >
         <Icon aria-hidden="true" />
         <div>
           <strong>{label}</strong>
-          {!isFailure && item.detail ? <p>{item.detail}</p> : null}
+          {detail ? <p>{detail}</p> : null}
         </div>
       </article>
     </li>
   );
 }
 
-const isVisibleItem = (item: ActivityItem): boolean => {
+export const isActivityFeedItem = (item: ActivityItem): boolean => {
   if (
     item.type === "message" ||
     item.type === "usage" ||
@@ -222,13 +239,21 @@ const isVisibleItem = (item: ActivityItem): boolean => {
   );
 };
 
-function ActivityItemRow({ item }: { item: ActivityItem }) {
-  if (!isVisibleItem(item)) return null;
+function ActivityItemRow({
+  item,
+  permissionRequestRole = "alert",
+}: {
+  item: ActivityItem;
+  permissionRequestRole?: "alert" | "status";
+}) {
+  if (!isActivityFeedItem(item)) return null;
   if (item.type === "thought" || item.type === "plan") {
     return <ThoughtOrPlanRow item={item} />;
   }
   if (item.type === "tool") return <ToolRow item={item} />;
-  if (item.type === "permission") return <PermissionRow item={item} />;
+  if (item.type === "permission") {
+    return <PermissionRow item={item} requestRole={permissionRequestRole} />;
+  }
   if (item.type === "lifecycle") return <LifecycleRow item={item} />;
   return null;
 }
@@ -272,10 +297,13 @@ function ToolBurst({
 
 const visibleBlock = (block: ActivityDisplayBlock): boolean => {
   if (block.kind === "toolBurst") return true;
-  return isVisibleItem(block.item);
+  return isActivityFeedItem(block.item);
 };
 
-export function ActivityFeed({ items }: ActivityFeedProps) {
+export function ActivityFeed({
+  items,
+  permissionRequestRole = "alert",
+}: ActivityFeedProps) {
   const { t } = useTranslation();
   const groups = buildActivityDisplayGroups(items);
   const visibleGroups = groups
@@ -297,6 +325,7 @@ export function ActivityFeed({ items }: ActivityFeedProps) {
             <ActivityItemRow
               item={block.item}
               key={`${group.key}:${block.key}`}
+              permissionRequestRole={permissionRequestRole}
             />
           ),
         ),

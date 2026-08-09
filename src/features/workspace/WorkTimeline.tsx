@@ -7,7 +7,10 @@ import remarkGfm from "remark-gfm";
 import { appErrorMessageKey, appErrorMessageValues } from "../../domain/appError";
 import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../../domain/work";
 import type { MessageSummary, ResourceSummary, WorkEventEnvelope, WorkSummary } from "../../bindings";
-import { ActivityFeed } from "../activity/ActivityFeed";
+import {
+  ActivityFeed,
+  isActivityFeedItem,
+} from "../activity/ActivityFeed";
 import { projectActivity } from "../activity/activityProjector";
 import type { ActivityItem } from "../activity/activityTypes";
 import { AttachmentChips } from "./AttachmentChips";
@@ -66,6 +69,11 @@ const presentableCompletionSummary = (summary: string) => {
   return /^Pi completed this Run with \d+ tool calls?$/iu.test(value) ? "" : value;
 };
 
+const isUrgentPermission = (
+  item: ActivityItem,
+): item is Extract<ActivityItem, { type: "permission" }> =>
+  item.type === "permission" && item.status === "requested";
+
 function AssistantMessage({ text }: { text: string }) {
   return (
     <article className="timeline-event--assistant">
@@ -98,7 +106,19 @@ function ConversationSegment({
     )
     .map((item) => item.text)
     .join("");
-  const activityItems = projected.filter((item) => item.type !== "message");
+  const hasTerminalEvent = events.some(
+    (event) =>
+      event.payload.type === "runCompleted" || event.payload.type === "runFailed",
+  );
+  const urgentPermissionItems = hasTerminalEvent
+    ? []
+    : projected.filter(isUrgentPermission);
+  const activityItems = projected.filter(
+    (item) =>
+      item.type !== "message" &&
+      (hasTerminalEvent || !isUrgentPermission(item)),
+  );
+  const hasProgressActivity = activityItems.some(isActivityFeedItem);
   const completion = events.find(
     (event): event is WorkEventEnvelope & { payload: Extract<WorkEventEnvelope["payload"], { type: "runCompleted" }> } =>
       event.payload.type === "runCompleted",
@@ -138,9 +158,15 @@ function ConversationSegment({
           />
         </article>
       ))}
-      {(activityItems.length > 0 || completion || failure) && (
+      {urgentPermissionItems.length > 0 ? (
+        <ActivityFeed items={urgentPermissionItems} />
+      ) : null}
+      {hasProgressActivity && (
         <ExecutionProgressCard events={events}>
-          <ActivityFeed items={activityItems} />
+          <ActivityFeed
+            items={activityItems}
+            permissionRequestRole="status"
+          />
         </ExecutionProgressCard>
       )}
       {assistantText && <AssistantMessage text={assistantText} />}

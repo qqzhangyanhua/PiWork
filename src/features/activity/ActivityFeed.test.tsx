@@ -1,5 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+// @ts-expect-error Vitest runs this visual contract in Node; the app omits global Node typings.
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import type { WorkEventEnvelope, WorkEventPayload } from "../../bindings";
@@ -7,6 +9,38 @@ import { i18n } from "../../i18n";
 import { projectActivity } from "./activityProjector";
 import type { ActivityItem, ToolStatus } from "./activityTypes";
 import { ActivityFeed } from "./ActivityFeed";
+
+const workspaceStyles = readFileSync("src/styles/workspace.css", "utf8");
+const tokenStyles = readFileSync("src/styles/tokens.css", "utf8");
+
+const tokenHex = (source: string, token: string): string => {
+  const match = source.match(new RegExp(`${token}:\\s*(#[0-9a-f]{6})`, "iu"));
+  if (!match) throw new Error(`Missing color token ${token}`);
+  return match[1]!;
+};
+
+const relativeLuminance = (hex: string): number => {
+  const channel = (start: number): number =>
+    Number.parseInt(hex.slice(start, start + 2), 16) / 255;
+  const [red, green, blue] = [channel(1), channel(3), channel(5)].map((value) =>
+    value <= 0.04045
+      ? value / 12.92
+      : ((value + 0.055) / 1.055) ** 2.4,
+  );
+  return 0.2126 * red! + 0.7152 * green! + 0.0722 * blue!;
+};
+
+const contrastRatio = (foreground: string, background: string): number => {
+  const lighter = Math.max(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  const darker = Math.min(
+    relativeLuminance(foreground),
+    relativeLuminance(background),
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+};
 
 const event = (
   sequence: number,
@@ -294,7 +328,7 @@ describe("ActivityFeed", () => {
     expect(screen.getByText("src/two.ts")).toBeVisible();
   });
 
-  it("announces resolved permission outcomes without losing request context", () => {
+  it("reports resolved permission outcomes without retaining an emergency alert role", () => {
     render(
       <ActivityFeed
         items={projectActivity([
@@ -313,10 +347,11 @@ describe("ActivityFeed", () => {
       />,
     );
 
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Write file");
-    expect(alert).toHaveTextContent("src/app.tsx");
-    expect(alert).toHaveTextContent("本次允许");
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("Write file");
+    expect(status).toHaveTextContent("src/app.tsx");
+    expect(status).toHaveTextContent("本次允许");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByText("需要权限")).not.toBeInTheDocument();
   });
 
@@ -347,12 +382,49 @@ describe("ActivityFeed", () => {
     expect(screen.getByText("等待继续")).toBeVisible();
     expect(screen.getByText("等待网络恢复")).toBeVisible();
     expect(screen.getByText("会话已切换")).toBeVisible();
-    expect(screen.getByText(/上下文已满/u)).toBeVisible();
+    expect(screen.getByText("已轮换会话：上下文已满")).toBeVisible();
+    expect(screen.queryByText("Session rotated: 上下文已满")).not.toBeInTheDocument();
     expect(screen.getByText("执行未完成")).toBeVisible();
     expect(screen.queryByText("private-model")).not.toBeInTheDocument();
     expect(screen.queryByText("Activity stalled")).not.toBeInTheDocument();
     expect(screen.queryByText("sensitive stack trace")).not.toBeInTheDocument();
     expect(screen.queryByText("routine completion")).not.toBeInTheDocument();
+  });
+
+  it("keeps a Run failure visible without creating a second live alert", () => {
+    render(
+      <ActivityFeed
+        items={projectActivity([
+          event(1, { type: "runFailed", message: "sensitive stack trace" }),
+        ])}
+      />,
+    );
+
+    const failure = screen
+      .getByText("执行未完成")
+      .closest(".activity-feed__lifecycle");
+    expect(failure).toBeVisible();
+    expect(failure).not.toHaveAttribute("role");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("formats a structured session transition exactly in English", async () => {
+    await i18n.changeLanguage("en");
+    render(
+      <ActivityFeed
+        items={projectActivity([
+          event(1, {
+            type: "sessionChanged",
+            transition: "resumed",
+            reason: "context restored",
+          }),
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("Session changed")).toBeVisible();
+    expect(screen.getByText("Resumed session: context restored")).toBeVisible();
+    expect(screen.queryByText("Session resumed: context restored")).not.toBeInTheDocument();
   });
 
   it("gives every disclosure an accessible summary and permission a live alert", () => {
@@ -404,5 +476,32 @@ describe("ActivityFeed", () => {
     expect(screen.getByRole("button", { name: "读取了 2 项" })).toBeVisible();
     expect(container.querySelectorAll("details > summary")).toHaveLength(3);
     expect(screen.getByRole("alert")).toHaveTextContent("需要权限");
+  });
+
+  it("keeps compact ledger copy at AA contrast in the light theme", () => {
+    for (const rule of [
+      /\.activity-feed__tool-copy small\s*\{[^}]*color: var\(--pw-text-secondary\)/su,
+      /\.activity-feed__status\s*\{[^}]*color: var\(--pw-text-secondary\)/su,
+      /\.activity-feed__disclosure > summary,\s*\.activity-feed__burst > summary\s*\{[^}]*color: var\(--pw-text-secondary\)/su,
+    ]) {
+      expect(workspaceStyles).toMatch(rule);
+    }
+    expect(workspaceStyles).toContain(
+      '.activity-feed__status[data-status="completed"] svg',
+    );
+    expect(workspaceStyles).toContain(
+      '.activity-feed__status[data-status="failed"] svg',
+    );
+
+    const lightTokens = tokenStyles.slice(0, tokenStyles.indexOf("@media"));
+    const copy = tokenHex(lightTokens, "--pw-text-secondary");
+    for (const backgroundToken of [
+      "--pw-surface-panel",
+      "--pw-surface-subtle",
+    ]) {
+      expect(
+        contrastRatio(copy, tokenHex(lightTokens, backgroundToken)),
+      ).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });
