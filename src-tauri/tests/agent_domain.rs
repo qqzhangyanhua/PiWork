@@ -1,5 +1,6 @@
 use piwork_lib::{
-    agent::repository::AgentRepository, domain::agent::CapabilityPackStatus,
+    agent::repository::AgentRepository,
+    domain::agent::{AgentStatus, CapabilityPackStatus, RoleKind},
     storage::sqlite::Database,
 };
 
@@ -25,6 +26,58 @@ async fn repository_lists_builtin_instances_and_capabilities() {
             "agent-instance:piwork-reviewer",
         ]
     );
+    let expected_instances = [
+        (
+            "agent-instance:piwork-engineer",
+            "agent-definition:piwork-engineer:v1",
+            "role-template:engineer:v1",
+            RoleKind::Engineer,
+            "capability-pack:engineering-execution:v1",
+        ),
+        (
+            "agent-instance:piwork-lead",
+            "agent-definition:piwork-lead:v1",
+            "role-template:lead:v1",
+            RoleKind::Lead,
+            "capability-pack:lead-coordination:v1",
+        ),
+        (
+            "agent-instance:piwork-researcher",
+            "agent-definition:piwork-researcher:v1",
+            "role-template:researcher:v1",
+            RoleKind::Researcher,
+            "capability-pack:source-research:v1",
+        ),
+        (
+            "agent-instance:piwork-reviewer",
+            "agent-definition:piwork-reviewer:v1",
+            "role-template:reviewer:v1",
+            RoleKind::Reviewer,
+            "capability-pack:independent-review:v1",
+        ),
+    ];
+    for (instance, expected) in instances.iter().zip(expected_instances) {
+        let (instance_id, definition_id, role_template_id, role_kind, pack_id) = expected;
+        assert_eq!(instance.id, instance_id);
+        assert_eq!(instance.definition.id, definition_id);
+        assert_eq!(instance.definition.role_template_id, role_template_id);
+        assert_eq!(instance.definition.role_kind, role_kind);
+        assert_eq!(
+            instance
+                .definition
+                .capability_packs
+                .iter()
+                .map(|pack| pack.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![pack_id]
+        );
+        assert!(instance.builtin);
+        assert_eq!(instance.status, AgentStatus::Active);
+        assert_eq!(instance.engine_override, None);
+        assert_eq!(instance.model_configuration_override, None);
+        assert_eq!(instance.permission_policy_override, None);
+        assert_eq!(instance.parallelism_override, None);
+    }
     assert_eq!(
         repository
             .get_agent_instance("agent-instance:piwork-lead")

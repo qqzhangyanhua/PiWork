@@ -3,7 +3,7 @@ use std::{collections::HashMap, io};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use sqlx::{FromRow, SqlitePool};
+use sqlx::{FromRow, SqliteConnection, SqlitePool};
 
 use crate::{
     domain::agent::{
@@ -57,17 +57,43 @@ impl AgentRepository {
     }
 
     pub async fn list_capability_packs(&self) -> Result<Vec<CapabilityPackSummary>, AppError> {
-        load_capability_packs(&self.pool).await
+        let mut connection = self.pool.acquire().await?;
+        load_capability_packs(&mut connection).await
     }
 
     pub async fn get_work_team(&self, work_id: &str) -> Result<Option<WorkTeamSummary>, AppError> {
+        self.load_work_team(work_id, || {}).await
+    }
+
+    #[doc(hidden)]
+    pub async fn get_work_team_after_work_loaded<F>(
+        &self,
+        work_id: &str,
+        after_work_loaded: F,
+    ) -> Result<Option<WorkTeamSummary>, AppError>
+    where
+        F: FnOnce(),
+    {
+        self.load_work_team(work_id, after_work_loaded).await
+    }
+
+    async fn load_work_team<F>(
+        &self,
+        work_id: &str,
+        after_work_loaded: F,
+    ) -> Result<Option<WorkTeamSummary>, AppError>
+    where
+        F: FnOnce(),
+    {
+        let mut transaction = self.pool.begin().await?;
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM works WHERE id = ?)")
             .bind(work_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *transaction)
             .await?;
         if !exists {
             return Ok(None);
         }
+        after_work_loaded();
 
         let member_rows = sqlx::query_as::<_, WorkAgentRow>(
             "SELECT wa.work_id, wa.role_kind AS membership_role_kind, \
@@ -93,9 +119,9 @@ impl AgentRepository {
              WHERE wa.work_id = ? ORDER BY ai.id",
         )
         .bind(work_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await?;
-        let packs = capability_packs_by_definition(&self.pool).await?;
+        let packs = capability_packs_by_definition(&mut transaction).await?;
         let members = member_rows
             .into_iter()
             .map(|row| row.into_summary(&packs))
@@ -103,7 +129,7 @@ impl AgentRepository {
         let lead_id: Option<String> =
             sqlx::query_scalar("SELECT agent_instance_id FROM work_leads WHERE work_id = ?")
                 .bind(work_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *transaction)
                 .await?;
         let lead_id = lead_id.ok_or_else(|| invariant_error("existing Work has no Lead"))?;
         let lead = members
@@ -112,11 +138,13 @@ impl AgentRepository {
             .cloned()
             .ok_or_else(|| invariant_error("Work Lead is absent from memberships"))?;
 
-        Ok(Some(WorkTeamSummary {
+        let team = WorkTeamSummary {
             work_id: work_id.to_owned(),
             lead,
             members,
-        }))
+        };
+        transaction.commit().await?;
+        Ok(Some(team))
     }
 
     pub async fn add_work_member(
@@ -198,20 +226,21 @@ impl AgentRepository {
         &self,
         id: Option<&str>,
     ) -> Result<Vec<AgentInstanceSummary>, AppError> {
+        let mut connection = self.pool.acquire().await?;
         let rows = if let Some(id) = id {
             sqlx::query_as::<_, AgentInstanceRow>(&format!(
                 "{} WHERE ai.id = ? ORDER BY ai.id",
                 INSTANCE_SELECT
             ))
             .bind(id)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *connection)
             .await?
         } else {
             sqlx::query_as::<_, AgentInstanceRow>(&format!("{} ORDER BY ai.id", INSTANCE_SELECT))
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *connection)
                 .await?
         };
-        let packs = capability_packs_by_definition(&self.pool).await?;
+        let packs = capability_packs_by_definition(&mut connection).await?;
         rows.into_iter()
             .map(|row| row.into_summary(&packs))
             .collect()
@@ -235,7 +264,9 @@ const INSTANCE_SELECT: &str = "SELECT ai.id AS instance_id, ai.display_name, ai.
      JOIN agent_definitions ad ON ad.id = ai.definition_id \
      JOIN role_templates rt ON rt.id = ad.role_template_id";
 
-async fn load_capability_packs(pool: &SqlitePool) -> Result<Vec<CapabilityPackSummary>, AppError> {
+async fn load_capability_packs(
+    connection: &mut SqliteConnection,
+) -> Result<Vec<CapabilityPackSummary>, AppError> {
     sqlx::query_as::<_, CapabilityPackRow>(
         "SELECT id, catalog_capability_id, name, description, instructions, \
                 input_schema_json, output_schema_json, procedure_json, validation_rubric_json, \
@@ -243,7 +274,7 @@ async fn load_capability_packs(pool: &SqlitePool) -> Result<Vec<CapabilityPackSu
                 required_engine_capabilities_json, conflicts_with_capability_pack_ids_json, \
                 version, status FROM capability_packs ORDER BY id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?
     .into_iter()
     .map(CapabilityPackSummary::try_from)
@@ -251,9 +282,9 @@ async fn load_capability_packs(pool: &SqlitePool) -> Result<Vec<CapabilityPackSu
 }
 
 async fn capability_packs_by_definition(
-    pool: &SqlitePool,
+    connection: &mut SqliteConnection,
 ) -> Result<HashMap<String, Vec<CapabilityPackSummary>>, AppError> {
-    let packs = load_capability_packs(pool).await?;
+    let packs = load_capability_packs(connection).await?;
     let packs_by_id = packs
         .into_iter()
         .map(|pack| (pack.id.clone(), pack))
@@ -262,7 +293,7 @@ async fn capability_packs_by_definition(
         "SELECT agent_definition_id, capability_pack_id \
          FROM agent_capability_bindings ORDER BY agent_definition_id, capability_pack_id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let mut result: HashMap<String, Vec<CapabilityPackSummary>> = HashMap::new();
     for (definition_id, pack_id) in bindings {

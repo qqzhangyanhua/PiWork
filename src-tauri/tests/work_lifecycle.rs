@@ -391,6 +391,63 @@ async fn work_team_reads_fail_closed_for_missing_leads_and_invalid_lead_instance
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn work_team_read_keeps_one_snapshot_during_concurrent_work_deletion() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let database_path = temporary_directory.path().join("team-snapshot.sqlite3");
+    let workspace_path = temporary_directory.path().join("workspace");
+    std::fs::create_dir(&workspace_path).unwrap();
+    let database = Database::open(&database_path).await.unwrap();
+    let work_repository = WorkRepository::new(database.pool().clone());
+    let work = work_repository
+        .create(CreateWorkInput {
+            title: "Team snapshot".into(),
+            goal: "Read a consistent team".into(),
+            root_path: workspace_path.to_string_lossy().into_owned(),
+            permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
+        })
+        .await
+        .unwrap();
+    let repository = AgentRepository::new(database.pool().clone());
+    let writer_pool = database.pool().clone();
+    let writer_work_id = work.summary.id.clone();
+    let (start_writer, writer_started) = tokio::sync::oneshot::channel();
+    let (writer_finished, wait_for_writer) = std::sync::mpsc::sync_channel(0);
+    let writer = tokio::spawn(async move {
+        writer_started.await.unwrap();
+        sqlx::query("DELETE FROM works WHERE id = ?")
+            .bind(&writer_work_id)
+            .execute(&writer_pool)
+            .await
+            .unwrap();
+        writer_finished.send(()).unwrap();
+    });
+
+    let team = repository
+        .get_work_team_after_work_loaded(&work.summary.id, move || {
+            start_writer.send(()).unwrap();
+            wait_for_writer
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("concurrent Work deletion did not finish");
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    writer.await.unwrap();
+
+    assert_eq!(team.work_id, work.summary.id);
+    assert_eq!(team.lead.instance.id, "agent-instance:piwork-lead");
+    assert_eq!(team.members.len(), 1);
+    assert!(
+        repository
+            .get_work_team(&work.summary.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn assert_authoritative_prompt(detail: &WorkDetail, prompt: &str, expected_run_status: RunStatus) {
     let matching_messages = detail
         .messages
