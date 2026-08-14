@@ -247,7 +247,7 @@ async fn agent_domain_migration_seeds_builtin_team_and_backfills_leads() {
 }
 ```
 
-增加迁移文件 LF 检查、每个 Work 最多一个 Lead 的 UNIQUE 检查、Lead 必须同时是 Work member 的外键检查、内置 slug/version 唯一性检查。
+增加迁移文件 LF 检查、每个 Work 最多一个 Lead 的 UNIQUE 检查、Lead 必须同时是 Work member 的外键检查、内置 slug/version 唯一性检查。另写一个真实 legacy upgrade 测试：在单一 SQLite connection 上只应用 0001–0004，插入旧 Work，再应用 0005 并断言 Lead membership 与 `work_leads` 回填；`Database::open_in_memory()` 直接跑完全部 migration，不能单独证明回填。
 
 - [ ] **Step 2: 运行测试确认缺表失败**
 
@@ -325,9 +325,13 @@ capability-pack:engineering-execution:v1
 capability-pack:independent-review:v1
 ```
 
-四个系统基础能力包状态为 `executable`、`catalog_capability_id = NULL`，分别绑定对应内置 Definition；它们只提供角色运行所需的方法、输入/结果合同、工具和权限边界，不对应业务目录卡片。四个内置 Definition 的职责、非职责、结果合同和默认权限逐项编码设计 §5.4；96 项 seed 的稳定 catalog id 和名称与 `agentCapabilities.ts` 一致，状态全部为 `catalog_only`。领域、优先级、受众与长文展示继续由 Task 6 明确保留的静态 TypeScript 目录拥有，不向未定义这些字段的数据库合同中塞入第二份数据。migration 末尾：
+四个系统基础能力包状态为 `executable`、`catalog_capability_id = NULL`，分别绑定对应内置 Definition；它们只提供角色运行所需的方法、输入/结果合同、工具和权限边界，不对应业务目录卡片。四个内置 Definition 的职责、非职责、结果合同和默认权限逐项编码设计 §5.4；96 项 seed 的稳定 catalog id 和名称与 `agentCapabilities.ts` 一致，状态全部为 `catalog_only`。领域、优先级、受众与长文展示继续由 Task 6 明确保留的静态 TypeScript 目录拥有，不向未定义这些字段的数据库合同中塞入第二份数据。
+
+目录行使用同一个稳定值作为 `id` 与 `catalog_capability_id`：`catalog-capability:001` 至 `catalog-capability:096`；不要发明第二套 catalog pack id。目录行的 `description/instructions` 使用空字符串，对象合同使用 `{}`，集合合同使用 `[]`，默认权限为 `read_only`，从而明确表示它们尚未达到 executable 合同。migration 末尾：
 
 migration 末尾用 `INSERT OR IGNORE ... SELECT FROM works` 回填：`work_agents(work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at)` 绑定内置 Lead，随后 `work_leads(work_id, agent_instance_id, created_at)` 指向同一 membership。两条语句必须显式列出这些列，不能依赖表列顺序。
+
+`work_leads.work_id` 主键和复合外键只能在 schema 层保证“最多一个 Lead 且 Lead 是 member”；migration 回填与 Task 3 的 Work 创建事务共同保证产品层“每个 Work 恰好一个 Lead”。删除当前 Lead membership 必须被复合外键拒绝，删除 Work 则级联删除 membership 与 Lead。
 
 - [ ] **Step 4: 验证 migration 和旧 Work 回填**
 
