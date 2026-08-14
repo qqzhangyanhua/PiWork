@@ -4,8 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sqlx::{FromRow, SqliteConnection, SqlitePool};
+use uuid::Uuid;
 
 use crate::{
+    agent::assembly::ResolvedAgentAssembly,
     domain::agent::{
         AgentDefinitionSummary, AgentInstanceSummary, AgentStatus, CapabilityPackStatus,
         CapabilityPackSummary, MemoryPolicy, PermissionPolicy, RoleKind, RoleTemplateSummary,
@@ -59,6 +61,81 @@ impl AgentRepository {
     pub async fn list_capability_packs(&self) -> Result<Vec<CapabilityPackSummary>, AppError> {
         let mut connection = self.pool.acquire().await?;
         load_capability_packs(&mut connection).await
+    }
+
+    pub async fn copy_agent_assembly(
+        &self,
+        input: ResolvedAgentAssembly,
+    ) -> Result<AgentInstanceSummary, AppError> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let definition_id = format!("agent-definition:local:{suffix}:v1");
+        let instance_id = format!("agent-instance:local:{suffix}");
+        let slug = format!("local-{suffix}");
+        let now = Utc::now();
+
+        sqlx::query(
+            "INSERT INTO agent_definitions (id, role_template_id, slug, name, description, \
+             instructions, responsibilities_json, non_responsibilities_json, \
+             input_contract_json, result_contract_json, quality_rubric_json, \
+             default_engine_kind, default_model_configuration_id, default_permission_policy, \
+             default_parallelism, memory_policy, builtin, active, version, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, 1, ?, ?)",
+        )
+        .bind(&definition_id)
+        .bind(&input.source.role_template_id)
+        .bind(&slug)
+        .bind(&input.display_name)
+        .bind(&input.source.description)
+        .bind(&input.source.instructions)
+        .bind(encode_json(&input.source.responsibilities)?)
+        .bind(encode_json(&input.source.non_responsibilities)?)
+        .bind(encode_json(&input.source.input_contract)?)
+        .bind(encode_json(&input.source.result_contract)?)
+        .bind(encode_json(&input.source.quality_rubric)?)
+        .bind(&input.source.default_engine_kind)
+        .bind(&input.source.default_model_configuration_id)
+        .bind(input.permission_policy)
+        .bind(i64::from(input.parallelism))
+        .bind(input.source.memory_policy)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO agent_instances (id, definition_id, display_name, engine_override, \
+             model_configuration_override, permission_policy_override, parallelism_override, \
+             builtin, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?)",
+        )
+        .bind(&instance_id)
+        .bind(&definition_id)
+        .bind(&input.display_name)
+        .bind(&input.engine_override)
+        .bind(&input.model_configuration_override)
+        .bind(input.permission_policy_override)
+        .bind(input.parallelism_override.map(i64::from))
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+
+        for pack in &input.capability_packs {
+            sqlx::query(
+                "INSERT INTO agent_capability_bindings \
+                 (agent_definition_id, capability_pack_id, installed_at) VALUES (?, ?, ?)",
+            )
+            .bind(&definition_id)
+            .bind(&pack.id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+
+        self.get_agent_instance(&instance_id)
+            .await?
+            .ok_or_else(|| invariant_error("copied Agent instance disappeared after commit"))
     }
 
     pub async fn get_work_team(&self, work_id: &str) -> Result<Option<WorkTeamSummary>, AppError> {
@@ -365,6 +442,11 @@ async fn membership_source(
 fn decode_json<T: DeserializeOwned>(raw: &str) -> Result<T, AppError> {
     serde_json::from_str(raw)
         .map_err(|error| AppError::Database(sqlx::Error::Decode(Box::new(error))))
+}
+
+fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, AppError> {
+    serde_json::to_string(value)
+        .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))
 }
 
 fn checked_u32(value: i64, field: &'static str) -> Result<u32, AppError> {
