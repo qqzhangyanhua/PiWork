@@ -118,6 +118,59 @@ mod tests {
             );
         }
 
+        for (type_name, number_fields) in [
+            ("RoleTemplateSummary", &["version: number"][..]),
+            (
+                "AgentDefinitionSummary",
+                &["defaultParallelism: number", "version: number"][..],
+            ),
+            (
+                "AgentInstanceSummary",
+                &["parallelismOverride: number | null"][..],
+            ),
+            ("CapabilityPackSummary", &["version: number"][..]),
+            (
+                "SaveAgentAssemblyInput",
+                &["parallelismOverride: number | null"][..],
+            ),
+        ] {
+            let binding =
+                std::fs::read_to_string(output_dir.join(format!("{type_name}.ts"))).unwrap();
+            assert!(
+                !binding.contains("bigint"),
+                "{type_name} must use JSON-transportable number fields"
+            );
+            for field in number_fields {
+                assert!(binding.contains(field), "{type_name} is missing {field}");
+            }
+        }
+
+        let binding_index = std::fs::read_to_string(output_dir.join("index.ts")).unwrap();
+        for type_name in [
+            "RoleKind",
+            "AgentStatus",
+            "CapabilityPackStatus",
+            "WorkAgentStatus",
+            "PermissionPolicy",
+            "MemoryPolicy",
+            "AssemblyDiagnosticCode",
+            "RoleTemplateSummary",
+            "AgentDefinitionSummary",
+            "AgentInstanceSummary",
+            "CapabilityPackSummary",
+            "WorkAgentSummary",
+            "WorkTeamSummary",
+            "AssemblyDiagnostic",
+            "SaveAgentAssemblyInput",
+        ] {
+            assert!(
+                binding_index.contains(&format!(
+                    "export type {{ {type_name} }} from \"./{type_name}\";"
+                )),
+                "binding index is missing {type_name}"
+            );
+        }
+
         let envelope = std::fs::read_to_string(output_dir.join("WorkEventEnvelope.ts")).unwrap();
         assert!(
             envelope.contains("workId: string")

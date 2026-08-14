@@ -66,7 +66,7 @@ pub struct RoleTemplateSummary {
     pub base_result_contract: Value,
     pub compatible_capability_kinds: Vec<String>,
     pub builtin: bool,
-    pub version: i64,
+    pub version: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -93,12 +93,12 @@ pub struct AgentDefinitionSummary {
     pub default_engine_kind: String,
     pub default_model_configuration_id: Option<String>,
     pub default_permission_policy: PermissionPolicy,
-    pub default_parallelism: i64,
+    pub default_parallelism: u32,
     pub memory_policy: MemoryPolicy,
     pub capability_packs: Vec<CapabilityPackSummary>,
     pub builtin: bool,
     pub active: bool,
-    pub version: i64,
+    pub version: u32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -113,7 +113,7 @@ pub struct AgentInstanceSummary {
     pub engine_override: Option<String>,
     pub model_configuration_override: Option<String>,
     pub permission_policy_override: Option<PermissionPolicy>,
-    pub parallelism_override: Option<i64>,
+    pub parallelism_override: Option<u32>,
     pub builtin: bool,
     pub status: AgentStatus,
     pub created_at: DateTime<Utc>,
@@ -142,7 +142,7 @@ pub struct CapabilityPackSummary {
     pub compatible_role_template_ids: Vec<String>,
     pub required_engine_capabilities: Vec<String>,
     pub conflicts_with_capability_pack_ids: Vec<String>,
-    pub version: i64,
+    pub version: u32,
     pub status: CapabilityPackStatus,
 }
 
@@ -187,7 +187,7 @@ pub struct SaveAgentAssemblyInput {
     pub engine_override: Option<String>,
     pub model_configuration_override: Option<String>,
     pub permission_policy_override: Option<PermissionPolicy>,
-    pub parallelism_override: Option<i64>,
+    pub parallelism_override: Option<u32>,
 }
 
 #[cfg(test)]
@@ -203,95 +203,54 @@ mod tests {
 
     #[test]
     fn enums_use_stable_snake_case_wire_values() {
-        for (value, expected) in [
-            (serde_json::to_value(RoleKind::Lead).unwrap(), json!("lead")),
-            (
-                serde_json::to_value(RoleKind::Researcher).unwrap(),
-                json!("researcher"),
-            ),
-            (
-                serde_json::to_value(RoleKind::Engineer).unwrap(),
-                json!("engineer"),
-            ),
-            (
-                serde_json::to_value(RoleKind::Reviewer).unwrap(),
-                json!("reviewer"),
-            ),
-            (
-                serde_json::to_value(AgentStatus::Active).unwrap(),
-                json!("active"),
-            ),
-            (
-                serde_json::to_value(AgentStatus::Inactive).unwrap(),
-                json!("inactive"),
-            ),
-            (
-                serde_json::to_value(CapabilityPackStatus::CatalogOnly).unwrap(),
-                json!("catalog_only"),
-            ),
-            (
-                serde_json::to_value(CapabilityPackStatus::Executable).unwrap(),
-                json!("executable"),
-            ),
-            (
-                serde_json::to_value(CapabilityPackStatus::Deprecated).unwrap(),
-                json!("deprecated"),
-            ),
-            (
-                serde_json::to_value(WorkAgentStatus::Joined).unwrap(),
-                json!("joined"),
-            ),
-            (
-                serde_json::to_value(WorkAgentStatus::Inactive).unwrap(),
-                json!("inactive"),
-            ),
-            (
-                serde_json::to_value(PermissionPolicy::InheritWork).unwrap(),
-                json!("inherit_work"),
-            ),
-            (
-                serde_json::to_value(PermissionPolicy::ReadOnly).unwrap(),
-                json!("read_only"),
-            ),
-            (
-                serde_json::to_value(PermissionPolicy::WorkWrite).unwrap(),
-                json!("work_write"),
-            ),
-            (
-                serde_json::to_value(MemoryPolicy::ConfirmedOnly).unwrap(),
-                json!("confirmed_only"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::NotExecutable).unwrap(),
-                json!("not_executable"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::IncompatibleRole).unwrap(),
-                json!("incompatible_role"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::MissingTool).unwrap(),
-                json!("missing_tool"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::MissingEngineCapability).unwrap(),
-                json!("missing_engine_capability"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::PermissionEscalation).unwrap(),
-                json!("permission_escalation"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::CapabilityConflict).unwrap(),
-                json!("capability_conflict"),
-            ),
-            (
-                serde_json::to_value(AssemblyDiagnosticCode::ContextBudgetExceeded).unwrap(),
-                json!("context_budget_exceeded"),
-            ),
-        ] {
-            assert_eq!(value, expected);
+        macro_rules! assert_wire_values {
+            ($enum_type:ty, { $($variant:path => $wire_value:literal),+ $(,)? }) => {
+                $(
+                    assert_eq!(serde_json::to_value($variant).unwrap(), json!($wire_value));
+                    assert_eq!(
+                        serde_json::from_value::<$enum_type>(json!($wire_value)).unwrap(),
+                        $variant
+                    );
+                )+
+            };
         }
+
+        assert_wire_values!(RoleKind, {
+            RoleKind::Lead => "lead",
+            RoleKind::Researcher => "researcher",
+            RoleKind::Engineer => "engineer",
+            RoleKind::Reviewer => "reviewer",
+        });
+        assert_wire_values!(AgentStatus, {
+            AgentStatus::Active => "active",
+            AgentStatus::Inactive => "inactive",
+        });
+        assert_wire_values!(CapabilityPackStatus, {
+            CapabilityPackStatus::CatalogOnly => "catalog_only",
+            CapabilityPackStatus::Executable => "executable",
+            CapabilityPackStatus::Deprecated => "deprecated",
+        });
+        assert_wire_values!(WorkAgentStatus, {
+            WorkAgentStatus::Joined => "joined",
+            WorkAgentStatus::Inactive => "inactive",
+        });
+        assert_wire_values!(PermissionPolicy, {
+            PermissionPolicy::InheritWork => "inherit_work",
+            PermissionPolicy::ReadOnly => "read_only",
+            PermissionPolicy::WorkWrite => "work_write",
+        });
+        assert_wire_values!(MemoryPolicy, {
+            MemoryPolicy::ConfirmedOnly => "confirmed_only",
+        });
+        assert_wire_values!(AssemblyDiagnosticCode, {
+            AssemblyDiagnosticCode::NotExecutable => "not_executable",
+            AssemblyDiagnosticCode::IncompatibleRole => "incompatible_role",
+            AssemblyDiagnosticCode::MissingTool => "missing_tool",
+            AssemblyDiagnosticCode::MissingEngineCapability => "missing_engine_capability",
+            AssemblyDiagnosticCode::PermissionEscalation => "permission_escalation",
+            AssemblyDiagnosticCode::CapabilityConflict => "capability_conflict",
+            AssemblyDiagnosticCode::ContextBudgetExceeded => "context_budget_exceeded",
+        });
     }
 
     #[test]

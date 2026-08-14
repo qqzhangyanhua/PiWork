@@ -2,4 +2,4 @@
 import type { CapabilityPackStatus } from "./CapabilityPackStatus";
 import type { PermissionPolicy } from "./PermissionPolicy";
 
-export type CapabilityPackSummary = { id: string, catalogCapabilityId: string | null, name: string, description: string, instructions: string, inputSchema: unknown, outputSchema: unknown, procedure: unknown, validationRubric: unknown, requiredTools: Array<string>, defaultPermissionScope: PermissionPolicy, compatibleRoleTemplateIds: Array<string>, requiredEngineCapabilities: Array<string>, conflictsWithCapabilityPackIds: Array<string>, version: bigint, status: CapabilityPackStatus, };
+export type CapabilityPackSummary = { id: string, catalogCapabilityId: string | null, name: string, description: string, instructions: string, inputSchema: unknown, outputSchema: unknown, procedure: unknown, validationRubric: unknown, requiredTools: Array<string>, defaultPermissionScope: PermissionPolicy, compatibleRoleTemplateIds: Array<string>, requiredEngineCapabilities: Array<string>, conflictsWithCapabilityPackIds: Array<string>, version: number, status: CapabilityPackStatus, };

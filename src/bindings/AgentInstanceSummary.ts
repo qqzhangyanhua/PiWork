@@ -3,4 +3,4 @@ import type { AgentDefinitionSummary } from "./AgentDefinitionSummary";
 import type { AgentStatus } from "./AgentStatus";
 import type { PermissionPolicy } from "./PermissionPolicy";
 
-export type AgentInstanceSummary = { id: string, definition: AgentDefinitionSummary, displayName: string, engineOverride: string | null, modelConfigurationOverride: string | null, permissionPolicyOverride: PermissionPolicy | null, parallelismOverride: bigint | null, builtin: boolean, status: AgentStatus, createdAt: string, updatedAt: string, };
+export type AgentInstanceSummary = { id: string, definition: AgentDefinitionSummary, displayName: string, engineOverride: string | null, modelConfigurationOverride: string | null, permissionPolicyOverride: PermissionPolicy | null, parallelismOverride: number | null, builtin: boolean, status: AgentStatus, createdAt: string, updatedAt: string, };
