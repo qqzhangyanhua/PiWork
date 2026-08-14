@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod environment;
 pub mod event;
 pub mod resource;
@@ -10,6 +11,12 @@ mod tests {
     use ts_rs::TS;
 
     use super::{
+        agent::{
+            AgentDefinitionSummary, AgentInstanceSummary, AgentStatus, AssemblyDiagnostic,
+            AssemblyDiagnosticCode, CapabilityPackStatus, CapabilityPackSummary, MemoryPolicy,
+            PermissionPolicy, RoleKind, RoleTemplateSummary, SaveAgentAssemblyInput,
+            WorkAgentStatus, WorkAgentSummary, WorkTeamSummary,
+        },
         environment::{RuntimeCheck, RuntimeStatus},
         event::{
             LivenessState, PermissionOutcome, SessionTransition, WorkEventEnvelope,
@@ -27,6 +34,21 @@ mod tests {
 
     #[test]
     fn export_bindings() {
+        RoleKind::export().unwrap();
+        AgentStatus::export().unwrap();
+        CapabilityPackStatus::export().unwrap();
+        WorkAgentStatus::export().unwrap();
+        PermissionPolicy::export().unwrap();
+        MemoryPolicy::export().unwrap();
+        AssemblyDiagnosticCode::export().unwrap();
+        RoleTemplateSummary::export().unwrap();
+        AgentDefinitionSummary::export().unwrap();
+        AgentInstanceSummary::export().unwrap();
+        CapabilityPackSummary::export().unwrap();
+        WorkAgentSummary::export().unwrap();
+        WorkTeamSummary::export().unwrap();
+        AssemblyDiagnostic::export().unwrap();
+        SaveAgentAssemblyInput::export().unwrap();
         RuntimeCheck::export().unwrap();
         RuntimeStatus::export().unwrap();
         WorkStatus::export().unwrap();
@@ -52,6 +74,21 @@ mod tests {
 
         let output_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings");
         for type_name in [
+            "RoleKind",
+            "AgentStatus",
+            "CapabilityPackStatus",
+            "WorkAgentStatus",
+            "PermissionPolicy",
+            "MemoryPolicy",
+            "AssemblyDiagnosticCode",
+            "RoleTemplateSummary",
+            "AgentDefinitionSummary",
+            "AgentInstanceSummary",
+            "CapabilityPackSummary",
+            "WorkAgentSummary",
+            "WorkTeamSummary",
+            "AssemblyDiagnostic",
+            "SaveAgentAssemblyInput",
             "RuntimeCheck",
             "RuntimeStatus",
             "WorkStatus",
