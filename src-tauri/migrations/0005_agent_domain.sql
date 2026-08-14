@@ -82,6 +82,177 @@ CREATE TABLE capability_packs (
 
 CREATE INDEX idx_capability_packs_status ON capability_packs(status, name);
 
+CREATE TRIGGER role_templates_string_arrays_insert
+BEFORE INSERT ON role_templates
+WHEN EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.responsibilities_json)
+            THEN CASE WHEN json_type(NEW.responsibilities_json) = 'array'
+                THEN NEW.responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.non_responsibilities_json)
+            THEN CASE WHEN json_type(NEW.non_responsibilities_json) = 'array'
+                THEN NEW.non_responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.compatible_capability_kinds_json)
+            THEN CASE WHEN json_type(NEW.compatible_capability_kinds_json) = 'array'
+                THEN NEW.compatible_capability_kinds_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'JSON string array contains non-text element');
+END;
+
+CREATE TRIGGER role_templates_string_arrays_update
+BEFORE UPDATE OF responsibilities_json, non_responsibilities_json, compatible_capability_kinds_json
+ON role_templates
+WHEN EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.responsibilities_json)
+            THEN CASE WHEN json_type(NEW.responsibilities_json) = 'array'
+                THEN NEW.responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.non_responsibilities_json)
+            THEN CASE WHEN json_type(NEW.non_responsibilities_json) = 'array'
+                THEN NEW.non_responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.compatible_capability_kinds_json)
+            THEN CASE WHEN json_type(NEW.compatible_capability_kinds_json) = 'array'
+                THEN NEW.compatible_capability_kinds_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'JSON string array contains non-text element');
+END;
+
+CREATE TRIGGER agent_definitions_string_arrays_insert
+BEFORE INSERT ON agent_definitions
+WHEN EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.responsibilities_json)
+            THEN CASE WHEN json_type(NEW.responsibilities_json) = 'array'
+                THEN NEW.responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.non_responsibilities_json)
+            THEN CASE WHEN json_type(NEW.non_responsibilities_json) = 'array'
+                THEN NEW.non_responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'JSON string array contains non-text element');
+END;
+
+CREATE TRIGGER agent_definitions_string_arrays_update
+BEFORE UPDATE OF responsibilities_json, non_responsibilities_json ON agent_definitions
+WHEN EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.responsibilities_json)
+            THEN CASE WHEN json_type(NEW.responsibilities_json) = 'array'
+                THEN NEW.responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.non_responsibilities_json)
+            THEN CASE WHEN json_type(NEW.non_responsibilities_json) = 'array'
+                THEN NEW.non_responsibilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'JSON string array contains non-text element');
+END;
+
+CREATE TRIGGER capability_packs_string_arrays_insert
+BEFORE INSERT ON capability_packs
+WHEN EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.required_tools_json)
+            THEN CASE WHEN json_type(NEW.required_tools_json) = 'array'
+                THEN NEW.required_tools_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.compatible_role_template_ids_json)
+            THEN CASE WHEN json_type(NEW.compatible_role_template_ids_json) = 'array'
+                THEN NEW.compatible_role_template_ids_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.required_engine_capabilities_json)
+            THEN CASE WHEN json_type(NEW.required_engine_capabilities_json) = 'array'
+                THEN NEW.required_engine_capabilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.conflicts_with_capability_pack_ids_json)
+            THEN CASE WHEN json_type(NEW.conflicts_with_capability_pack_ids_json) = 'array'
+                THEN NEW.conflicts_with_capability_pack_ids_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'JSON string array contains non-text element');
+END;
+
+CREATE TRIGGER capability_packs_string_arrays_update
+BEFORE UPDATE OF required_tools_json, compatible_role_template_ids_json,
+    required_engine_capabilities_json, conflicts_with_capability_pack_ids_json
+ON capability_packs
+WHEN EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.required_tools_json)
+            THEN CASE WHEN json_type(NEW.required_tools_json) = 'array'
+                THEN NEW.required_tools_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.compatible_role_template_ids_json)
+            THEN CASE WHEN json_type(NEW.compatible_role_template_ids_json) = 'array'
+                THEN NEW.compatible_role_template_ids_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.required_engine_capabilities_json)
+            THEN CASE WHEN json_type(NEW.required_engine_capabilities_json) = 'array'
+                THEN NEW.required_engine_capabilities_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+) OR EXISTS (
+    SELECT 1 FROM json_each(
+        CASE WHEN json_valid(NEW.conflicts_with_capability_pack_ids_json)
+            THEN CASE WHEN json_type(NEW.conflicts_with_capability_pack_ids_json) = 'array'
+                THEN NEW.conflicts_with_capability_pack_ids_json ELSE '[]' END
+            ELSE '[]' END
+    ) WHERE type <> 'text'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'JSON string array contains non-text element');
+END;
+
 CREATE TABLE agent_capability_bindings (
     agent_definition_id TEXT NOT NULL REFERENCES agent_definitions(id) ON DELETE CASCADE,
     capability_pack_id TEXT NOT NULL REFERENCES capability_packs(id) ON DELETE RESTRICT,

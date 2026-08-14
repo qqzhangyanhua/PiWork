@@ -504,6 +504,170 @@ async fn agent_domain_json_columns_reject_valid_values_with_wrong_shapes() {
     }
 }
 
+#[tokio::test]
+async fn agent_domain_json_string_array_elements_are_enforced_on_insert_and_update() {
+    let database = Database::open_in_memory().await.unwrap();
+    let fixtures = [
+        (
+            "role_templates",
+            "role-template:lead:v1",
+            &[
+                "id",
+                "slug",
+                "role_kind",
+                "name",
+                "description",
+                "base_instructions",
+                "responsibilities_json",
+                "non_responsibilities_json",
+                "base_result_contract_json",
+                "compatible_capability_kinds_json",
+                "builtin",
+                "version",
+                "created_at",
+                "updated_at",
+            ][..],
+            &[
+                "responsibilities_json",
+                "non_responsibilities_json",
+                "compatible_capability_kinds_json",
+            ][..],
+        ),
+        (
+            "agent_definitions",
+            "agent-definition:piwork-lead:v1",
+            &[
+                "id",
+                "role_template_id",
+                "slug",
+                "name",
+                "description",
+                "instructions",
+                "responsibilities_json",
+                "non_responsibilities_json",
+                "input_contract_json",
+                "result_contract_json",
+                "quality_rubric_json",
+                "default_engine_kind",
+                "default_model_configuration_id",
+                "default_permission_policy",
+                "default_parallelism",
+                "memory_policy",
+                "builtin",
+                "active",
+                "version",
+                "created_at",
+                "updated_at",
+            ][..],
+            &["responsibilities_json", "non_responsibilities_json"][..],
+        ),
+        (
+            "capability_packs",
+            "capability-pack:lead-coordination:v1",
+            &[
+                "id",
+                "catalog_capability_id",
+                "name",
+                "description",
+                "instructions",
+                "input_schema_json",
+                "output_schema_json",
+                "procedure_json",
+                "validation_rubric_json",
+                "required_tools_json",
+                "default_permission_scope",
+                "compatible_role_template_ids_json",
+                "required_engine_capabilities_json",
+                "conflicts_with_capability_pack_ids_json",
+                "version",
+                "status",
+                "created_at",
+                "updated_at",
+            ][..],
+            &[
+                "required_tools_json",
+                "compatible_role_template_ids_json",
+                "required_engine_capabilities_json",
+                "conflicts_with_capability_pack_ids_json",
+            ][..],
+        ),
+    ];
+    let invalid_values = ["[1]", "[null]", "[\"read\",{}]"];
+
+    for (table, source_id, columns, string_array_columns) in fixtures {
+        for (index, target_column) in string_array_columns.iter().enumerate() {
+            let invalid_value = invalid_values[index % invalid_values.len()];
+            let inserted_id = format!("string-array-invalid-{table}-{index}");
+            let selected = columns
+                .iter()
+                .map(|column| match *column {
+                    "id" => format!("'{inserted_id}'"),
+                    "slug" => format!("'{inserted_id}'"),
+                    column if column == *target_column => format!("'{invalid_value}'"),
+                    column => column.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let invalid_insert = sqlx::query(&format!(
+                "INSERT INTO {table} ({}) SELECT {selected} FROM {table} WHERE id = ?",
+                columns.join(", ")
+            ))
+            .bind(source_id)
+            .execute(database.pool())
+            .await;
+            assert_database_error_contains(
+                invalid_insert,
+                "JSON string array contains non-text element",
+            );
+
+            let invalid_update = sqlx::query(&format!(
+                "UPDATE {table} SET {target_column} = ? WHERE id = ?"
+            ))
+            .bind(invalid_value)
+            .bind(source_id)
+            .execute(database.pool())
+            .await;
+            assert_database_error_contains(
+                invalid_update,
+                "JSON string array contains non-text element",
+            );
+
+            for valid_value in ["[]", "[\"read\",\"grep\"]"] {
+                sqlx::query(&format!(
+                    "UPDATE {table} SET {target_column} = ? WHERE id = ?"
+                ))
+                .bind(valid_value)
+                .bind(source_id)
+                .execute(database.pool())
+                .await
+                .unwrap();
+            }
+
+            for (valid_index, valid_value) in ["[]", "[\"read\",\"grep\"]"].iter().enumerate() {
+                let allowed_id = format!("string-array-valid-{table}-{index}-{valid_index}");
+                let selected = columns
+                    .iter()
+                    .map(|column| match *column {
+                        "id" => format!("'{allowed_id}'"),
+                        "slug" => format!("'{allowed_id}'"),
+                        column if column == *target_column => format!("'{valid_value}'"),
+                        column => column.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sqlx::query(&format!(
+                    "INSERT INTO {table} ({}) SELECT {selected} FROM {table} WHERE id = ?",
+                    columns.join(", ")
+                ))
+                .bind(source_id)
+                .execute(database.pool())
+                .await
+                .unwrap();
+            }
+        }
+    }
+}
+
 async fn assert_agent_domain_statement_rejected(
     database: &Database,
     statement: &str,
