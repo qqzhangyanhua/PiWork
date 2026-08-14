@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use piwork_lib::{
+    agent::repository::AgentRepository,
     app_state::AppState,
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
@@ -221,6 +222,173 @@ impl TestHarness {
             .await
             .unwrap()
     }
+}
+
+#[tokio::test]
+async fn creating_a_work_atomically_assigns_the_builtin_lead() {
+    let harness = TestHarness::new().await;
+
+    let work = harness.create_work("Atomic lead").await;
+    let memberships: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT agent_instance_id, role_kind, status FROM work_agents WHERE work_id = ?",
+    )
+    .bind(&work.summary.id)
+    .fetch_all(&harness.pool)
+    .await
+    .unwrap();
+    let lead: (String,) =
+        sqlx::query_as("SELECT agent_instance_id FROM work_leads WHERE work_id = ?")
+            .bind(&work.summary.id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+
+    assert_eq!(
+        memberships,
+        vec![(
+            "agent-instance:piwork-lead".into(),
+            "lead".into(),
+            "joined".into(),
+        )]
+    );
+    assert_eq!(lead.0, "agent-instance:piwork-lead");
+}
+
+#[tokio::test]
+async fn failed_lead_binding_rolls_back_the_new_work() {
+    let harness = TestHarness::new().await;
+    sqlx::query("DELETE FROM agent_instances WHERE id = 'agent-instance:piwork-lead'")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let result = harness
+        .repository
+        .create(CreateWorkInput {
+            title: "Must roll back".into(),
+            goal: "Prove atomicity".into(),
+            root_path: harness.workspace_path.to_string_lossy().into_owned(),
+            permission_mode: PermissionMode::Balanced,
+            resource_draft_id: None,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(piwork_lib::error::AppError::Database(
+            sqlx::Error::Database(_)
+        ))
+    ));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE title = ?")
+        .bind("Must roll back")
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn replacing_a_work_lead_keeps_exactly_one_lead_and_both_memberships_auditable() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Replace lead").await;
+    sqlx::query(
+        "INSERT INTO agent_instances \
+         (id, definition_id, display_name, engine_override, model_configuration_override, \
+          permission_policy_override, parallelism_override, builtin, status, created_at, updated_at) \
+         SELECT 'agent-instance:alternate-lead', definition_id, 'Alternate lead', NULL, NULL, \
+                NULL, NULL, 0, 'active', created_at, updated_at \
+         FROM agent_instances WHERE id = 'agent-instance:piwork-lead'",
+    )
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    let repository = AgentRepository::new(harness.pool.clone());
+
+    let added = repository
+        .add_work_member(&work.summary.id, "agent-instance:alternate-lead")
+        .await
+        .unwrap();
+    assert_eq!(added.members.len(), 2);
+    let team = repository
+        .set_work_lead(&work.summary.id, "agent-instance:alternate-lead")
+        .await
+        .unwrap();
+
+    assert_eq!(team.lead.instance.id, "agent-instance:alternate-lead");
+    assert_eq!(team.members.len(), 2);
+    assert!(
+        team.members
+            .iter()
+            .all(|member| member.status == piwork_lib::domain::agent::WorkAgentStatus::Joined)
+    );
+    assert!(team.members.iter().any(|member| {
+        member.instance.id == "agent-instance:piwork-lead"
+            && member.role_kind == piwork_lib::domain::agent::RoleKind::Lead
+    }));
+    let lead_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM work_leads WHERE work_id = ?")
+        .bind(&work.summary.id)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    let member_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM work_agents WHERE work_id = ?")
+            .bind(&work.summary.id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(lead_count, 1);
+    assert_eq!(member_count, 2);
+}
+
+#[tokio::test]
+async fn work_team_reads_fail_closed_for_missing_leads_and_invalid_lead_instances() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Fail closed team").await;
+    let repository = AgentRepository::new(harness.pool.clone());
+
+    let missing = repository
+        .set_work_lead(&work.summary.id, "agent-instance:missing")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        missing,
+        piwork_lib::error::AppError::InvalidInput { ref field, .. } if field == "instanceId"
+    ));
+
+    let non_lead = repository
+        .set_work_lead(&work.summary.id, "agent-instance:piwork-engineer")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        non_lead,
+        piwork_lib::error::AppError::InvalidInput { ref field, .. } if field == "instanceId"
+    ));
+    let persisted_lead: String =
+        sqlx::query_scalar("SELECT agent_instance_id FROM work_leads WHERE work_id = ?")
+            .bind(&work.summary.id)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_lead, "agent-instance:piwork-lead");
+
+    sqlx::query("DELETE FROM work_leads WHERE work_id = ?")
+        .bind(&work.summary.id)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        repository.get_work_team(&work.summary.id).await,
+        Err(piwork_lib::error::AppError::Database(sqlx::Error::Decode(
+            _
+        )))
+    ));
+    assert!(
+        repository
+            .get_work_team("missing-work")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn assert_authoritative_prompt(detail: &WorkDetail, prompt: &str, expected_run_status: RunStatus) {

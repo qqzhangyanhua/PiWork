@@ -4,6 +4,7 @@ use std::{future::Future, sync::Arc};
 
 use tauri::{Manager, path::BaseDirectory};
 
+pub mod agent;
 pub mod app_state;
 pub mod document_runtime;
 pub mod domain;

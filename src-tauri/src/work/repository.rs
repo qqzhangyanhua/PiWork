@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::state_machine::{RunAction, WorkAction, transition, transition_run};
+use crate::agent::repository::DEFAULT_LEAD_INSTANCE_ID;
 
 #[derive(Clone)]
 pub struct WorkRepository {
@@ -96,6 +97,25 @@ impl WorkRepository {
             .execute(&mut *transaction)
             .await?;
         }
+        sqlx::query(
+            "INSERT INTO work_agents \
+             (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) \
+             VALUES (?, ?, 'lead', 'joined', 'inherit_work', ?, ?)",
+        )
+        .bind(&summary.id)
+        .bind(DEFAULT_LEAD_INSTANCE_ID)
+        .bind(summary.created_at)
+        .bind(summary.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(&summary.id)
+        .bind(DEFAULT_LEAD_INSTANCE_ID)
+        .bind(summary.created_at)
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
 
         Ok(WorkDetail {
