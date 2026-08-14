@@ -135,6 +135,7 @@ pub enum WorkAgentStatus { Joined, Inactive }
 pub enum PermissionPolicy { InheritWork, ReadOnly, WorkWrite }
 pub enum MemoryPolicy { ConfirmedOnly }
 pub enum AssemblyDiagnosticCode {
+    NotExecutable,
     IncompatibleRole,
     MissingTool,
     MissingEngineCapability,
@@ -324,7 +325,7 @@ capability-pack:engineering-execution:v1
 capability-pack:independent-review:v1
 ```
 
-四个系统基础能力包状态为 `executable`、`catalog_capability_id = NULL`，分别绑定对应内置 Definition；它们只提供角色运行所需的方法、输入/结果合同、工具和权限边界，不对应业务目录卡片。四个内置 Definition 的职责、非职责、结果合同和默认权限逐项编码设计 §5.4；96 项 seed 的名称、领域、优先级与 `agentCapabilities.ts` 一致，状态全部为 `catalog_only`。migration 末尾：
+四个系统基础能力包状态为 `executable`、`catalog_capability_id = NULL`，分别绑定对应内置 Definition；它们只提供角色运行所需的方法、输入/结果合同、工具和权限边界，不对应业务目录卡片。四个内置 Definition 的职责、非职责、结果合同和默认权限逐项编码设计 §5.4；96 项 seed 的稳定 catalog id 和名称与 `agentCapabilities.ts` 一致，状态全部为 `catalog_only`。领域、优先级、受众与长文展示继续由 Task 6 明确保留的静态 TypeScript 目录拥有，不向未定义这些字段的数据库合同中塞入第二份数据。migration 末尾：
 
 migration 末尾用 `INSERT OR IGNORE ... SELECT FROM works` 回填：`work_agents(work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at)` 绑定内置 Lead，随后 `work_leads(work_id, agent_instance_id, created_at)` 指向同一 membership。两条语句必须显式列出这些列，不能依赖表列顺序。
 
@@ -483,6 +484,8 @@ pub async fn add_member_to_work(&self, work_id: &str, instance_id: &str) -> Resu
 ```
 
 服务端拒绝修改 builtin 行；保存永远创建本地 Definition version 1 + Instance。复制内置成员可保留或卸载其对应的系统基础 executable pack，并可调整显示名、model/engine/permission/parallelism override；四个系统基础 pack 不可编辑，安装任何 `catalog_only` id 必须失败并返回明确诊断。
+
+B 阶段的 `AgentService` 通过构造参数接收当前 Pi 执行身体的工具与 capability allowlist，测试注入确定集合；这只用于保存时 fail-closed 装配校验，不新增 C 所拥有的 `EngineCapabilities` wire DTO、运行时协商或 Harness。C 上线后由运行时 capability 协商替换该静态生产 allowlist。
 
 - [ ] **Step 5: 运行全部 Agent Domain 测试**
 
