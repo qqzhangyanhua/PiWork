@@ -32,8 +32,37 @@ mod tests {
         },
     };
 
+    fn bindings_semantically_equal(before: &str, after: &str) -> bool {
+        before.replace("\r\n", "\n") == after.replace("\r\n", "\n")
+    }
+
+    const AGENT_BINDING_TYPE_NAMES: [&str; 15] = [
+        "RoleKind",
+        "AgentStatus",
+        "CapabilityPackStatus",
+        "WorkAgentStatus",
+        "PermissionPolicy",
+        "MemoryPolicy",
+        "AssemblyDiagnosticCode",
+        "RoleTemplateSummary",
+        "AgentDefinitionSummary",
+        "AgentInstanceSummary",
+        "CapabilityPackSummary",
+        "WorkAgentSummary",
+        "WorkTeamSummary",
+        "AssemblyDiagnostic",
+        "SaveAgentAssemblyInput",
+    ];
+
     #[test]
     fn export_bindings() {
+        let output_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings");
+        let agent_bindings_before = AGENT_BINDING_TYPE_NAMES.map(|type_name| {
+            let binding =
+                std::fs::read_to_string(output_dir.join(format!("{type_name}.ts"))).unwrap();
+            (type_name, binding)
+        });
+
         RoleKind::export().unwrap();
         AgentStatus::export().unwrap();
         CapabilityPackStatus::export().unwrap();
@@ -72,7 +101,15 @@ mod tests {
         WorkEventEnvelope::export().unwrap();
         WorkEventPayload::export().unwrap();
 
-        let output_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/bindings");
+        for (type_name, before) in agent_bindings_before {
+            let after =
+                std::fs::read_to_string(output_dir.join(format!("{type_name}.ts"))).unwrap();
+            assert!(
+                bindings_semantically_equal(&before, &after),
+                "generated Agent binding drifted: {type_name}"
+            );
+        }
+
         for type_name in [
             "RoleKind",
             "AgentStatus",
@@ -146,23 +183,7 @@ mod tests {
         }
 
         let binding_index = std::fs::read_to_string(output_dir.join("index.ts")).unwrap();
-        for type_name in [
-            "RoleKind",
-            "AgentStatus",
-            "CapabilityPackStatus",
-            "WorkAgentStatus",
-            "PermissionPolicy",
-            "MemoryPolicy",
-            "AssemblyDiagnosticCode",
-            "RoleTemplateSummary",
-            "AgentDefinitionSummary",
-            "AgentInstanceSummary",
-            "CapabilityPackSummary",
-            "WorkAgentSummary",
-            "WorkTeamSummary",
-            "AssemblyDiagnostic",
-            "SaveAgentAssemblyInput",
-        ] {
+        for type_name in AGENT_BINDING_TYPE_NAMES {
             assert!(
                 binding_index.contains(&format!(
                     "export type {{ {type_name} }} from \"./{type_name}\";"
@@ -234,5 +255,19 @@ mod tests {
 
         let permission = std::fs::read_to_string(output_dir.join("PermissionMode.ts")).unwrap();
         assert!(permission.contains("\"ask_every_step\" | \"balanced\" | \"auto_execute\""));
+    }
+
+    #[test]
+    fn stale_agent_binding_content_is_detected() {
+        let stale = "export type AgentDefinitionSummary = { version: bigint };\r\n";
+        let generated = "export type AgentDefinitionSummary = { version: number };\n";
+        let unchanged_with_different_newlines =
+            "export type AgentDefinitionSummary = { version: number };\r\n";
+
+        assert!(bindings_semantically_equal(
+            unchanged_with_different_newlines,
+            generated
+        ));
+        assert!(!bindings_semantically_equal(stale, generated));
     }
 }
