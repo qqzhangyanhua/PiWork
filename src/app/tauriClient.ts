@@ -2,16 +2,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
+  AgentInstanceSummary,
+  AssemblyDiagnostic,
+  CapabilityPackSummary,
   CreateWorkInput,
   ImportResourcesInput,
   ProjectFileSummary,
   ResourceSummary,
   ResourceThumbnail,
   RuntimeStatus,
+  SaveAgentAssemblyInput,
   StartWorkOutput,
   WorkDetail,
   WorkEventEnvelope,
   WorkSummary,
+  WorkTeamSummary,
 } from "../bindings";
 
 export type ModelProvider =
@@ -74,6 +79,12 @@ export type PiWorkClient = {
   createWork(input: CreateWorkInput): Promise<WorkDetail>;
   listWorks(): Promise<WorkSummary[]>;
   getWork(workId: string): Promise<WorkDetail>;
+  listAgentInstances(): Promise<AgentInstanceSummary[]>;
+  listCapabilityPacks(): Promise<CapabilityPackSummary[]>;
+  getWorkTeam(workId: string): Promise<WorkTeamSummary>;
+  validateAgentAssembly(input: SaveAgentAssemblyInput): Promise<AssemblyDiagnostic[]>;
+  saveAgentCopy(input: SaveAgentAssemblyInput): Promise<AgentInstanceSummary>;
+  addWorkMember(workId: string, agentInstanceId: string): Promise<WorkTeamSummary>;
   listProjectFiles(rootPath: string): Promise<ProjectFileSummary[]>;
   importResources(input: ImportResourcesInput): Promise<ResourceSummary[]>;
   listWorkResources(workId: string): Promise<ResourceSummary[]>;
@@ -111,6 +122,14 @@ export const tauriClient: PiWorkClient = {
   createWork: (input) => invoke<WorkDetail>("create_work", { input }),
   listWorks: () => invoke<WorkSummary[]>("list_works"),
   getWork: (workId) => invoke<WorkDetail>("get_work", { workId }),
+  listAgentInstances: () => invoke<AgentInstanceSummary[]>("list_agent_instances"),
+  listCapabilityPacks: () => invoke<CapabilityPackSummary[]>("list_capability_packs"),
+  getWorkTeam: (workId) => invoke<WorkTeamSummary>("get_work_team", { workId }),
+  validateAgentAssembly: (input) =>
+    invoke<AssemblyDiagnostic[]>("validate_agent_assembly", { input }),
+  saveAgentCopy: (input) => invoke<AgentInstanceSummary>("save_agent_copy", { input }),
+  addWorkMember: (workId, agentInstanceId) =>
+    invoke<WorkTeamSummary>("add_work_member", { workId, agentInstanceId }),
   listProjectFiles: (rootPath) =>
     invoke<ProjectFileSummary[]>("list_project_files", { rootPath }),
   importResources: (input) =>

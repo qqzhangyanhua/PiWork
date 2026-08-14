@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PiWorkClient } from "../../app/tauriClient";
 import type { WorkEventEnvelope } from "../../bindings";
+import { createMockTauriClient } from "../../test/mockTauriClient";
 import { WorkStoreProvider, useWorkStore } from "./WorkStoreProvider";
 import { useWorkEvents } from "./useWorkEvents";
 
@@ -32,6 +33,7 @@ const deferred = <T,>() => {
 const makeClient = (
   listenToWorkEvents: PiWorkClient["listenToWorkEvents"],
 ): PiWorkClient => ({
+  ...createMockTauriClient(),
   getModelConfigurationStatus: async () => ({ configured: true, configuration: { id: "openai-default", provider: "openai", baseUrl: "https://api.openai.com/v1", modelId: "gpt-5.2", active: true, credentialConfigured: true } }),
   listModelConfigurations: async () => [],
   testModelConnection: async () => ({ models: [] }),

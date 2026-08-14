@@ -1,30 +1,37 @@
 use std::sync::Arc;
 
-use crate::{model::ModelService, resource::service::ResourceService, work::service::WorkService};
+use crate::{
+    agent::service::AgentService, model::ModelService, resource::service::ResourceService,
+    work::service::WorkService,
+};
 
 pub struct AppState {
     work_service: Arc<WorkService>,
     model_service: Option<Arc<ModelService>>,
     resource_service: Option<Arc<ResourceService>>,
+    agent_service: Arc<AgentService>,
 }
 
 impl AppState {
-    pub fn new(work_service: Arc<WorkService>) -> Self {
+    pub fn new(work_service: Arc<WorkService>, agent_service: Arc<AgentService>) -> Self {
         Self {
             work_service,
             model_service: None,
             resource_service: None,
+            agent_service,
         }
     }
 
     pub fn with_model_service(
         work_service: Arc<WorkService>,
         model_service: Arc<ModelService>,
+        agent_service: Arc<AgentService>,
     ) -> Self {
         Self {
             work_service,
             model_service: Some(model_service),
             resource_service: None,
+            agent_service,
         }
     }
 
@@ -32,11 +39,13 @@ impl AppState {
         work_service: Arc<WorkService>,
         model_service: Arc<ModelService>,
         resource_service: Arc<ResourceService>,
+        agent_service: Arc<AgentService>,
     ) -> Self {
         Self {
             work_service,
             model_service: Some(model_service),
             resource_service: Some(resource_service),
+            agent_service,
         }
     }
 
@@ -54,5 +63,9 @@ impl AppState {
         self.resource_service
             .as_ref()
             .expect("production AppState must include ResourceService")
+    }
+
+    pub fn agent_service(&self) -> &Arc<AgentService> {
+        &self.agent_service
     }
 }

@@ -69,6 +69,7 @@ const legacyEvent = (
 };
 
 const unusedClient: PiWorkClient = {
+  ...createMockTauriClient(),
   getModelConfigurationStatus: async () => ({ configured: true, configuration: { id: "openai-default", provider: "openai", baseUrl: "https://api.openai.com/v1", modelId: "gpt-5.2", active: true, credentialConfigured: true } }),
   listModelConfigurations: async () => [],
   testModelConnection: async () => ({ models: [] }),

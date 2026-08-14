@@ -10,6 +10,22 @@ beforeEach(async () => {
 });
 
 describe("App", () => {
+  it("provides the complete agent command contract in the desktop mock", async () => {
+    const client = createMockTauriClient();
+
+    const instances = await client.listAgentInstances();
+    const packs = await client.listCapabilityPacks();
+    const team = await client.getWorkTeam("work-1");
+
+    expect(instances).toHaveLength(4);
+    expect(packs.filter(({ status }) => status === "catalog_only")).toHaveLength(96);
+    expect(team.workId).toBe("work-1");
+    expect(team.lead.roleKind).toBe("lead");
+    expect(client.validateAgentAssembly).toBeTypeOf("function");
+    expect(client.saveAgentCopy).toBeTypeOf("function");
+    expect(client.addWorkMember).toBeTypeOf("function");
+  });
+
   it("explains that the Vite URL cannot access the desktop backend", () => {
     render(<App />);
 

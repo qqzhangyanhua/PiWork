@@ -1,6 +1,6 @@
 #![allow(linker_messages)] // Xberg's bundled static Tesseract selects a release CRT in debug builds.
 
-use std::{future::Future, sync::Arc};
+use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use tauri::{Manager, path::BaseDirectory};
 
@@ -105,6 +105,18 @@ fn focus_visible_main_window<W: SecondInstanceWindow>(window: &W) -> Result<(), 
     Ok(())
 }
 
+fn production_agent_tools() -> BTreeSet<String> {
+    ["read", "grep", "find", "ls", "edit", "write", "bash"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+fn production_agent_engine_capabilities() -> BTreeSet<String> {
+    // B-stage executable packs currently declare no engine capability requirements.
+    BTreeSet::new()
+}
+
 async fn orchestrate_startup<T, E, Prepare, PrepareFuture, Assemble, Show, Prompt>(
     mut prepare: Prepare,
     mut assemble: Assemble,
@@ -164,6 +176,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         let database = storage::sqlite::Database::open(database_path).await?;
                         let repository =
                             work::repository::WorkRepository::new(database.pool().clone());
+                        let agent_repository =
+                            agent::repository::AgentRepository::new(database.pool().clone());
                         work::service::WorkService::new(repository.clone())
                             .recover_interrupted_runs()
                             .await?;
@@ -180,10 +194,15 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             resource_cache_dir,
                         ));
                         resource_service.recover_interrupted_imports().await?;
-                        Ok::<_, StartupError>((repository, model_repository, resource_service))
+                        Ok::<_, StartupError>((
+                            repository,
+                            model_repository,
+                            resource_service,
+                            agent_repository,
+                        ))
                     }
                 },
-                |(repository, model_repository, resource_service)| -> StartupResult<()> {
+                |(repository, model_repository, resource_service, agent_repository)| -> StartupResult<()> {
                     let model_service =
                         Arc::new(model::ModelService::production(model_repository)?);
                     let engine = Arc::new(engine::pi::PiEngineAdapter::production_with_executable(
@@ -217,10 +236,16 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             supervisor,
                             Arc::clone(&resource_service),
                         ));
+                    let agent_service = Arc::new(agent::service::AgentService::new(
+                        agent_repository,
+                        production_agent_tools(),
+                        production_agent_engine_capabilities(),
+                    ));
                     if !app.manage(app_state::AppState::with_services(
                         service,
                         model_service,
                         resource_service,
+                        agent_service,
                     )) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
@@ -258,7 +283,13 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             resource::commands::list_work_resources,
             resource::commands::get_resource_thumbnail,
             resource::commands::detach_draft_resource,
-            environment::commands::get_runtime_status
+            environment::commands::get_runtime_status,
+            agent::commands::list_agent_instances,
+            agent::commands::list_capability_packs,
+            agent::commands::get_work_team,
+            agent::commands::validate_agent_assembly,
+            agent::commands::save_agent_copy,
+            agent::commands::add_work_member
         ])
 }
 
@@ -319,6 +350,33 @@ mod tests {
         ] {
             assert!(source.contains(command), "missing {command}");
         }
+    }
+
+    #[test]
+    fn production_registers_every_agent_command() {
+        let source = include_str!("lib.rs");
+        for command in [
+            "agent::commands::list_agent_instances",
+            "agent::commands::list_capability_packs",
+            "agent::commands::get_work_team",
+            "agent::commands::validate_agent_assembly",
+            "agent::commands::save_agent_copy",
+            "agent::commands::add_work_member",
+        ] {
+            assert!(source.contains(command), "missing {command}");
+        }
+    }
+
+    #[test]
+    fn production_agent_allowlists_match_executable_b_stage_packs() {
+        assert_eq!(
+            super::production_agent_tools(),
+            ["bash", "edit", "find", "grep", "ls", "read", "write"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+        assert!(super::production_agent_engine_capabilities().is_empty());
     }
 
     #[test]

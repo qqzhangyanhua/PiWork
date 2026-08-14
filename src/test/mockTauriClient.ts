@@ -2,15 +2,20 @@ import { vi, type Mock } from "vitest";
 
 import type { PiWorkClient } from "../app/tauriClient";
 import type {
+  AgentInstanceSummary,
+  AssemblyDiagnostic,
+  CapabilityPackSummary,
   CreateWorkInput,
   MessageSummary,
   ResourceSummary,
   ResourceThumbnail,
   RunSummary,
+  SaveAgentAssemblyInput,
   StartWorkOutput,
   WorkDetail,
   WorkEventEnvelope,
   WorkSummary,
+  WorkTeamSummary,
 } from "../bindings";
 
 export type MockTauriClient = PiWorkClient & {
@@ -25,6 +30,12 @@ export type MockTauriClient = PiWorkClient & {
   createWork: Mock<PiWorkClient["createWork"]>;
   listWorks: Mock<PiWorkClient["listWorks"]>;
   getWork: Mock<PiWorkClient["getWork"]>;
+  listAgentInstances: Mock<PiWorkClient["listAgentInstances"]>;
+  listCapabilityPacks: Mock<PiWorkClient["listCapabilityPacks"]>;
+  getWorkTeam: Mock<PiWorkClient["getWorkTeam"]>;
+  validateAgentAssembly: Mock<PiWorkClient["validateAgentAssembly"]>;
+  saveAgentCopy: Mock<PiWorkClient["saveAgentCopy"]>;
+  addWorkMember: Mock<PiWorkClient["addWorkMember"]>;
   listProjectFiles: Mock<PiWorkClient["listProjectFiles"]>;
   importResources: Mock<PiWorkClient["importResources"]>;
   listWorkResources: Mock<PiWorkClient["listWorkResources"]>;
@@ -77,6 +88,145 @@ export const createMockTauriClient = (): MockTauriClient => {
   const resourcesByDraft = new Map<string, ResourceSummary[]>();
   const thumbnailByResource = new Map<string, ResourceThumbnail>();
   const unlisten = vi.fn(() => handlers.clear());
+  const roleKinds = ["lead", "researcher", "engineer", "reviewer"] as const;
+  const executablePacks: CapabilityPackSummary[] = roleKinds.map((roleKind) => ({
+    id: `capability-pack:${roleKind}:v1`,
+    catalogCapabilityId: null,
+    name: `${roleKind} capability`,
+    description: `${roleKind} executable capability`,
+    instructions: `Act as the ${roleKind}`,
+    inputSchema: {},
+    outputSchema: {},
+    procedure: {},
+    validationRubric: {},
+    requiredTools: ["read"],
+    defaultPermissionScope: roleKind === "engineer" ? "inherit_work" : "read_only",
+    compatibleRoleTemplateIds: [`role-template:${roleKind}:v1`],
+    requiredEngineCapabilities: [],
+    conflictsWithCapabilityPackIds: [],
+    version: 1,
+    status: "executable",
+  }));
+  const catalogPacks: CapabilityPackSummary[] = Array.from({ length: 96 }, (_, index) => {
+    const sequence = String(index + 1).padStart(3, "0");
+    return {
+      id: `catalog-capability:${sequence}`,
+      catalogCapabilityId: `catalog-capability:${sequence}`,
+      name: `Catalog capability ${sequence}`,
+      description: "",
+      instructions: "",
+      inputSchema: {},
+      outputSchema: {},
+      procedure: {},
+      validationRubric: {},
+      requiredTools: [],
+      defaultPermissionScope: "read_only",
+      compatibleRoleTemplateIds: [],
+      requiredEngineCapabilities: [],
+      conflictsWithCapabilityPackIds: [],
+      version: 1,
+      status: "catalog_only",
+    };
+  });
+  const agentInstances: AgentInstanceSummary[] = roleKinds.map((roleKind, index) => {
+    const permission = roleKind === "engineer" || roleKind === "lead"
+      ? "inherit_work" as const
+      : "read_only" as const;
+    return {
+      id: `agent-instance:piwork-${roleKind}`,
+      definition: {
+        id: `agent-definition:piwork-${roleKind}:v1`,
+        roleTemplateId: `role-template:${roleKind}:v1`,
+        roleKind,
+        slug: `piwork-${roleKind}`,
+        name: roleKind,
+        description: `PiWork builtin ${roleKind}`,
+        instructions: `Act as the ${roleKind}`,
+        responsibilities: [],
+        nonResponsibilities: [],
+        inputContract: {},
+        resultContract: {},
+        qualityRubric: {},
+        defaultEngineKind: "pi",
+        defaultModelConfigurationId: null,
+        defaultPermissionPolicy: permission,
+        defaultParallelism: 1,
+        memoryPolicy: "confirmed_only",
+        capabilityPacks: [executablePacks[index]!],
+        builtin: true,
+        active: true,
+        version: 1,
+        createdAt: now(0),
+        updatedAt: now(0),
+      },
+      displayName: roleKind,
+      engineOverride: null,
+      modelConfigurationOverride: null,
+      permissionPolicyOverride: null,
+      parallelismOverride: null,
+      builtin: true,
+      status: "active",
+      createdAt: now(0),
+      updatedAt: now(0),
+    };
+  });
+  const teamMembersByWork = new Map<string, AgentInstanceSummary[]>();
+  const workTeam = (workId: string): WorkTeamSummary => {
+    const instances = [agentInstances[0]!, ...(teamMembersByWork.get(workId) ?? [])]
+      .filter((instance, index, all) => all.findIndex(({ id }) => id === instance.id) === index);
+    const members = instances.map((instance) => ({
+      workId,
+      instance,
+      roleKind: instance.definition.roleKind,
+      status: "joined" as const,
+      permissionPolicy: instance.definition.defaultPermissionPolicy,
+      joinedAt: now(0),
+      updatedAt: now(0),
+    }));
+    return { workId, lead: members[0]!, members };
+  };
+  const listAgentInstances: Mock<PiWorkClient["listAgentInstances"]> = vi.fn(
+    async () => [...agentInstances],
+  );
+  const listCapabilityPacks: Mock<PiWorkClient["listCapabilityPacks"]> = vi.fn(
+    async () => [...executablePacks, ...catalogPacks],
+  );
+  const getWorkTeam: Mock<PiWorkClient["getWorkTeam"]> = vi.fn(async (workId) => workTeam(workId));
+  const validateAgentAssembly: Mock<PiWorkClient["validateAgentAssembly"]> = vi.fn(
+    async (_input: SaveAgentAssemblyInput): Promise<AssemblyDiagnostic[]> => [],
+  );
+  const saveAgentCopy: Mock<PiWorkClient["saveAgentCopy"]> = vi.fn(async (input) => {
+    const source = agentInstances.find(({ id }) => id === input.sourceInstanceId);
+    if (!source) throw new Error(`Agent instance not found: ${input.sourceInstanceId}`);
+    const copy: AgentInstanceSummary = {
+      ...source,
+      id: `agent-instance:local:${agentInstances.length + 1}`,
+      definition: {
+        ...source.definition,
+        id: `agent-definition:local:${agentInstances.length + 1}:v1`,
+        name: input.displayName,
+        capabilityPacks: [...executablePacks, ...catalogPacks].filter(({ id }) =>
+          input.capabilityPackIds.includes(id)),
+        builtin: false,
+      },
+      displayName: input.displayName,
+      engineOverride: input.engineOverride,
+      modelConfigurationOverride: input.modelConfigurationOverride,
+      permissionPolicyOverride: input.permissionPolicyOverride,
+      parallelismOverride: input.parallelismOverride,
+      builtin: false,
+    };
+    agentInstances.push(copy);
+    return copy;
+  });
+  const addWorkMember: Mock<PiWorkClient["addWorkMember"]> = vi.fn(
+    async (workId, agentInstanceId) => {
+      const instance = agentInstances.find(({ id }) => id === agentInstanceId);
+      if (!instance) throw new Error(`Agent instance not found: ${agentInstanceId}`);
+      teamMembersByWork.set(workId, [...(teamMembersByWork.get(workId) ?? []), instance]);
+      return workTeam(workId);
+    },
+  );
   const getRuntimeStatus: Mock<Required<PiWorkClient>["getRuntimeStatus"]> = vi.fn(async () => ({
     python: { available: true, version: "3.11.6" },
     node: { available: true, version: "18.20.2" },
@@ -282,6 +432,12 @@ export const createMockTauriClient = (): MockTauriClient => {
     createWork,
     listWorks,
     getWork,
+    listAgentInstances,
+    listCapabilityPacks,
+    getWorkTeam,
+    validateAgentAssembly,
+    saveAgentCopy,
+    addWorkMember,
     listProjectFiles,
     importResources,
     listWorkResources,

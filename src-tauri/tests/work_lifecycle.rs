@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use piwork_lib::{
-    agent::repository::AgentRepository,
+    agent::{repository::AgentRepository, service::AgentService},
     app_state::AppState,
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
@@ -2997,8 +2997,14 @@ async fn app_state_exposes_the_shared_work_service() {
     let service = Arc::new(WorkService::new(WorkRepository::new(
         database.pool().clone(),
     )));
-    let state = AppState::new(Arc::clone(&service));
+    let agent_service = Arc::new(AgentService::new(
+        AgentRepository::new(database.pool().clone()),
+        Default::default(),
+        Default::default(),
+    ));
+    let state = AppState::new(Arc::clone(&service), Arc::clone(&agent_service));
 
     assert!(Arc::ptr_eq(state.work_service(), &service));
+    assert!(Arc::ptr_eq(state.agent_service(), &agent_service));
     assert!(state.work_service().list_works().await.unwrap().is_empty());
 }
