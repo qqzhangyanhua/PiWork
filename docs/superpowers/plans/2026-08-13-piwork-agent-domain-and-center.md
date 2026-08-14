@@ -399,10 +399,10 @@ pub async fn list_capability_packs(&self) -> Result<Vec<CapabilityPackSummary>, 
 pub async fn get_work_team(&self, work_id: &str) -> Result<Option<WorkTeamSummary>, AppError>;
 pub async fn add_work_member(&self, work_id: &str, instance_id: &str) -> Result<WorkTeamSummary, AppError>;
 pub async fn set_work_lead(&self, work_id: &str, instance_id: &str) -> Result<WorkTeamSummary, AppError>;
-pub async fn copy_agent_assembly(&self, input: ResolvedAgentAssembly) -> Result<AgentInstanceSummary, AppError>;
 ```
 
-Repository 只持久化已解析、已验证的 `ResolvedAgentAssembly`；不在 SQL 层做业务降级。所有 membership/Lead 改动使用 `BEGIN IMMEDIATE`。
+Task 3 不定义或持久化装配输入；`ResolvedAgentAssembly` 由 Task 4 定义后，再同步向 Repository 增加
+`copy_agent_assembly(&self, input: ResolvedAgentAssembly)`。Repository 只持久化已解析、已验证的装配；不在 SQL 层做业务降级。所有 membership/Lead 改动使用 `BEGIN IMMEDIATE`。
 
 - [ ] **Step 4: 把新 Work 和 Lead 写入同一事务**
 
@@ -475,6 +475,14 @@ pub fn validate_assembly(
 规则顺序固定：status → role compatibility → tools → engine capabilities → permission → conflicts → budget。收集全部可修复诊断后一次返回；不跳过不兼容 pack。
 
 - [ ] **Step 4: 实现 Service 的授权语义**
+
+先在 Repository 增加 Task 3 明确延后的已验证装配持久化入口：
+
+```rust
+pub async fn copy_agent_assembly(&self, input: ResolvedAgentAssembly) -> Result<AgentInstanceSummary, AppError>;
+```
+
+该入口不接受未验证的 SQL-facing 替代类型，并与 Definition version 1 + Instance 的创建共用一个 `BEGIN IMMEDIATE` 事务。
 
 `AgentService` 提供：
 
