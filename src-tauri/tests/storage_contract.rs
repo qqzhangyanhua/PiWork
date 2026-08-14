@@ -413,6 +413,306 @@ async fn agent_domain_constraints_reject_duplicate_versions_and_invalid_json() {
     }
 }
 
+async fn assert_agent_domain_statement_rejected(
+    database: &Database,
+    statement: &str,
+    expected: &str,
+) {
+    let result = sqlx::query(statement).execute(database.pool()).await;
+    assert_database_error_contains(result, expected);
+}
+
+#[tokio::test]
+async fn agent_domain_check_constraint_families_are_enforced() {
+    let database = Database::open_in_memory().await.unwrap();
+
+    for statement in [
+        "UPDATE role_templates SET role_kind = 'operator' WHERE id = 'role-template:lead:v1'",
+        "UPDATE role_templates SET builtin = 2 WHERE id = 'role-template:lead:v1'",
+        "UPDATE role_templates SET version = 0 WHERE id = 'role-template:lead:v1'",
+        "UPDATE agent_definitions SET default_permission_policy = 'admin' WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET default_parallelism = 0 WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET default_parallelism = 9 WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET memory_policy = 'always' WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET builtin = -1 WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET active = 2 WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET version = -1 WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_instances SET permission_policy_override = 'admin' WHERE id = 'agent-instance:piwork-lead'",
+        "UPDATE agent_instances SET parallelism_override = 0 WHERE id = 'agent-instance:piwork-lead'",
+        "UPDATE agent_instances SET parallelism_override = 9 WHERE id = 'agent-instance:piwork-lead'",
+        "UPDATE agent_instances SET builtin = 2 WHERE id = 'agent-instance:piwork-lead'",
+        "UPDATE agent_instances SET status = 'paused' WHERE id = 'agent-instance:piwork-lead'",
+        "UPDATE capability_packs SET default_permission_scope = 'admin' WHERE id = 'capability-pack:lead-coordination:v1'",
+        "UPDATE capability_packs SET version = 0 WHERE id = 'capability-pack:lead-coordination:v1'",
+        "UPDATE capability_packs SET status = 'installed' WHERE id = 'capability-pack:lead-coordination:v1'",
+    ] {
+        assert_agent_domain_statement_rejected(&database, statement, "CHECK constraint failed")
+            .await;
+    }
+
+    insert_work(&database, "constraint-work").await;
+    sqlx::query(
+        "INSERT INTO work_agents (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) \
+         VALUES ('constraint-work', 'agent-instance:piwork-engineer', 'engineer', 'joined', 'inherit_work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    for statement in [
+        "UPDATE work_agents SET role_kind = 'operator' WHERE work_id = 'constraint-work'",
+        "UPDATE work_agents SET status = 'pending' WHERE work_id = 'constraint-work'",
+        "UPDATE work_agents SET permission_policy = 'admin' WHERE work_id = 'constraint-work'",
+    ] {
+        assert_agent_domain_statement_rejected(&database, statement, "CHECK constraint failed")
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn agent_domain_foreign_key_owner_policies_are_enforced() {
+    let database = Database::open_in_memory().await.unwrap();
+
+    assert_agent_domain_statement_rejected(
+        &database,
+        "DELETE FROM role_templates WHERE id = 'role-template:lead:v1'",
+        "FOREIGN KEY constraint failed",
+    )
+    .await;
+    assert_agent_domain_statement_rejected(
+        &database,
+        "DELETE FROM capability_packs WHERE id = 'capability-pack:lead-coordination:v1'",
+        "FOREIGN KEY constraint failed",
+    )
+    .await;
+
+    sqlx::query(
+        "INSERT INTO role_templates SELECT 'role-template:test:v1', 'test-role', role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, 0, version, created_at, updated_at FROM role_templates WHERE id = 'role-template:engineer:v1'",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agent_definitions SELECT 'agent-definition:test:v1', 'role-template:test:v1', 'test-definition', name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, 0, active, version, created_at, updated_at FROM agent_definitions WHERE id = 'agent-definition:piwork-engineer:v1'",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agent_instances SELECT 'agent-instance:test', 'agent-definition:test:v1', display_name, engine_override, model_configuration_override, permission_policy_override, parallelism_override, 0, status, created_at, updated_at FROM agent_instances WHERE id = 'agent-instance:piwork-engineer'",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agent_capability_bindings (agent_definition_id, capability_pack_id, installed_at) VALUES ('agent-definition:test:v1', 'catalog-capability:001', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await.unwrap();
+
+    assert_agent_domain_statement_rejected(
+        &database,
+        "DELETE FROM agent_definitions WHERE id = 'agent-definition:test:v1'",
+        "FOREIGN KEY constraint failed",
+    )
+    .await;
+    assert_agent_domain_statement_rejected(
+        &database,
+        "DELETE FROM capability_packs WHERE id = 'catalog-capability:001'",
+        "FOREIGN KEY constraint failed",
+    )
+    .await;
+
+    insert_work(&database, "owner-work").await;
+    sqlx::query(
+        "INSERT INTO work_agents (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) \
+         VALUES ('owner-work', 'agent-instance:test', 'engineer', 'joined', 'inherit_work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await.unwrap();
+    assert_agent_domain_statement_rejected(
+        &database,
+        "DELETE FROM agent_instances WHERE id = 'agent-instance:test'",
+        "FOREIGN KEY constraint failed",
+    )
+    .await;
+    sqlx::query("DELETE FROM works WHERE id = 'owner-work'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM agent_instances WHERE id = 'agent-instance:test'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM agent_definitions WHERE id = 'agent-definition:test:v1'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let binding_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_capability_bindings WHERE agent_definition_id = 'agent-definition:test:v1'",
+    ).fetch_one(database.pool()).await.unwrap();
+    assert_eq!(
+        binding_count, 0,
+        "definition deletion must cascade bindings"
+    );
+}
+
+#[tokio::test]
+async fn agent_domain_builtin_seed_contracts_are_exact() {
+    let database = Database::open_in_memory().await.unwrap();
+    let parse_json = |value: &str| serde_json::from_str::<serde_json::Value>(value).unwrap();
+
+    let roles = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT role_kind, responsibilities_json, non_responsibilities_json, base_result_contract_json \
+         FROM role_templates ORDER BY role_kind",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let role_contracts = roles
+        .into_iter()
+        .map(|(kind, responsibilities, non_responsibilities, result)| {
+            (
+                kind,
+                parse_json(&responsibilities),
+                parse_json(&non_responsibilities),
+                parse_json(&result),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        role_contracts,
+        vec![
+            (
+                "engineer".into(),
+                serde_json::json!(["implement", "debug", "refactor", "test", "artifacts"]),
+                serde_json::json!(["不扩大任务范围", "不隐瞒未验证结果"]),
+                serde_json::json!({"changes":"array","tests":"array","artifacts":"array","risks":"array"})
+            ),
+            (
+                "lead".into(),
+                serde_json::json!([
+                    "understand",
+                    "decompose",
+                    "dispatch",
+                    "decide",
+                    "synthesize",
+                    "deliver"
+                ]),
+                serde_json::json!(["不伪造成员结论", "不绕过权限边界"]),
+                serde_json::json!({"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"})
+            ),
+            (
+                "researcher".into(),
+                serde_json::json!([
+                    "source_evidence",
+                    "fact_check",
+                    "comparison",
+                    "risk",
+                    "confidence"
+                ]),
+                serde_json::json!(["不修改工作文件", "不把推测表述为事实"]),
+                serde_json::json!({"findings":"array","sources":"array","risks":"array","confidence":"string"})
+            ),
+            (
+                "reviewer".into(),
+                serde_json::json!([
+                    "claims_review",
+                    "diff_review",
+                    "tests_review",
+                    "permission_review",
+                    "omission_review"
+                ]),
+                serde_json::json!(["不替代实现者修改产出", "不在证据不足时宣称通过"]),
+                serde_json::json!({"findings":"array","evidence":"array","verdict":"string"})
+            ),
+        ]
+    );
+
+    let definitions = sqlx::query_as::<_, (String, String, i64, String, i64, String, String)>(
+        "SELECT id, default_permission_policy, default_parallelism, memory_policy, active, responsibilities_json, result_contract_json \
+         FROM agent_definitions ORDER BY id",
+    ).fetch_all(database.pool()).await.unwrap();
+    let definition_contracts = definitions
+        .into_iter()
+        .map(
+            |(id, permission, parallelism, memory, active, responsibilities, result)| {
+                (
+                    id,
+                    permission,
+                    parallelism,
+                    memory,
+                    active,
+                    parse_json(&responsibilities),
+                    parse_json(&result),
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(
+        definition_contracts,
+        vec![
+            (
+                "agent-definition:piwork-engineer:v1".into(),
+                "inherit_work".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                serde_json::json!(["implement", "debug", "refactor", "test", "artifacts"]),
+                serde_json::json!({"changes":"array","tests":"array","artifacts":"array","risks":"array"})
+            ),
+            (
+                "agent-definition:piwork-lead:v1".into(),
+                "inherit_work".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                serde_json::json!([
+                    "understand",
+                    "decompose",
+                    "dispatch",
+                    "decide",
+                    "synthesize",
+                    "deliver"
+                ]),
+                serde_json::json!({"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"})
+            ),
+            (
+                "agent-definition:piwork-researcher:v1".into(),
+                "read_only".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                serde_json::json!([
+                    "source_evidence",
+                    "fact_check",
+                    "comparison",
+                    "risk",
+                    "confidence"
+                ]),
+                serde_json::json!({"findings":"array","sources":"array","risks":"array","confidence":"string"})
+            ),
+            (
+                "agent-definition:piwork-reviewer:v1".into(),
+                "read_only".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                serde_json::json!([
+                    "claims_review",
+                    "diff_review",
+                    "tests_review",
+                    "permission_review",
+                    "omission_review"
+                ]),
+                serde_json::json!({"findings":"array","evidence":"array","verdict":"string"})
+            ),
+        ]
+    );
+
+    let instances = sqlx::query_as::<_, (String, String)>(
+        "SELECT id, status FROM agent_instances WHERE builtin = 1 ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        instances,
+        vec![
+            ("agent-instance:piwork-engineer".into(), "active".into()),
+            ("agent-instance:piwork-lead".into(), "active".into()),
+            ("agent-instance:piwork-researcher".into(), "active".into()),
+            ("agent-instance:piwork-reviewer".into(), "active".into()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn agent_domain_work_lead_membership_constraints_and_cascades_hold() {
     let database = Database::open_in_memory().await.unwrap();
