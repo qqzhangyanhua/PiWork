@@ -615,14 +615,23 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
         ]
     );
 
-    let definitions = sqlx::query_as::<_, (String, String, i64, String, i64, String, String)>(
-        "SELECT id, default_permission_policy, default_parallelism, memory_policy, active, responsibilities_json, result_contract_json \
+    let definitions = sqlx::query_as::<_, (String, String, i64, String, i64, String, String, String)>(
+        "SELECT id, default_permission_policy, default_parallelism, memory_policy, active, responsibilities_json, non_responsibilities_json, result_contract_json \
          FROM agent_definitions ORDER BY id",
     ).fetch_all(database.pool()).await.unwrap();
     let definition_contracts = definitions
         .into_iter()
         .map(
-            |(id, permission, parallelism, memory, active, responsibilities, result)| {
+            |(
+                id,
+                permission,
+                parallelism,
+                memory,
+                active,
+                responsibilities,
+                non_responsibilities,
+                result,
+            )| {
                 (
                     id,
                     permission,
@@ -630,6 +639,7 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     memory,
                     active,
                     parse_json(&responsibilities),
+                    parse_json(&non_responsibilities),
                     parse_json(&result),
                 )
             },
@@ -645,6 +655,7 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                 "confirmed_only".into(),
                 1,
                 serde_json::json!(["implement", "debug", "refactor", "test", "artifacts"]),
+                serde_json::json!(["不扩大任务范围", "不隐瞒未验证结果"]),
                 serde_json::json!({"changes":"array","tests":"array","artifacts":"array","risks":"array"})
             ),
             (
@@ -661,6 +672,7 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     "synthesize",
                     "deliver"
                 ]),
+                serde_json::json!(["不伪造成员结论", "不绕过权限边界"]),
                 serde_json::json!({"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"})
             ),
             (
@@ -676,6 +688,7 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     "risk",
                     "confidence"
                 ]),
+                serde_json::json!(["不修改工作文件", "不把推测表述为事实"]),
                 serde_json::json!({"findings":"array","sources":"array","risks":"array","confidence":"string"})
             ),
             (
@@ -691,6 +704,7 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     "permission_review",
                     "omission_review"
                 ]),
+                serde_json::json!(["不替代实现者修改产出", "不在证据不足时宣称通过"]),
                 serde_json::json!({"findings":"array","evidence":"array","verdict":"string"})
             ),
         ]
