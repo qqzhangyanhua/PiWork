@@ -1,5 +1,10 @@
 use piwork_lib::storage::sqlite::Database;
-use sqlx::sqlite::SqliteQueryResult;
+use sqlx::{
+    Connection,
+    migrate::{Migrate, Migration, MigrationType},
+    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteQueryResult},
+};
+use std::borrow::Cow;
 
 #[test]
 fn migration_files_use_stable_lf_line_endings() {
@@ -30,6 +35,424 @@ fn document_derivative_migration_uses_stable_lf_line_endings() {
 fn activity_protocol_migration_uses_stable_lf_line_endings() {
     let migration = include_bytes!("../migrations/0004_activity_protocol_v2.sql");
     assert!(!migration.contains(&b'\r'));
+}
+
+#[test]
+fn agent_domain_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0005_agent_domain.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[tokio::test]
+async fn agent_domain_migration_seeds_builtin_team_and_capabilities() {
+    let database = Database::open_in_memory().await.unwrap();
+    let names = database.table_names().await.unwrap();
+    for expected in [
+        "role_templates",
+        "agent_definitions",
+        "agent_instances",
+        "capability_packs",
+        "agent_capability_bindings",
+        "work_agents",
+        "work_leads",
+    ] {
+        assert!(names.contains(&expected.to_string()), "missing {expected}");
+    }
+
+    for (table, expected) in [
+        ("role_templates", 4_i64),
+        ("agent_definitions", 4),
+        ("agent_instances", 4),
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE builtin = 1"))
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, expected, "unexpected builtin count in {table}");
+    }
+
+    let role_ids = sqlx::query_scalar::<_, String>("SELECT id FROM role_templates ORDER BY id")
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        role_ids,
+        vec![
+            "role-template:engineer:v1",
+            "role-template:lead:v1",
+            "role-template:researcher:v1",
+            "role-template:reviewer:v1",
+        ]
+    );
+    let definition_ids =
+        sqlx::query_scalar::<_, String>("SELECT id FROM agent_definitions ORDER BY id")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        definition_ids,
+        vec![
+            "agent-definition:piwork-engineer:v1",
+            "agent-definition:piwork-lead:v1",
+            "agent-definition:piwork-researcher:v1",
+            "agent-definition:piwork-reviewer:v1",
+        ]
+    );
+    let instance_ids =
+        sqlx::query_scalar::<_, String>("SELECT id FROM agent_instances ORDER BY id")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        instance_ids,
+        vec![
+            "agent-instance:piwork-engineer",
+            "agent-instance:piwork-lead",
+            "agent-instance:piwork-researcher",
+            "agent-instance:piwork-reviewer",
+        ]
+    );
+
+    let catalog_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM capability_packs WHERE status = 'catalog_only'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(catalog_count, 96);
+    let system_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM capability_packs WHERE status = 'executable' AND catalog_capability_id IS NULL",
+    ).fetch_one(database.pool()).await.unwrap();
+    assert_eq!(system_count, 4);
+    let catalog_ids = sqlx::query_scalar::<_, String>(
+        "SELECT catalog_capability_id FROM capability_packs WHERE status = 'catalog_only' ORDER BY catalog_capability_id",
+    ).fetch_all(database.pool()).await.unwrap();
+    assert_eq!(
+        catalog_ids,
+        (1..=96)
+            .map(|id| format!("catalog-capability:{id:03}"))
+            .collect::<Vec<_>>()
+    );
+    let mismatched_catalog_ids: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM capability_packs \
+         WHERE status = 'catalog_only' AND id <> catalog_capability_id",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(mismatched_catalog_ids, 0);
+    let catalog_rows = sqlx::query_as::<_, (String, String)>(
+        "SELECT catalog_capability_id, name FROM capability_packs \
+         WHERE status = 'catalog_only' ORDER BY catalog_capability_id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let source = include_str!("../../src/features/agent-center/agentCapabilities.ts");
+    let rows_source = source
+        .split_once("const ROWS")
+        .unwrap()
+        .1
+        .split_once("\n];")
+        .unwrap()
+        .0;
+    let source_catalog_rows = rows_source
+        .lines()
+        .filter_map(|line| {
+            let row = line.trim().strip_prefix('[')?;
+            let (id, remainder) = row.split_once(',')?;
+            let name = remainder.trim().strip_prefix('"')?.split_once('"')?.0;
+            Some((
+                format!("catalog-capability:{:03}", id.trim().parse::<u8>().unwrap()),
+                name.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(catalog_rows, source_catalog_rows);
+    let catalog_placeholders: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM capability_packs WHERE status = 'catalog_only' \
+         AND description = '' AND instructions = '' \
+         AND input_schema_json = '{}' AND output_schema_json = '{}' \
+         AND procedure_json = '{}' AND validation_rubric_json = '{}' \
+         AND required_tools_json = '[]' AND compatible_role_template_ids_json = '[]' \
+         AND required_engine_capabilities_json = '[]' \
+         AND conflicts_with_capability_pack_ids_json = '[]' \
+         AND default_permission_scope = 'read_only' AND version = 1",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(catalog_placeholders, 96);
+
+    let builtin_contracts = sqlx::query_as::<_, (String, String, String, String, String, i64, String, i64, i64)>(
+        "SELECT definitions.id, definitions.name, roles.role_kind, \
+         definitions.default_permission_policy, definitions.default_engine_kind, \
+         definitions.default_parallelism, definitions.memory_policy, definitions.builtin, definitions.active \
+         FROM agent_definitions AS definitions \
+         JOIN role_templates AS roles ON roles.id = definitions.role_template_id \
+         ORDER BY definitions.id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        builtin_contracts,
+        vec![
+            (
+                "agent-definition:piwork-engineer:v1".into(),
+                "工程师".into(),
+                "engineer".into(),
+                "inherit_work".into(),
+                "pi".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                1
+            ),
+            (
+                "agent-definition:piwork-lead:v1".into(),
+                "PiWork 主理人".into(),
+                "lead".into(),
+                "inherit_work".into(),
+                "pi".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                1
+            ),
+            (
+                "agent-definition:piwork-researcher:v1".into(),
+                "研究员".into(),
+                "researcher".into(),
+                "read_only".into(),
+                "pi".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                1
+            ),
+            (
+                "agent-definition:piwork-reviewer:v1".into(),
+                "审阅者".into(),
+                "reviewer".into(),
+                "read_only".into(),
+                "pi".into(),
+                1,
+                "confirmed_only".into(),
+                1,
+                1
+            ),
+        ]
+    );
+
+    let bindings = sqlx::query_as::<_, (String, String)>(
+        "SELECT agent_definition_id, capability_pack_id FROM agent_capability_bindings ORDER BY agent_definition_id",
+    ).fetch_all(database.pool()).await.unwrap();
+    assert_eq!(
+        bindings,
+        vec![
+            (
+                "agent-definition:piwork-engineer:v1".into(),
+                "capability-pack:engineering-execution:v1".into()
+            ),
+            (
+                "agent-definition:piwork-lead:v1".into(),
+                "capability-pack:lead-coordination:v1".into()
+            ),
+            (
+                "agent-definition:piwork-researcher:v1".into(),
+                "capability-pack:source-research:v1".into()
+            ),
+            (
+                "agent-definition:piwork-reviewer:v1".into(),
+                "capability-pack:independent-review:v1".into()
+            ),
+        ]
+    );
+}
+
+async fn apply_agent_domain_migration(
+    connection: &mut SqliteConnection,
+    version: i64,
+    description: &'static str,
+    sql: &'static str,
+) {
+    let migration = Migration::new(
+        version,
+        Cow::Borrowed(description),
+        MigrationType::Simple,
+        Cow::Borrowed(sql),
+        false,
+    );
+    connection.apply(&migration).await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_domain_migration_backfills_legacy_work_lead() {
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    for (version, description, sql) in [
+        (
+            1,
+            "foundation",
+            include_str!("../migrations/0001_foundation.sql"),
+        ),
+        (
+            2,
+            "resources",
+            include_str!("../migrations/0002_resources.sql"),
+        ),
+        (
+            3,
+            "document derivatives",
+            include_str!("../migrations/0003_document_derivatives.sql"),
+        ),
+        (
+            4,
+            "activity protocol v2",
+            include_str!("../migrations/0004_activity_protocol_v2.sql"),
+        ),
+    ] {
+        apply_agent_domain_migration(&mut connection, version, description, sql).await;
+    }
+    sqlx::query(
+        "INSERT INTO works (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
+         VALUES ('legacy-work', 'Legacy', 'Goal', '/workspace', 'balanced', 'draft', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    ).execute(&mut connection).await.unwrap();
+
+    apply_agent_domain_migration(
+        &mut connection,
+        5,
+        "agent domain",
+        include_str!("../migrations/0005_agent_domain.sql"),
+    )
+    .await;
+
+    let membership = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT role_kind, status, permission_policy FROM work_agents WHERE work_id = 'legacy-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+    ).fetch_all(&mut connection).await.unwrap();
+    assert_eq!(
+        membership,
+        vec![("lead".into(), "joined".into(), "inherit_work".into())]
+    );
+    let leads = sqlx::query_as::<_, (String, String)>(
+        "SELECT work_id, agent_instance_id FROM work_leads WHERE work_id = 'legacy-work'",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        leads,
+        vec![("legacy-work".into(), "agent-instance:piwork-lead".into())]
+    );
+}
+
+#[tokio::test]
+async fn agent_domain_constraints_reject_duplicate_versions_and_invalid_json() {
+    let database = Database::open_in_memory().await.unwrap();
+    let duplicate_role = sqlx::query(
+        "INSERT INTO role_templates SELECT 'other-role-id', slug, role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, builtin, version, created_at, updated_at FROM role_templates WHERE id = 'role-template:lead:v1'",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(duplicate_role, "UNIQUE constraint failed");
+    let duplicate_definition = sqlx::query(
+        "INSERT INTO agent_definitions SELECT 'other-definition-id', role_template_id, slug, name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, builtin, active, version, created_at, updated_at FROM agent_definitions WHERE id = 'agent-definition:piwork-lead:v1'",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(duplicate_definition, "UNIQUE constraint failed");
+    for (table, id, columns) in [
+        (
+            "role_templates",
+            "role-template:lead:v1",
+            &[
+                "responsibilities_json",
+                "non_responsibilities_json",
+                "base_result_contract_json",
+                "compatible_capability_kinds_json",
+            ][..],
+        ),
+        (
+            "agent_definitions",
+            "agent-definition:piwork-lead:v1",
+            &[
+                "responsibilities_json",
+                "non_responsibilities_json",
+                "input_contract_json",
+                "result_contract_json",
+                "quality_rubric_json",
+            ][..],
+        ),
+        (
+            "capability_packs",
+            "capability-pack:lead-coordination:v1",
+            &[
+                "input_schema_json",
+                "output_schema_json",
+                "procedure_json",
+                "validation_rubric_json",
+                "required_tools_json",
+                "compatible_role_template_ids_json",
+                "required_engine_capabilities_json",
+                "conflicts_with_capability_pack_ids_json",
+            ][..],
+        ),
+    ] {
+        for column in columns {
+            let invalid_json = sqlx::query(&format!(
+                "UPDATE {table} SET {column} = 'not-json' WHERE id = ?"
+            ))
+            .bind(id)
+            .execute(database.pool())
+            .await;
+            assert_database_error_contains(invalid_json, "CHECK constraint failed");
+        }
+    }
+}
+
+#[tokio::test]
+async fn agent_domain_work_lead_membership_constraints_and_cascades_hold() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "agent-work").await;
+    let missing_membership = sqlx::query(
+        "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-lead', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(missing_membership, "FOREIGN KEY constraint failed");
+
+    sqlx::query(
+        "INSERT INTO work_agents (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) VALUES ('agent-work', 'agent-instance:piwork-lead', 'lead', 'joined', 'inherit_work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-lead', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO work_agents (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) VALUES ('agent-work', 'agent-instance:piwork-engineer', 'engineer', 'joined', 'inherit_work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await.unwrap();
+    let second_lead = sqlx::query(
+        "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-engineer', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(second_lead, "UNIQUE constraint failed");
+    let delete_membership = sqlx::query(
+        "DELETE FROM work_agents WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(delete_membership, "FOREIGN KEY constraint failed");
+
+    sqlx::query("DELETE FROM works WHERE id = 'agent-work'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    for table in ["work_agents", "work_leads"] {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table} WHERE work_id = 'agent-work'"
+        ))
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "rows remain in {table}");
+    }
 }
 
 async fn insert_work(database: &Database, id: &str) {
