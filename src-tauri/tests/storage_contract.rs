@@ -184,6 +184,71 @@ async fn agent_domain_migration_seeds_builtin_team_and_capabilities() {
     .unwrap();
     assert_eq!(catalog_placeholders, 96);
 
+    let executable_registries = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, required_tools_json, required_engine_capabilities_json \
+         FROM capability_packs WHERE status = 'executable' ORDER BY id",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let executable_registries = executable_registries
+        .into_iter()
+        .map(|(id, tools, engine_capabilities)| {
+            let tools = serde_json::from_str::<Vec<String>>(&tools).unwrap();
+            let engine_capabilities =
+                serde_json::from_str::<Vec<String>>(&engine_capabilities).unwrap();
+            for tool in &tools {
+                assert!(
+                    ["read", "grep", "find", "ls", "edit", "write", "bash"]
+                        .contains(&tool.as_str()),
+                    "undocumented tool identifier {tool:?}"
+                );
+            }
+            assert!(
+                engine_capabilities.is_empty(),
+                "executable pack {id} requires undocumented engine capabilities"
+            );
+            (id, tools, engine_capabilities)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        executable_registries,
+        vec![
+            (
+                "capability-pack:engineering-execution:v1".into(),
+                vec!["read", "grep", "find", "ls", "edit", "write", "bash"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                vec![],
+            ),
+            (
+                "capability-pack:independent-review:v1".into(),
+                vec!["read", "grep", "find", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                vec![],
+            ),
+            (
+                "capability-pack:lead-coordination:v1".into(),
+                vec!["read", "grep", "find", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                vec![],
+            ),
+            (
+                "capability-pack:source-research:v1".into(),
+                vec!["read", "grep", "find", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                vec![],
+            ),
+        ]
+    );
+
     let builtin_contracts = sqlx::query_as::<_, (String, String, String, String, String, i64, String, i64, i64)>(
         "SELECT definitions.id, definitions.name, roles.role_kind, \
          definitions.default_permission_policy, definitions.default_engine_kind, \
@@ -334,22 +399,32 @@ async fn agent_domain_migration_backfills_legacy_work_lead() {
     )
     .await;
 
-    let membership = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT role_kind, status, permission_policy FROM work_agents WHERE work_id = 'legacy-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+    let membership = sqlx::query_as::<_, (String, String, String, String, String)>(
+        "SELECT role_kind, status, permission_policy, joined_at, updated_at FROM work_agents WHERE work_id = 'legacy-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
     ).fetch_all(&mut connection).await.unwrap();
     assert_eq!(
         membership,
-        vec![("lead".into(), "joined".into(), "inherit_work".into())]
+        vec![(
+            "lead".into(),
+            "joined".into(),
+            "inherit_work".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )]
     );
-    let leads = sqlx::query_as::<_, (String, String)>(
-        "SELECT work_id, agent_instance_id FROM work_leads WHERE work_id = 'legacy-work'",
+    let leads = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT work_id, agent_instance_id, created_at FROM work_leads WHERE work_id = 'legacy-work'",
     )
     .fetch_all(&mut connection)
     .await
     .unwrap();
     assert_eq!(
         leads,
-        vec![("legacy-work".into(), "agent-instance:piwork-lead".into())]
+        vec![(
+            "legacy-work".into(),
+            "agent-instance:piwork-lead".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )]
     );
 }
 
@@ -357,11 +432,11 @@ async fn agent_domain_migration_backfills_legacy_work_lead() {
 async fn agent_domain_constraints_reject_duplicate_versions_and_invalid_json() {
     let database = Database::open_in_memory().await.unwrap();
     let duplicate_role = sqlx::query(
-        "INSERT INTO role_templates SELECT 'other-role-id', slug, role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, builtin, version, created_at, updated_at FROM role_templates WHERE id = 'role-template:lead:v1'",
+        "INSERT INTO role_templates (id, slug, role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, builtin, version, created_at, updated_at) SELECT 'other-role-id', slug, role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, builtin, version, created_at, updated_at FROM role_templates WHERE id = 'role-template:lead:v1'",
     ).execute(database.pool()).await;
     assert_database_error_contains(duplicate_role, "UNIQUE constraint failed");
     let duplicate_definition = sqlx::query(
-        "INSERT INTO agent_definitions SELECT 'other-definition-id', role_template_id, slug, name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, builtin, active, version, created_at, updated_at FROM agent_definitions WHERE id = 'agent-definition:piwork-lead:v1'",
+        "INSERT INTO agent_definitions (id, role_template_id, slug, name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, builtin, active, version, created_at, updated_at) SELECT 'other-definition-id', role_template_id, slug, name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, builtin, active, version, created_at, updated_at FROM agent_definitions WHERE id = 'agent-definition:piwork-lead:v1'",
     ).execute(database.pool()).await;
     assert_database_error_contains(duplicate_definition, "UNIQUE constraint failed");
     for (table, id, columns) in [
@@ -410,6 +485,22 @@ async fn agent_domain_constraints_reject_duplicate_versions_and_invalid_json() {
             .await;
             assert_database_error_contains(invalid_json, "CHECK constraint failed");
         }
+    }
+}
+
+#[tokio::test]
+async fn agent_domain_json_columns_reject_valid_values_with_wrong_shapes() {
+    let database = Database::open_in_memory().await.unwrap();
+    for statement in [
+        "UPDATE role_templates SET responsibilities_json = '{}' WHERE id = 'role-template:lead:v1'",
+        "UPDATE role_templates SET base_result_contract_json = '[]' WHERE id = 'role-template:lead:v1'",
+        "UPDATE agent_definitions SET responsibilities_json = '{}' WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE agent_definitions SET input_contract_json = 'null' WHERE id = 'agent-definition:piwork-lead:v1'",
+        "UPDATE capability_packs SET required_tools_json = '{}' WHERE id = 'capability-pack:lead-coordination:v1'",
+        "UPDATE capability_packs SET input_schema_json = '[]' WHERE id = 'capability-pack:lead-coordination:v1'",
+    ] {
+        assert_agent_domain_statement_rejected(&database, statement, "CHECK constraint failed")
+            .await;
     }
 }
 
@@ -486,13 +577,13 @@ async fn agent_domain_foreign_key_owner_policies_are_enforced() {
     .await;
 
     sqlx::query(
-        "INSERT INTO role_templates SELECT 'role-template:test:v1', 'test-role', role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, 0, version, created_at, updated_at FROM role_templates WHERE id = 'role-template:engineer:v1'",
+        "INSERT INTO role_templates (id, slug, role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, builtin, version, created_at, updated_at) SELECT 'role-template:test:v1', 'test-role', role_kind, name, description, base_instructions, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json, 0, version, created_at, updated_at FROM role_templates WHERE id = 'role-template:engineer:v1'",
     ).execute(database.pool()).await.unwrap();
     sqlx::query(
-        "INSERT INTO agent_definitions SELECT 'agent-definition:test:v1', 'role-template:test:v1', 'test-definition', name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, 0, active, version, created_at, updated_at FROM agent_definitions WHERE id = 'agent-definition:piwork-engineer:v1'",
+        "INSERT INTO agent_definitions (id, role_template_id, slug, name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, builtin, active, version, created_at, updated_at) SELECT 'agent-definition:test:v1', 'role-template:test:v1', 'test-definition', name, description, instructions, responsibilities_json, non_responsibilities_json, input_contract_json, result_contract_json, quality_rubric_json, default_engine_kind, default_model_configuration_id, default_permission_policy, default_parallelism, memory_policy, 0, active, version, created_at, updated_at FROM agent_definitions WHERE id = 'agent-definition:piwork-engineer:v1'",
     ).execute(database.pool()).await.unwrap();
     sqlx::query(
-        "INSERT INTO agent_instances SELECT 'agent-instance:test', 'agent-definition:test:v1', display_name, engine_override, model_configuration_override, permission_policy_override, parallelism_override, 0, status, created_at, updated_at FROM agent_instances WHERE id = 'agent-instance:piwork-engineer'",
+        "INSERT INTO agent_instances (id, definition_id, display_name, engine_override, model_configuration_override, permission_policy_override, parallelism_override, builtin, status, created_at, updated_at) SELECT 'agent-instance:test', 'agent-definition:test:v1', display_name, engine_override, model_configuration_override, permission_policy_override, parallelism_override, 0, status, created_at, updated_at FROM agent_instances WHERE id = 'agent-instance:piwork-engineer'",
     ).execute(database.pool()).await.unwrap();
     sqlx::query(
         "INSERT INTO agent_capability_bindings (agent_definition_id, capability_pack_id, installed_at) VALUES ('agent-definition:test:v1', 'catalog-capability:001', '2026-01-01T00:00:00Z')",
@@ -548,8 +639,8 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
     let database = Database::open_in_memory().await.unwrap();
     let parse_json = |value: &str| serde_json::from_str::<serde_json::Value>(value).unwrap();
 
-    let roles = sqlx::query_as::<_, (String, String, String, String)>(
-        "SELECT role_kind, responsibilities_json, non_responsibilities_json, base_result_contract_json \
+    let roles = sqlx::query_as::<_, (String, String, String, String, String)>(
+        "SELECT role_kind, responsibilities_json, non_responsibilities_json, base_result_contract_json, compatible_capability_kinds_json \
          FROM role_templates ORDER BY role_kind",
     )
     .fetch_all(database.pool())
@@ -557,14 +648,17 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
     .unwrap();
     let role_contracts = roles
         .into_iter()
-        .map(|(kind, responsibilities, non_responsibilities, result)| {
-            (
-                kind,
-                parse_json(&responsibilities),
-                parse_json(&non_responsibilities),
-                parse_json(&result),
-            )
-        })
+        .map(
+            |(kind, responsibilities, non_responsibilities, result, compatible_kinds)| {
+                (
+                    kind,
+                    parse_json(&responsibilities),
+                    parse_json(&non_responsibilities),
+                    parse_json(&result),
+                    parse_json(&compatible_kinds),
+                )
+            },
+        )
         .collect::<Vec<_>>();
     assert_eq!(
         role_contracts,
@@ -573,7 +667,8 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                 "engineer".into(),
                 serde_json::json!(["implement", "debug", "refactor", "test", "artifacts"]),
                 serde_json::json!(["不扩大任务范围", "不隐瞒未验证结果"]),
-                serde_json::json!({"changes":"array","tests":"array","artifacts":"array","risks":"array"})
+                serde_json::json!({"changes":"array","tests":"array","artifacts":"array","risks":"array"}),
+                serde_json::json!([])
             ),
             (
                 "lead".into(),
@@ -586,7 +681,8 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     "deliver"
                 ]),
                 serde_json::json!(["不伪造成员结论", "不绕过权限边界"]),
-                serde_json::json!({"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"})
+                serde_json::json!({"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"}),
+                serde_json::json!([])
             ),
             (
                 "researcher".into(),
@@ -598,7 +694,8 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     "confidence"
                 ]),
                 serde_json::json!(["不修改工作文件", "不把推测表述为事实"]),
-                serde_json::json!({"findings":"array","sources":"array","risks":"array","confidence":"string"})
+                serde_json::json!({"findings":"array","sources":"array","risks":"array","confidence":"string"}),
+                serde_json::json!([])
             ),
             (
                 "reviewer".into(),
@@ -610,7 +707,8 @@ async fn agent_domain_builtin_seed_contracts_are_exact() {
                     "omission_review"
                 ]),
                 serde_json::json!(["不替代实现者修改产出", "不在证据不足时宣称通过"]),
-                serde_json::json!({"findings":"array","evidence":"array","verdict":"string"})
+                serde_json::json!({"findings":"array","evidence":"array","verdict":"string"}),
+                serde_json::json!([])
             ),
         ]
     );
@@ -734,7 +832,7 @@ async fn agent_domain_work_lead_membership_constraints_and_cascades_hold() {
     let missing_membership = sqlx::query(
         "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-lead', '2026-01-01T00:00:00Z')",
     ).execute(database.pool()).await;
-    assert_database_error_contains(missing_membership, "FOREIGN KEY constraint failed");
+    assert_database_error_contains(missing_membership, "work lead must be joined lead");
 
     sqlx::query(
         "INSERT INTO work_agents (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) VALUES ('agent-work', 'agent-instance:piwork-lead', 'lead', 'joined', 'inherit_work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
@@ -745,14 +843,54 @@ async fn agent_domain_work_lead_membership_constraints_and_cascades_hold() {
     sqlx::query(
         "INSERT INTO work_agents (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) VALUES ('agent-work', 'agent-instance:piwork-engineer', 'engineer', 'joined', 'inherit_work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
     ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "UPDATE work_agents SET role_kind = 'lead' WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-engineer'",
+    ).execute(database.pool()).await.unwrap();
     let second_lead = sqlx::query(
         "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-engineer', '2026-01-01T00:00:00Z')",
     ).execute(database.pool()).await;
     assert_database_error_contains(second_lead, "UNIQUE constraint failed");
+    sqlx::query(
+        "UPDATE work_agents SET role_kind = 'engineer' WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-engineer'",
+    ).execute(database.pool()).await.unwrap();
     let delete_membership = sqlx::query(
         "DELETE FROM work_agents WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
     ).execute(database.pool()).await;
     assert_database_error_contains(delete_membership, "FOREIGN KEY constraint failed");
+
+    sqlx::query("DELETE FROM work_leads WHERE work_id = 'agent-work'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let engineer_designation = sqlx::query(
+        "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-engineer', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(engineer_designation, "work lead must be joined lead");
+
+    sqlx::query(
+        "UPDATE work_agents SET status = 'inactive' WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+    ).execute(database.pool()).await.unwrap();
+    let inactive_designation = sqlx::query(
+        "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-lead', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(inactive_designation, "work lead must be joined lead");
+    sqlx::query(
+        "UPDATE work_agents SET status = 'joined' WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO work_leads (work_id, agent_instance_id, created_at) VALUES ('agent-work', 'agent-instance:piwork-lead', '2026-01-01T00:00:00Z')",
+    ).execute(database.pool()).await.unwrap();
+    let engineer_reassignment = sqlx::query(
+        "UPDATE work_leads SET agent_instance_id = 'agent-instance:piwork-engineer' WHERE work_id = 'agent-work'",
+    ).execute(database.pool()).await;
+    assert_database_error_contains(engineer_reassignment, "work lead must be joined lead");
+    for statement in [
+        "UPDATE work_agents SET status = 'inactive' WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+        "UPDATE work_agents SET role_kind = 'reviewer' WHERE work_id = 'agent-work' AND agent_instance_id = 'agent-instance:piwork-lead'",
+    ] {
+        let invalidation = sqlx::query(statement).execute(database.pool()).await;
+        assert_database_error_contains(invalidation, "current work lead must remain joined lead");
+    }
 
     sqlx::query("DELETE FROM works WHERE id = 'agent-work'")
         .execute(database.pool())

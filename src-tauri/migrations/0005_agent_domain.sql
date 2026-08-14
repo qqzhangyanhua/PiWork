@@ -5,10 +5,10 @@ CREATE TABLE role_templates (
     name TEXT NOT NULL,
     description TEXT NOT NULL,
     base_instructions TEXT NOT NULL,
-    responsibilities_json TEXT NOT NULL CHECK (json_valid(responsibilities_json)),
-    non_responsibilities_json TEXT NOT NULL CHECK (json_valid(non_responsibilities_json)),
-    base_result_contract_json TEXT NOT NULL CHECK (json_valid(base_result_contract_json)),
-    compatible_capability_kinds_json TEXT NOT NULL CHECK (json_valid(compatible_capability_kinds_json)),
+    responsibilities_json TEXT NOT NULL CHECK (json_valid(responsibilities_json) AND CASE WHEN json_valid(responsibilities_json) THEN json_type(responsibilities_json) = 'array' ELSE 0 END),
+    non_responsibilities_json TEXT NOT NULL CHECK (json_valid(non_responsibilities_json) AND CASE WHEN json_valid(non_responsibilities_json) THEN json_type(non_responsibilities_json) = 'array' ELSE 0 END),
+    base_result_contract_json TEXT NOT NULL CHECK (json_valid(base_result_contract_json) AND CASE WHEN json_valid(base_result_contract_json) THEN json_type(base_result_contract_json) = 'object' ELSE 0 END),
+    compatible_capability_kinds_json TEXT NOT NULL CHECK (json_valid(compatible_capability_kinds_json) AND CASE WHEN json_valid(compatible_capability_kinds_json) THEN json_type(compatible_capability_kinds_json) = 'array' ELSE 0 END),
     builtin INTEGER NOT NULL CHECK (builtin IN (0, 1)),
     version INTEGER NOT NULL CHECK (version > 0),
     created_at TEXT NOT NULL,
@@ -23,11 +23,11 @@ CREATE TABLE agent_definitions (
     name TEXT NOT NULL,
     description TEXT NOT NULL,
     instructions TEXT NOT NULL,
-    responsibilities_json TEXT NOT NULL CHECK (json_valid(responsibilities_json)),
-    non_responsibilities_json TEXT NOT NULL CHECK (json_valid(non_responsibilities_json)),
-    input_contract_json TEXT NOT NULL CHECK (json_valid(input_contract_json)),
-    result_contract_json TEXT NOT NULL CHECK (json_valid(result_contract_json)),
-    quality_rubric_json TEXT NOT NULL CHECK (json_valid(quality_rubric_json)),
+    responsibilities_json TEXT NOT NULL CHECK (json_valid(responsibilities_json) AND CASE WHEN json_valid(responsibilities_json) THEN json_type(responsibilities_json) = 'array' ELSE 0 END),
+    non_responsibilities_json TEXT NOT NULL CHECK (json_valid(non_responsibilities_json) AND CASE WHEN json_valid(non_responsibilities_json) THEN json_type(non_responsibilities_json) = 'array' ELSE 0 END),
+    input_contract_json TEXT NOT NULL CHECK (json_valid(input_contract_json) AND CASE WHEN json_valid(input_contract_json) THEN json_type(input_contract_json) = 'object' ELSE 0 END),
+    result_contract_json TEXT NOT NULL CHECK (json_valid(result_contract_json) AND CASE WHEN json_valid(result_contract_json) THEN json_type(result_contract_json) = 'object' ELSE 0 END),
+    quality_rubric_json TEXT NOT NULL CHECK (json_valid(quality_rubric_json) AND CASE WHEN json_valid(quality_rubric_json) THEN json_type(quality_rubric_json) = 'object' ELSE 0 END),
     default_engine_kind TEXT NOT NULL,
     default_model_configuration_id TEXT,
     default_permission_policy TEXT NOT NULL CHECK (default_permission_policy IN ('inherit_work', 'read_only', 'work_write')),
@@ -65,15 +65,15 @@ CREATE TABLE capability_packs (
     name TEXT NOT NULL,
     description TEXT NOT NULL,
     instructions TEXT NOT NULL,
-    input_schema_json TEXT NOT NULL CHECK (json_valid(input_schema_json)),
-    output_schema_json TEXT NOT NULL CHECK (json_valid(output_schema_json)),
-    procedure_json TEXT NOT NULL CHECK (json_valid(procedure_json)),
-    validation_rubric_json TEXT NOT NULL CHECK (json_valid(validation_rubric_json)),
-    required_tools_json TEXT NOT NULL CHECK (json_valid(required_tools_json)),
+    input_schema_json TEXT NOT NULL CHECK (json_valid(input_schema_json) AND CASE WHEN json_valid(input_schema_json) THEN json_type(input_schema_json) = 'object' ELSE 0 END),
+    output_schema_json TEXT NOT NULL CHECK (json_valid(output_schema_json) AND CASE WHEN json_valid(output_schema_json) THEN json_type(output_schema_json) = 'object' ELSE 0 END),
+    procedure_json TEXT NOT NULL CHECK (json_valid(procedure_json) AND CASE WHEN json_valid(procedure_json) THEN json_type(procedure_json) = 'object' ELSE 0 END),
+    validation_rubric_json TEXT NOT NULL CHECK (json_valid(validation_rubric_json) AND CASE WHEN json_valid(validation_rubric_json) THEN json_type(validation_rubric_json) = 'object' ELSE 0 END),
+    required_tools_json TEXT NOT NULL CHECK (json_valid(required_tools_json) AND CASE WHEN json_valid(required_tools_json) THEN json_type(required_tools_json) = 'array' ELSE 0 END),
     default_permission_scope TEXT NOT NULL CHECK (default_permission_scope IN ('inherit_work', 'read_only', 'work_write')),
-    compatible_role_template_ids_json TEXT NOT NULL CHECK (json_valid(compatible_role_template_ids_json)),
-    required_engine_capabilities_json TEXT NOT NULL CHECK (json_valid(required_engine_capabilities_json)),
-    conflicts_with_capability_pack_ids_json TEXT NOT NULL CHECK (json_valid(conflicts_with_capability_pack_ids_json)),
+    compatible_role_template_ids_json TEXT NOT NULL CHECK (json_valid(compatible_role_template_ids_json) AND CASE WHEN json_valid(compatible_role_template_ids_json) THEN json_type(compatible_role_template_ids_json) = 'array' ELSE 0 END),
+    required_engine_capabilities_json TEXT NOT NULL CHECK (json_valid(required_engine_capabilities_json) AND CASE WHEN json_valid(required_engine_capabilities_json) THEN json_type(required_engine_capabilities_json) = 'array' ELSE 0 END),
+    conflicts_with_capability_pack_ids_json TEXT NOT NULL CHECK (json_valid(conflicts_with_capability_pack_ids_json) AND CASE WHEN json_valid(conflicts_with_capability_pack_ids_json) THEN json_type(conflicts_with_capability_pack_ids_json) = 'array' ELSE 0 END),
     version INTEGER NOT NULL CHECK (version > 0),
     status TEXT NOT NULL CHECK (status IN ('catalog_only', 'executable', 'deprecated')),
     created_at TEXT NOT NULL,
@@ -115,15 +115,53 @@ CREATE TABLE work_leads (
 
 CREATE INDEX idx_work_leads_instance_id ON work_leads(agent_instance_id);
 
+CREATE TRIGGER work_leads_require_joined_lead_insert
+BEFORE INSERT ON work_leads
+WHEN NOT EXISTS (
+    SELECT 1 FROM work_agents
+    WHERE work_id = NEW.work_id
+      AND agent_instance_id = NEW.agent_instance_id
+      AND role_kind = 'lead'
+      AND status = 'joined'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'work lead must be joined lead');
+END;
+
+CREATE TRIGGER work_leads_require_joined_lead_update
+BEFORE UPDATE OF work_id, agent_instance_id ON work_leads
+WHEN NOT EXISTS (
+    SELECT 1 FROM work_agents
+    WHERE work_id = NEW.work_id
+      AND agent_instance_id = NEW.agent_instance_id
+      AND role_kind = 'lead'
+      AND status = 'joined'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'work lead must be joined lead');
+END;
+
+CREATE TRIGGER work_agents_preserve_current_lead
+BEFORE UPDATE OF role_kind, status ON work_agents
+WHEN (NEW.role_kind <> 'lead' OR NEW.status <> 'joined')
+ AND EXISTS (
+    SELECT 1 FROM work_leads
+    WHERE work_id = OLD.work_id
+      AND agent_instance_id = OLD.agent_instance_id
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'current work lead must remain joined lead');
+END;
+
 INSERT INTO role_templates (
     id, slug, role_kind, name, description, base_instructions,
     responsibilities_json, non_responsibilities_json, base_result_contract_json,
     compatible_capability_kinds_json, builtin, version, created_at, updated_at
 ) VALUES
-    ('role-template:lead:v1', 'lead', 'lead', 'PiWork 主理人', '理解目标并统筹团队交付。', '理解工作目标，拆解任务，分派合适成员，作出取舍，综合证据并交付最终结果。', '["understand","decompose","dispatch","decide","synthesize","deliver"]', '["不伪造成员结论","不绕过权限边界"]', '{"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"}', '["coordination"]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
-    ('role-template:researcher:v1', 'researcher', 'researcher', '研究员', '基于来源开展研究与核验。', '检索来源证据，核查事实，比较方案，识别风险并明确置信度。', '["source_evidence","fact_check","comparison","risk","confidence"]', '["不修改工作文件","不把推测表述为事实"]', '{"findings":"array","sources":"array","risks":"array","confidence":"string"}', '["research"]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
-    ('role-template:engineer:v1', 'engineer', 'engineer', '工程师', '实现、调试并验证工程产出。', '实现需求，调试问题，重构代码，运行测试并产出可复核制品。', '["implement","debug","refactor","test","artifacts"]', '["不扩大任务范围","不隐瞒未验证结果"]', '{"changes":"array","tests":"array","artifacts":"array","risks":"array"}', '["engineering"]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
-    ('role-template:reviewer:v1', 'reviewer', 'reviewer', '审阅者', '独立审查主张与变更。', '独立审查主张、差异、测试、权限边界和遗漏，并报告可操作问题。', '["claims_review","diff_review","tests_review","permission_review","omission_review"]', '["不替代实现者修改产出","不在证据不足时宣称通过"]', '{"findings":"array","evidence":"array","verdict":"string"}', '["review"]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z');
+    ('role-template:lead:v1', 'lead', 'lead', 'PiWork 主理人', '理解目标并统筹团队交付。', '理解工作目标，拆解任务，分派合适成员，作出取舍，综合证据并交付最终结果。', '["understand","decompose","dispatch","decide","synthesize","deliver"]', '["不伪造成员结论","不绕过权限边界"]', '{"summary":"string","decisions":"array","deliverables":"array","open_risks":"array"}', '[]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
+    ('role-template:researcher:v1', 'researcher', 'researcher', '研究员', '基于来源开展研究与核验。', '检索来源证据，核查事实，比较方案，识别风险并明确置信度。', '["source_evidence","fact_check","comparison","risk","confidence"]', '["不修改工作文件","不把推测表述为事实"]', '{"findings":"array","sources":"array","risks":"array","confidence":"string"}', '[]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
+    ('role-template:engineer:v1', 'engineer', 'engineer', '工程师', '实现、调试并验证工程产出。', '实现需求，调试问题，重构代码，运行测试并产出可复核制品。', '["implement","debug","refactor","test","artifacts"]', '["不扩大任务范围","不隐瞒未验证结果"]', '{"changes":"array","tests":"array","artifacts":"array","risks":"array"}', '[]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
+    ('role-template:reviewer:v1', 'reviewer', 'reviewer', '审阅者', '独立审查主张与变更。', '独立审查主张、差异、测试、权限边界和遗漏，并报告可操作问题。', '["claims_review","diff_review","tests_review","permission_review","omission_review"]', '["不替代实现者修改产出","不在证据不足时宣称通过"]', '{"findings":"array","evidence":"array","verdict":"string"}', '[]', 1, 1, '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z');
 
 INSERT INTO agent_definitions (
     id, role_template_id, slug, name, description, instructions,
@@ -153,10 +191,10 @@ INSERT INTO capability_packs (
     required_engine_capabilities_json, conflicts_with_capability_pack_ids_json,
     version, status, created_at, updated_at
 ) VALUES
-    ('capability-pack:lead-coordination:v1', NULL, '主理协调', '为主理人提供理解、拆解、分派、决策、综合和交付方法。', '建立目标与约束，形成可验证任务，选择成员并综合各方结果；保留证据、分歧和未决风险。', '{"goal":"string","context":"object","constraints":"array"}', '{"plan":"array","decisions":"array","delivery":"object"}', '{"steps":["understand","decompose","dispatch","decide","synthesize","deliver"]}', '{"checks":["goal_covered","assignments_clear","evidence_preserved","risks_disclosed"]}', '["task_coordination","workspace_read"]', 'inherit_work', '["role-template:lead:v1"]', '["agent_dispatch","result_synthesis"]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
-    ('capability-pack:source-research:v1', NULL, '来源研究', '为研究员提供来源检索、事实核查、比较和风险评估方法。', '优先使用原始可信来源；逐项关联主张与证据，标记冲突、时效和置信度。', '{"question":"string","source_constraints":"array"}', '{"claims":"array","sources":"array","confidence":"string"}', '{"steps":["scope","retrieve","verify","compare","report"]}', '{"checks":["sources_cited","claims_supported","uncertainty_disclosed"]}', '["workspace_read","source_search"]', 'read_only', '["role-template:researcher:v1"]', '["source_retrieval","citation"]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
-    ('capability-pack:engineering-execution:v1', NULL, '工程执行', '为工程师提供实现、调试、重构、测试和制品交付方法。', '先确认需求和边界，实施最小充分变更，运行相关验证并如实报告结果与风险。', '{"requirements":"array","workspace":"string","constraints":"array"}', '{"changes":"array","tests":"array","artifacts":"array"}', '{"steps":["inspect","implement","test","refactor","report"]}', '{"checks":["requirements_met","tests_passed","scope_respected"]}', '["workspace_read","workspace_write","test_runner"]', 'inherit_work', '["role-template:engineer:v1"]', '["workspace_tools","command_execution"]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
-    ('capability-pack:independent-review:v1', NULL, '独立审阅', '为审阅者提供独立主张、差异、测试、权限和遗漏审查方法。', '从要求和证据独立复核产出；按影响和证据报告问题，不修改被审阅产出。', '{"requirements":"array","claims":"array","diff":"object","tests":"array"}', '{"findings":"array","verdict":"string"}', '{"steps":["establish_contract","inspect_evidence","challenge_claims","report_findings"]}', '{"checks":["independent","evidence_based","permissions_checked","omissions_checked"]}', '["workspace_read","test_evidence_read"]', 'read_only', '["role-template:reviewer:v1"]', '["diff_inspection","test_evidence"]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z');
+    ('capability-pack:lead-coordination:v1', NULL, '主理协调', '为主理人提供理解、拆解、分派、决策、综合和交付方法。', '建立目标与约束，形成可验证任务，选择成员并综合各方结果；保留证据、分歧和未决风险。', '{"goal":"string","context":"object","constraints":"array"}', '{"plan":"array","decisions":"array","delivery":"object"}', '{"steps":["understand","decompose","dispatch","decide","synthesize","deliver"]}', '{"checks":["goal_covered","assignments_clear","evidence_preserved","risks_disclosed"]}', '["read","grep","find","ls"]', 'inherit_work', '["role-template:lead:v1"]', '[]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
+    ('capability-pack:source-research:v1', NULL, '来源研究', '为研究员提供来源检索、事实核查、比较和风险评估方法。', '优先使用原始可信来源；逐项关联主张与证据，标记冲突、时效和置信度。', '{"question":"string","source_constraints":"array"}', '{"claims":"array","sources":"array","confidence":"string"}', '{"steps":["scope","retrieve","verify","compare","report"]}', '{"checks":["sources_cited","claims_supported","uncertainty_disclosed"]}', '["read","grep","find","ls"]', 'read_only', '["role-template:researcher:v1"]', '[]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
+    ('capability-pack:engineering-execution:v1', NULL, '工程执行', '为工程师提供实现、调试、重构、测试和制品交付方法。', '先确认需求和边界，实施最小充分变更，运行相关验证并如实报告结果与风险。', '{"requirements":"array","workspace":"string","constraints":"array"}', '{"changes":"array","tests":"array","artifacts":"array"}', '{"steps":["inspect","implement","test","refactor","report"]}', '{"checks":["requirements_met","tests_passed","scope_respected"]}', '["read","grep","find","ls","edit","write","bash"]', 'inherit_work', '["role-template:engineer:v1"]', '[]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'),
+    ('capability-pack:independent-review:v1', NULL, '独立审阅', '为审阅者提供独立主张、差异、测试、权限和遗漏审查方法。', '从要求和证据独立复核产出；按影响和证据报告问题，不修改被审阅产出。', '{"requirements":"array","claims":"array","diff":"object","tests":"array"}', '{"findings":"array","verdict":"string"}', '{"steps":["establish_contract","inspect_evidence","challenge_claims","report_findings"]}', '{"checks":["independent","evidence_based","permissions_checked","omissions_checked"]}', '["read","grep","find","ls"]', 'read_only', '["role-template:reviewer:v1"]', '[]', '[]', 1, 'executable', '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z');
 
 INSERT INTO capability_packs (
     id, catalog_capability_id, name, description, instructions,
@@ -216,9 +254,9 @@ INSERT INTO work_agents (
 )
 SELECT
     id, 'agent-instance:piwork-lead', 'lead', 'joined', 'inherit_work',
-    '2026-08-14T00:00:00Z', '2026-08-14T00:00:00Z'
+    created_at, created_at
 FROM works;
 
 INSERT INTO work_leads (work_id, agent_instance_id, created_at)
-SELECT id, 'agent-instance:piwork-lead', '2026-08-14T00:00:00Z'
+SELECT id, 'agent-instance:piwork-lead', created_at
 FROM works;
