@@ -68,6 +68,7 @@ impl AgentRepository {
         input: ResolvedAgentAssembly,
     ) -> Result<AgentInstanceSummary, AppError> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        verify_resolved_assembly_snapshot(&mut transaction, &input).await?;
         let suffix = Uuid::new_v4().simple().to_string();
         let definition_id = format!("agent-definition:local:{suffix}:v1");
         let instance_id = format!("agent-instance:local:{suffix}");
@@ -304,23 +305,7 @@ impl AgentRepository {
         id: Option<&str>,
     ) -> Result<Vec<AgentInstanceSummary>, AppError> {
         let mut connection = self.pool.acquire().await?;
-        let rows = if let Some(id) = id {
-            sqlx::query_as::<_, AgentInstanceRow>(&format!(
-                "{} WHERE ai.id = ? ORDER BY ai.id",
-                INSTANCE_SELECT
-            ))
-            .bind(id)
-            .fetch_all(&mut *connection)
-            .await?
-        } else {
-            sqlx::query_as::<_, AgentInstanceRow>(&format!("{} ORDER BY ai.id", INSTANCE_SELECT))
-                .fetch_all(&mut *connection)
-                .await?
-        };
-        let packs = capability_packs_by_definition(&mut connection).await?;
-        rows.into_iter()
-            .map(|row| row.into_summary(&packs))
-            .collect()
+        load_agent_instances_on_connection(&mut connection, id).await
     }
 }
 
@@ -340,6 +325,81 @@ const INSTANCE_SELECT: &str = "SELECT ai.id AS instance_id, ai.display_name, ai.
      FROM agent_instances ai \
      JOIN agent_definitions ad ON ad.id = ai.definition_id \
      JOIN role_templates rt ON rt.id = ad.role_template_id";
+
+async fn load_agent_instances_on_connection(
+    connection: &mut SqliteConnection,
+    id: Option<&str>,
+) -> Result<Vec<AgentInstanceSummary>, AppError> {
+    let rows = if let Some(id) = id {
+        sqlx::query_as::<_, AgentInstanceRow>(&format!(
+            "{} WHERE ai.id = ? ORDER BY ai.id",
+            INSTANCE_SELECT
+        ))
+        .bind(id)
+        .fetch_all(&mut *connection)
+        .await?
+    } else {
+        sqlx::query_as::<_, AgentInstanceRow>(&format!("{} ORDER BY ai.id", INSTANCE_SELECT))
+            .fetch_all(&mut *connection)
+            .await?
+    };
+    let packs = capability_packs_by_definition(connection).await?;
+    rows.into_iter()
+        .map(|row| row.into_summary(&packs))
+        .collect()
+}
+
+async fn verify_resolved_assembly_snapshot(
+    connection: &mut SqliteConnection,
+    input: &ResolvedAgentAssembly,
+) -> Result<(), AppError> {
+    let expected_instance = input
+        .source_instance_snapshot
+        .as_deref()
+        .ok_or_else(stale_assembly_error)?;
+    let current_instance =
+        load_agent_instances_on_connection(connection, Some(expected_instance.id.as_str()))
+            .await?
+            .into_iter()
+            .next();
+    if current_instance.as_ref() != Some(expected_instance) {
+        return Err(stale_assembly_error());
+    }
+
+    let current_role = sqlx::query_as::<_, RoleTemplateRow>(
+        "SELECT id, slug, role_kind, name, description, base_instructions, \
+                responsibilities_json, non_responsibilities_json, base_result_contract_json, \
+                compatible_capability_kinds_json, builtin, version, created_at, updated_at \
+         FROM role_templates WHERE id = ?",
+    )
+    .bind(&input.validated_role.id)
+    .fetch_optional(&mut *connection)
+    .await?
+    .map(RoleTemplateSummary::try_from)
+    .transpose()?;
+    if current_role.as_ref() != Some(&input.validated_role) {
+        return Err(stale_assembly_error());
+    }
+
+    let packs = load_capability_packs(connection)
+        .await?
+        .into_iter()
+        .map(|pack| (pack.id.clone(), pack))
+        .collect::<HashMap<_, _>>();
+    for expected_pack in &input.capability_packs {
+        if packs.get(&expected_pack.id) != Some(expected_pack) {
+            return Err(stale_assembly_error());
+        }
+    }
+    Ok(())
+}
+
+fn stale_assembly_error() -> AppError {
+    AppError::invalid_input(
+        "assembly",
+        "Agent assembly changed after validation; validate and save again",
+    )
+}
 
 async fn load_capability_packs(
     connection: &mut SqliteConnection,

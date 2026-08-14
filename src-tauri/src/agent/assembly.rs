@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
+use serde::Serialize;
+
 use crate::domain::agent::{
-    AgentDefinitionSummary, AssemblyDiagnostic, AssemblyDiagnosticCode, CapabilityPackStatus,
-    CapabilityPackSummary, PermissionPolicy, RoleTemplateSummary,
+    AgentDefinitionSummary, AgentInstanceSummary, AssemblyDiagnostic, AssemblyDiagnosticCode,
+    CapabilityPackStatus, CapabilityPackSummary, PermissionPolicy, RoleTemplateSummary,
 };
 
 pub const MAX_ASSEMBLY_INSTRUCTION_CHARS: usize = 32_000;
@@ -18,6 +20,8 @@ pub struct ResolvedAgentAssembly {
     pub(crate) model_configuration_override: Option<String>,
     pub(crate) permission_policy_override: Option<PermissionPolicy>,
     pub(crate) parallelism_override: Option<u32>,
+    pub(crate) validated_role: RoleTemplateSummary,
+    pub(crate) source_instance_snapshot: Option<Box<AgentInstanceSummary>>,
 }
 
 impl ResolvedAgentAssembly {
@@ -130,18 +134,13 @@ pub fn validate_assembly(
         }
     }
 
-    let instruction_chars = role.base_instructions.chars().count()
-        + source.instructions.chars().count()
-        + packs
-            .iter()
-            .map(|pack| pack.instructions.chars().count())
-            .sum::<usize>();
-    if instruction_chars > MAX_ASSEMBLY_INSTRUCTION_CHARS {
+    let context_chars = assembly_context_chars(role, source, packs);
+    if context_chars > MAX_ASSEMBLY_INSTRUCTION_CHARS {
         diagnostics.push(diagnostic(
             AssemblyDiagnosticCode::ContextBudgetExceeded,
             None,
             format!(
-                "Assembly instructions use {instruction_chars} characters; the limit is {MAX_ASSEMBLY_INSTRUCTION_CHARS}"
+                "Assembly context uses {context_chars} characters; the limit is {MAX_ASSEMBLY_INSTRUCTION_CHARS}"
             ),
         ));
     }
@@ -161,10 +160,48 @@ pub fn validate_assembly(
             model_configuration_override: None,
             permission_policy_override: Some(effective_permission),
             parallelism_override: None,
+            validated_role: role.clone(),
+            source_instance_snapshot: None,
         })
     } else {
         Err(diagnostics)
     }
+}
+
+/// Counts Unicode scalar values in every field injected into assembly context.
+/// Structured fields are charged using their compact JSON representation.
+pub fn assembly_context_chars(
+    role: &RoleTemplateSummary,
+    source: &AgentDefinitionSummary,
+    packs: &[CapabilityPackSummary],
+) -> usize {
+    role.base_instructions.chars().count()
+        + json_chars(&role.responsibilities)
+        + json_chars(&role.non_responsibilities)
+        + json_chars(&role.base_result_contract)
+        + source.instructions.chars().count()
+        + json_chars(&source.responsibilities)
+        + json_chars(&source.non_responsibilities)
+        + json_chars(&source.input_contract)
+        + json_chars(&source.result_contract)
+        + json_chars(&source.quality_rubric)
+        + packs
+            .iter()
+            .map(|pack| {
+                pack.instructions.chars().count()
+                    + json_chars(&pack.input_schema)
+                    + json_chars(&pack.output_schema)
+                    + json_chars(&pack.procedure)
+                    + json_chars(&pack.validation_rubric)
+            })
+            .sum::<usize>()
+}
+
+fn json_chars(value: &impl Serialize) -> usize {
+    serde_json::to_string(value)
+        .expect("assembly context DTOs are always JSON serializable")
+        .chars()
+        .count()
 }
 
 fn diagnostic(
@@ -179,7 +216,10 @@ fn diagnostic(
     }
 }
 
-fn least_permission(left: PermissionPolicy, right: PermissionPolicy) -> PermissionPolicy {
+pub(crate) fn least_permission(
+    left: PermissionPolicy,
+    right: PermissionPolicy,
+) -> PermissionPolicy {
     if permission_rank(left) <= permission_rank(right) {
         left
     } else {

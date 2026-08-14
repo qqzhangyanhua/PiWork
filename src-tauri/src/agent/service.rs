@@ -1,8 +1,11 @@
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    future::Future,
+};
 
 use crate::{
     agent::{
-        assembly::{ResolvedAgentAssembly, validate_assembly},
+        assembly::{ResolvedAgentAssembly, least_permission, validate_assembly},
         repository::AgentRepository,
     },
     domain::agent::{
@@ -61,6 +64,20 @@ impl AgentService {
         &self,
         input: SaveAgentAssemblyInput,
     ) -> Result<AgentInstanceSummary, AppError> {
+        self.save_agent_copy_after_validation(input, || async {})
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn save_agent_copy_after_validation<F, Fut>(
+        &self,
+        input: SaveAgentAssemblyInput,
+        after_validation: F,
+    ) -> Result<AgentInstanceSummary, AppError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = ()>,
+    {
         let resolved = self.resolve(input).await?.map_err(|diagnostics| {
             AppError::invalid_input(
                 "capabilityPackIds",
@@ -71,6 +88,7 @@ impl AgentService {
                     .join("; "),
             )
         })?;
+        after_validation().await;
         self.repository.copy_agent_assembly(resolved).await
     }
 
@@ -128,13 +146,15 @@ impl AgentService {
             })?);
         }
 
+        let definition_permission = source_instance.definition.default_permission_policy;
         let source_permission = source_instance
             .permission_policy_override
-            .unwrap_or(source_instance.definition.default_permission_policy);
+            .map(|permission| least_permission(definition_permission, permission))
+            .unwrap_or(definition_permission);
         let requested_permission = input
             .permission_policy_override
             .unwrap_or(source_permission);
-        let mut source = source_instance.definition;
+        let mut source = source_instance.definition.clone();
         source.default_permission_policy = source_permission;
         let mut result = validate_assembly(
             role,
@@ -150,6 +170,7 @@ impl AgentService {
             resolved.model_configuration_override = input.model_configuration_override;
             resolved.permission_policy_override = input.permission_policy_override;
             resolved.parallelism_override = input.parallelism_override;
+            resolved.source_instance_snapshot = Some(Box::new(source_instance));
         }
         Ok(result)
     }

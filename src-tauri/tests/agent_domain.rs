@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use piwork_lib::{
     agent::{
-        assembly::{MAX_ASSEMBLY_INSTRUCTION_CHARS, validate_assembly},
+        assembly::{MAX_ASSEMBLY_INSTRUCTION_CHARS, assembly_context_chars, validate_assembly},
         repository::AgentRepository,
         service::AgentService,
     },
@@ -12,6 +12,7 @@ use piwork_lib::{
     },
     storage::sqlite::Database,
 };
+use serde_json::json;
 
 #[tokio::test]
 async fn repository_lists_builtin_instances_and_capabilities() {
@@ -448,15 +449,142 @@ async fn service_rejects_permission_override_that_would_expand_builtin_authority
 }
 
 #[tokio::test]
-async fn repository_copy_rolls_back_definition_and_instance_when_binding_fails() {
-    let (database, repository, role, source) =
+async fn service_intersects_definition_and_instance_permissions_before_copying() {
+    let (database, repository, _role, _source) =
         builtin_fixture("agent-instance:piwork-reviewer").await;
-    let mut missing_pack = source.capability_packs[0].clone();
-    missing_pack.id = "capability-pack:missing:v1".into();
-    let resolved = validate_assembly(
+    sqlx::query(
+        "UPDATE agent_instances SET permission_policy_override = 'work_write' WHERE id = ?",
+    )
+    .bind("agent-instance:piwork-reviewer")
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let service = AgentService::new(
+        repository,
+        ["read", "grep", "find", "ls"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        BTreeSet::new(),
+    );
+
+    let copied = service
+        .save_agent_copy(SaveAgentAssemblyInput {
+            source_instance_id: "agent-instance:piwork-reviewer".into(),
+            display_name: "bounded reviewer".into(),
+            capability_pack_ids: vec!["capability-pack:independent-review:v1".into()],
+            engine_override: None,
+            model_configuration_override: None,
+            permission_policy_override: None,
+            parallelism_override: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        copied.definition.default_permission_policy,
+        PermissionPolicy::ReadOnly
+    );
+    assert_ne!(
+        copied.permission_policy_override,
+        Some(PermissionPolicy::WorkWrite)
+    );
+}
+
+#[tokio::test]
+async fn save_rejects_pack_drift_after_validation_without_writing_a_copy() {
+    let (database, repository, _role, _source) =
+        builtin_fixture("agent-instance:piwork-reviewer").await;
+    let service = AgentService::new(
+        repository,
+        ["read", "grep", "find", "ls"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        BTreeSet::new(),
+    );
+    let pool = database.pool().clone();
+    let result = service
+        .save_agent_copy_after_validation(
+            SaveAgentAssemblyInput {
+                source_instance_id: "agent-instance:piwork-reviewer".into(),
+                display_name: "stale reviewer".into(),
+                capability_pack_ids: vec!["capability-pack:independent-review:v1".into()],
+                engine_override: None,
+                model_configuration_override: None,
+                permission_policy_override: Some(PermissionPolicy::ReadOnly),
+                parallelism_override: None,
+            },
+            || async move {
+                sqlx::query(
+                    "UPDATE capability_packs SET version = version + 1, status = 'deprecated', instructions = 'changed after validation' WHERE id = ?",
+                )
+                .bind("capability-pack:independent-review:v1")
+                .execute(&pool)
+                .await
+                .unwrap();
+            },
+        )
+        .await;
+
+    assert!(result.is_err());
+    let local_rows: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM agent_definitions WHERE builtin = 0) + \
+                (SELECT COUNT(*) FROM agent_instances WHERE builtin = 0)",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(local_rows, 0);
+}
+
+#[tokio::test]
+async fn assembly_budget_counts_non_instruction_contract_context_and_allows_exact_limit() {
+    let (_database, _repository, mut role, mut source) =
+        builtin_fixture("agent-instance:piwork-reviewer").await;
+    role.base_instructions.clear();
+    role.responsibilities.clear();
+    role.non_responsibilities.clear();
+    role.base_result_contract = json!({});
+    source.instructions.clear();
+    source.responsibilities.clear();
+    source.non_responsibilities.clear();
+    source.input_contract = json!({});
+    source.result_contract = json!({});
+    source.quality_rubric = json!({});
+    let mut pack = source.capability_packs[0].clone();
+    pack.instructions.clear();
+    pack.input_schema = json!({});
+    pack.output_schema = json!({});
+    pack.procedure = json!({});
+    pack.validation_rubric = json!({});
+
+    let base = assembly_context_chars(&role, &source, &[pack.clone()]);
+    role.responsibilities = vec!["x".repeat(MAX_ASSEMBLY_INSTRUCTION_CHARS - base - 2)];
+    assert_eq!(
+        assembly_context_chars(&role, &source, &[pack.clone()]),
+        MAX_ASSEMBLY_INSTRUCTION_CHARS
+    );
+    assert!(
+        validate_assembly(
+            &role,
+            &source,
+            &[pack.clone()],
+            &["read", "grep", "find", "ls"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            &BTreeSet::new(),
+            PermissionPolicy::ReadOnly,
+        )
+        .is_ok()
+    );
+
+    role.responsibilities[0].push('x');
+    let diagnostics = validate_assembly(
         &role,
         &source,
-        &[missing_pack],
+        &[pack],
         &["read", "grep", "find", "ls"]
             .into_iter()
             .map(str::to_owned)
@@ -464,20 +592,11 @@ async fn repository_copy_rolls_back_definition_and_instance_when_binding_fails()
         &BTreeSet::new(),
         PermissionPolicy::ReadOnly,
     )
-    .unwrap();
-
-    assert!(repository.copy_agent_assembly(resolved).await.is_err());
-    let local_definitions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM agent_definitions WHERE builtin = 0")
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    let local_instances: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM agent_instances WHERE builtin = 0")
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    assert_eq!((local_definitions, local_instances), (0, 0));
+    .unwrap_err();
+    assert_eq!(
+        diagnostics.last().unwrap().code,
+        AssemblyDiagnosticCode::ContextBudgetExceeded
+    );
 }
 
 #[tokio::test]
