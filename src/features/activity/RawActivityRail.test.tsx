@@ -262,10 +262,12 @@ describe("RawActivityRail", () => {
       <RawActivityRail
         events={[
           event(1, { type: "assistantDelta", text: "run a" }, {
+            assignmentId: "assignment-1",
             eventId: "shared-event",
             runId: "run-a",
           }),
           event(1, { type: "assistantDelta", text: "run b" }, {
+            assignmentId: "assignment-1",
             eventId: "shared-event",
             runId: "run-b",
           }),

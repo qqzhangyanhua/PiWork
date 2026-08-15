@@ -107,8 +107,8 @@ const putItem = (draft: ActivityDraft, item: ActivityItem): void => {
 };
 
 const eventIdentity = (event: WorkEventEnvelope): string =>
-  event.assignmentId ??
   event.runId ??
+  event.assignmentId ??
   event.eventId ??
   `${event.workId}:${event.sequence}:${event.payload.type}`;
 

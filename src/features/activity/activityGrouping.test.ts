@@ -152,6 +152,18 @@ describe("buildActivityDisplayGroups", () => {
     ]);
   });
 
+  it("uses the real Run fallback for separate attempts of one Assignment", () => {
+    const first = tool("first", "session-1", null, { runId: "run-1" });
+    const second = tool("second", "session-1", null, { runId: "run-2" });
+    first.assignmentId = "assignment-1";
+    second.assignmentId = "assignment-1";
+
+    expect(buildActivityDisplayGroups([first, second]).map(({ key }) => key)).toEqual([
+      "session:session-1:turn:run-1",
+      "session:session-1:turn:run-2",
+    ]);
+  });
+
   it("preserves interleaved repeated identities as contiguous ordered groups", () => {
     const groups = buildActivityDisplayGroups([
       tool("a", "s1", "t1"),

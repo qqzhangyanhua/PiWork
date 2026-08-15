@@ -13,8 +13,8 @@ export const isWorkEventTimelineItem = (
 ): item is WorkEventEnvelope => "payload" in item;
 
 export const workEventSequenceKey = (event: WorkEventEnvelope): string => {
-  if (event.assignmentId) return `assignment:${event.assignmentId}`;
   if (event.runId) return event.runId;
+  if (event.assignmentId) return `assignment:${event.assignmentId}`;
   if (event.eventId) return `event:${event.eventId}`;
   return `work:${event.workId}:sequence:${event.sequence}:type:${event.payload.type}`;
 };
@@ -23,10 +23,10 @@ export const timelineItemKey = (item: TimelineItem) =>
   isWorkEventTimelineItem(item)
     ? item.eventId
       ? `event:${item.eventId}`
-      : item.assignmentId
-        ? `event:assignment:${item.assignmentId}:${item.sequence}`
-        : item.runId
-          ? `event:${item.runId}:${item.sequence}`
+      : item.runId
+        ? `event:${item.runId}:${item.sequence}`
+        : item.assignmentId
+          ? `event:assignment:${item.assignmentId}:${item.sequence}`
           : `event:${workEventSequenceKey(item)}`
     : `message:${item.id}`;
 

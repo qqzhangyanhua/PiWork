@@ -452,6 +452,39 @@ describe("projectActivity", () => {
     expect(items[3]).toMatchObject({ turnId: null, sessionId: "session-1" });
   });
 
+  it("does not replace activity history across attempts of one Assignment", () => {
+    const identity = { assignmentId: "assignment-1" };
+    const items = projectActivity([
+      event(1, { type: "runStarted", modelLabel: "gpt-5" }, {
+        ...identity,
+        runId: "run-1",
+      }),
+      event(2, { type: "assistantDelta", text: "first attempt" }, {
+        ...identity,
+        runId: "run-1",
+      }),
+      event(1, { type: "runStarted", modelLabel: "gpt-5" }, {
+        ...identity,
+        runId: "run-2",
+      }),
+      event(2, { type: "assistantDelta", text: "retry attempt" }, {
+        ...identity,
+        runId: "run-2",
+      }),
+    ]);
+
+    expect(items.map(({ id }) => id)).toEqual([
+      "lifecycle:run-1:runStarted:1",
+      "lifecycle:run-2:runStarted:1",
+      "message:run-1:turn-1",
+      "message:run-2:turn-1",
+    ]);
+    expect(items.filter((item) => item.type === "message")).toMatchObject([
+      { runId: "run-1", text: "first attempt" },
+      { runId: "run-2", text: "retry attempt" },
+    ]);
+  });
+
   it("uses a stable run and sequence fallback for raw events without an event id", () => {
     const payload: WorkEventPayload = {
       type: "rawEngineEvent",

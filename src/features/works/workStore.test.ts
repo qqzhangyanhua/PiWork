@@ -296,6 +296,72 @@ describe("createWorkStore", () => {
     expect(store.getState().works.w1?.status).toBe("draft");
   });
 
+  it("keeps a pre-Run segment and every retry attempt on independent cursors", () => {
+    const store = createWorkStore(unusedClient);
+    const attemptEvent = (
+      runId: string | null,
+      sequence: number,
+      occurredSecond: number,
+      payload: WorkEventEnvelope["payload"],
+    ): WorkEventEnvelope => ({
+      version: 2,
+      eventId: `event-${runId ?? "queued"}-${sequence}`,
+      workId: "w1",
+      runId,
+      assignmentId: "assignment-1",
+      turnId: runId ?? undefined,
+      sequence,
+      occurredAt: `2026-08-15T04:00:0${occurredSecond}.000Z`,
+      payload,
+    });
+    const queued = attemptEvent(null, 1, 0, {
+      type: "assignmentQueued",
+      assignmentId: "assignment-1",
+      assignedAgentId: "agent-1",
+      title: "Investigate",
+      priority: 10,
+    });
+    const runOneStarted = attemptEvent("r1", 1, 1, {
+      type: "runStarted",
+      modelLabel: "gpt-5",
+    });
+    const runOneOutput = attemptEvent("r1", 2, 2, {
+      type: "assistantDelta",
+      text: "first attempt",
+    });
+    const runTwoStarted = attemptEvent("r2", 1, 3, {
+      type: "runStarted",
+      modelLabel: "gpt-5",
+    });
+    const runTwoOutput = attemptEvent("r2", 2, 4, {
+      type: "assistantDelta",
+      text: "retry attempt",
+    });
+
+    store.getState().upsertWork({ ...work, status: "draft" });
+    store.getState().applyEvent(queued);
+    store.getState().applyEvent(runOneStarted);
+    expect.soft(store.getState().works.w1?.status).toBe("running");
+    store.getState().applyEvent(runOneOutput);
+    store.getState().applyEvent(runTwoStarted);
+    store.getState().applyEvent(runTwoOutput);
+
+    const retained = store.getState().timelines.w1?.filter(isWorkEventTimelineItem);
+    expect.soft(retained).toHaveLength(5);
+    expect.soft(retained?.map(({ runId, sequence }) => [runId, sequence])).toEqual([
+      [null, 1],
+      ["r1", 1],
+      ["r1", 2],
+      ["r2", 1],
+      ["r2", 2],
+    ]);
+    expect(store.getState().lastSequenceByRun).toMatchObject({
+      "assignment:assignment-1": 1,
+      r1: 2,
+      r2: 2,
+    });
+  });
+
   it("keeps the live envelope when an older detail hydrates the same event", async () => {
     const detailResult = deferred<WorkDetail>();
     const client: PiWorkClient = {

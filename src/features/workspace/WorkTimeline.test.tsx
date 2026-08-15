@@ -455,6 +455,34 @@ describe("WorkTimeline", () => {
     expect(screen.queryByText(/^Run\s+\d+/u)).not.toBeInTheDocument();
   });
 
+  it("groups retry attempts of one Assignment by their real Run", () => {
+    const attempt = (
+      runId: string,
+      text: string,
+    ): WorkEventEnvelope => ({
+      ...event(1, { type: "assistantDelta", text }),
+      version: 2,
+      eventId: `event-${runId}`,
+      assignmentId: "assignment-1",
+      runId,
+      turnId: runId,
+    });
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          attempt("run-1", "first attempt"),
+          attempt("run-2", "retry attempt"),
+        ]}
+      />,
+    );
+
+    const outputs = container.querySelectorAll(".timeline-event--assistant");
+    expect(outputs).toHaveLength(2);
+    expect(outputs[0]).toHaveTextContent("first attempt");
+    expect(outputs[1]).toHaveTextContent("retry attempt");
+  });
+
   it("does not surface legacy Run boilerplate as a duplicate delivery", () => {
     const { container } = render(
       <WorkTimeline

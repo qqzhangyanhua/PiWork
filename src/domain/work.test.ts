@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { MessageSummary, WorkEventEnvelope } from "../bindings";
-import { normalizeAppError, timelineItemKey } from "./work";
+import {
+  normalizeAppError,
+  timelineItemKey,
+  workEventSequenceKey,
+} from "./work";
 
 const event = (
   overrides: Partial<WorkEventEnvelope> = {},
@@ -53,6 +57,14 @@ describe("timelineItemKey", () => {
     expect(timelineItemKey(assignmentEvent)).toBe(
       "event:assignment:assignment-1:1",
     );
+  });
+
+  it("prefers a real Run over its Assignment for attempt identity", () => {
+    expect(
+      workEventSequenceKey(
+        event({ assignmentId: "assignment-1", runId: "run-2" }),
+      ),
+    ).toBe("run-2");
   });
 
   it("uses the persisted message ID for message timeline items", () => {
