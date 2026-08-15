@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -10,17 +10,115 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 
 use super::{
-    EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
+    EngineAdapter, EngineCapabilities, EngineError, EngineEvent, EngineInput, EngineRunContext,
+    EngineSessionRef,
 };
+use crate::domain::event::{LivenessState, PermissionOutcome, SessionTransition};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeRunBehavior {
+    Complete,
+    HoldUntilAbort,
+    Crash,
+    LivenessTimeout,
+}
+
+#[derive(Clone)]
+pub struct FakeStartBarrier {
+    entered: Arc<Semaphore>,
+    release: Arc<Semaphore>,
+}
+
+impl Default for FakeStartBarrier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FakeStartBarrier {
+    pub fn new() -> Self {
+        Self {
+            entered: Arc::new(Semaphore::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        }
+    }
+
+    async fn pause(&self) {
+        self.entered.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("fake start barrier was closed")
+            .forget();
+    }
+
+    pub async fn wait_until_entered(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("fake start barrier was closed")
+            .forget();
+    }
+
+    pub fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[derive(Clone)]
+pub struct FakeEngineConfig {
+    capabilities: EngineCapabilities,
+    session_id: Option<String>,
+    run_behavior: FakeRunBehavior,
+    start_barrier: Option<Arc<FakeStartBarrier>>,
+}
+
+impl FakeEngineConfig {
+    pub fn new(capabilities: EngineCapabilities) -> Self {
+        Self {
+            capabilities,
+            session_id: None,
+            run_behavior: FakeRunBehavior::Complete,
+            start_barrier: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_run_behavior(mut self, run_behavior: FakeRunBehavior) -> Self {
+        self.run_behavior = run_behavior;
+        self
+    }
+
+    pub fn with_start_barrier(mut self, start_barrier: Arc<FakeStartBarrier>) -> Self {
+        self.start_barrier = Some(start_barrier);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FakeEngineObservations {
+    pub started_run_ids: Vec<String>,
+    pub resumed_run_ids: Vec<String>,
+    pub rotations: Vec<(String, String)>,
+    pub steers: Vec<(String, String)>,
+    pub aborted_run_ids: Vec<String>,
+}
 
 #[derive(Clone)]
 pub struct FakeEngineAdapter {
     delay: Duration,
     active: Arc<Mutex<HashMap<String, ActiveRun>>>,
+    capabilities: EngineCapabilities,
+    run_behavior: FakeRunBehavior,
+    start_barrier: Option<Arc<FakeStartBarrier>>,
+    session_id: Option<String>,
+    observations: Arc<Mutex<FakeEngineObservations>>,
     #[cfg(test)]
     completion_gate: Option<Arc<FakeCompletionGate>>,
-    #[cfg(test)]
-    session_id: Option<String>,
 }
 
 struct ActiveRun {
@@ -28,6 +126,14 @@ struct ActiveRun {
     state: FakeRunState,
     cancel: Option<oneshot::Sender<()>>,
     completion: Option<oneshot::Receiver<FakeTaskOutcome>>,
+}
+
+struct FakeRunRequest {
+    context: EngineRunContext,
+    prompt: String,
+    capabilities: EngineCapabilities,
+    behavior: FakeRunBehavior,
+    transition: Option<SessionTransition>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,24 +186,48 @@ impl FakeCompletionGate {
 
 impl FakeEngineAdapter {
     pub fn new(delay: Duration) -> Self {
+        let capabilities = EngineCapabilities {
+            cancel: true,
+            thought_stream: true,
+            plan_updates: true,
+            ..EngineCapabilities::default()
+        };
         Self {
             delay,
             active: Arc::new(Mutex::new(HashMap::new())),
+            capabilities,
+            run_behavior: FakeRunBehavior::Complete,
+            start_barrier: None,
+            session_id: None,
+            observations: Arc::new(Mutex::new(FakeEngineObservations::default())),
             #[cfg(test)]
             completion_gate: None,
-            #[cfg(test)]
-            session_id: None,
         }
+    }
+
+    pub fn configured(config: FakeEngineConfig) -> Self {
+        Self {
+            delay: Duration::ZERO,
+            active: Arc::new(Mutex::new(HashMap::new())),
+            capabilities: config.capabilities,
+            run_behavior: config.run_behavior,
+            start_barrier: config.start_barrier,
+            session_id: config.session_id,
+            observations: Arc::new(Mutex::new(FakeEngineObservations::default())),
+            #[cfg(test)]
+            completion_gate: None,
+        }
+    }
+
+    pub async fn observations(&self) -> FakeEngineObservations {
+        self.observations.lock().await.clone()
     }
 
     #[cfg(test)]
     pub(crate) fn new_with_session(delay: Duration, session_id: &str) -> Self {
-        Self {
-            delay,
-            active: Arc::new(Mutex::new(HashMap::new())),
-            completion_gate: None,
-            session_id: Some(session_id.to_owned()),
-        }
+        let mut adapter = Self::new(delay);
+        adapter.session_id = Some(session_id.to_owned());
+        adapter
     }
 
     #[cfg(test)]
@@ -107,26 +237,33 @@ impl FakeEngineAdapter {
             Self {
                 delay,
                 active: Arc::new(Mutex::new(HashMap::new())),
-                completion_gate: Some(Arc::clone(&completion_gate)),
+                capabilities: EngineCapabilities {
+                    cancel: true,
+                    thought_stream: true,
+                    plan_updates: true,
+                    ..EngineCapabilities::default()
+                },
+                run_behavior: FakeRunBehavior::Complete,
+                start_barrier: None,
                 session_id: None,
+                observations: Arc::new(Mutex::new(FakeEngineObservations::default())),
+                completion_gate: Some(Arc::clone(&completion_gate)),
             },
             completion_gate,
         )
     }
-}
 
-#[async_trait]
-impl EngineAdapter for FakeEngineAdapter {
-    fn kind(&self) -> &'static str {
-        "fake"
-    }
-
-    async fn start(
+    async fn begin(
         &self,
         context: EngineRunContext,
         input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
+        transition: Option<SessionTransition>,
     ) -> Result<EngineSessionRef, EngineError> {
+        if let Some(start_barrier) = &self.start_barrier {
+            start_barrier.pause().await;
+        }
+
         let (abort_sender, abort_receiver) = oneshot::channel();
         let (completion_sender, completion_receiver) = oneshot::channel();
         let run_id = context.run_id.clone();
@@ -148,26 +285,47 @@ impl EngineAdapter for FakeEngineAdapter {
 
         let session = EngineSessionRef {
             engine_kind: self.kind().into(),
-            #[cfg(not(test))]
-            session_id: Uuid::new_v4().to_string(),
-            #[cfg(test)]
             session_id: self
                 .session_id
                 .clone()
                 .unwrap_or_else(|| Uuid::new_v4().to_string()),
         };
+        {
+            let mut observations = self.observations.lock().await;
+            if transition == Some(SessionTransition::Resumed) {
+                observations.resumed_run_ids.push(run_id.clone());
+            } else {
+                observations.started_run_ids.push(run_id.clone());
+            }
+        }
+
         let delay = self.delay;
         let active = Arc::clone(&self.active);
+        let capabilities = self.capabilities;
+        let run_behavior = self.run_behavior;
         #[cfg(test)]
         let completion_gate = self.completion_gate.clone();
         tokio::spawn(async move {
-            let result = emit_run(context, input.message, sink, delay, abort_receiver).await;
+            let result = emit_run(
+                FakeRunRequest {
+                    context,
+                    prompt: input.message,
+                    capabilities,
+                    behavior: run_behavior,
+                    transition,
+                },
+                sink,
+                delay,
+                abort_receiver,
+            )
+            .await;
             let outcome = match result {
                 Ok(()) => FakeTaskOutcome::Completed,
                 Err(EngineError::Aborted) => FakeTaskOutcome::Aborted,
                 Err(EngineError::ChannelClosed)
                 | Err(EngineError::NotRunning)
-                | Err(EngineError::Start(_)) => FakeTaskOutcome::ChannelClosed,
+                | Err(EngineError::Start(_))
+                | Err(EngineError::Unsupported(_)) => FakeTaskOutcome::ChannelClosed,
             };
             #[cfg(test)]
             if let Some(completion_gate) = completion_gate {
@@ -184,8 +342,82 @@ impl EngineAdapter for FakeEngineAdapter {
 
         Ok(session)
     }
+}
+
+#[async_trait]
+impl EngineAdapter for FakeEngineAdapter {
+    fn kind(&self) -> &'static str {
+        "fake"
+    }
+
+    fn capabilities(&self) -> EngineCapabilities {
+        self.capabilities
+    }
+
+    async fn start(
+        &self,
+        context: EngineRunContext,
+        input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        self.begin(context, input, sink, None).await
+    }
+
+    async fn resume(
+        &self,
+        context: EngineRunContext,
+        input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        if !self.capabilities.session_resume {
+            return Err(EngineError::Unsupported("session_resume"));
+        }
+        self.begin(context, input, sink, Some(SessionTransition::Resumed))
+            .await
+    }
+
+    async fn rotate(
+        &self,
+        context: EngineRunContext,
+        reason: &str,
+    ) -> Result<EngineSessionRef, EngineError> {
+        if !self.capabilities.session_rotate {
+            return Err(EngineError::Unsupported("session_rotate"));
+        }
+        self.observations
+            .lock()
+            .await
+            .rotations
+            .push((context.run_id, reason.to_owned()));
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: format!(
+                "{}-generation-{}",
+                self.session_id.as_deref().unwrap_or("fake-session"),
+                context.session_generation.saturating_add(1)
+            ),
+        })
+    }
+
+    async fn steer(&self, run_id: &str, input: EngineInput) -> Result<(), EngineError> {
+        if !self.capabilities.native_steer {
+            return Err(EngineError::Unsupported("native_steer"));
+        }
+        if !self.active.lock().await.contains_key(run_id) {
+            return Err(EngineError::NotRunning);
+        }
+        self.observations
+            .lock()
+            .await
+            .steers
+            .push((run_id.to_owned(), input.message));
+        Ok(())
+    }
 
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {
+        if !self.capabilities.cancel {
+            return Err(EngineError::Unsupported("cancel"));
+        }
         let (generation, cancel, completion) = {
             let mut active_runs = self.active.lock().await;
             let active = active_runs.get_mut(run_id).ok_or(EngineError::NotRunning)?;
@@ -197,6 +429,11 @@ impl EngineAdapter for FakeEngineAdapter {
             let completion = active.completion.take().ok_or(EngineError::Aborted)?;
             (active.generation, cancel, completion)
         };
+        self.observations
+            .lock()
+            .await
+            .aborted_run_ids
+            .push(run_id.to_owned());
 
         let _ = cancel.send(());
         let outcome = completion.await;
@@ -219,58 +456,156 @@ impl EngineAdapter for FakeEngineAdapter {
 }
 
 async fn emit_run(
-    context: EngineRunContext,
-    prompt: String,
+    request: FakeRunRequest,
     sink: mpsc::Sender<EngineEvent>,
     delay: Duration,
     mut abort: oneshot::Receiver<()>,
 ) -> Result<(), EngineError> {
-    let events = [
-        EngineEvent::RunStarted {
-            model_label: "Fake model".into(),
-        },
-        EngineEvent::ThoughtDelta {
-            text: "Inspecting the Work".into(),
-        },
-        EngineEvent::PlanChanged {
-            plan_id: "default".into(),
-            revision: 1,
-            text: "- inspect\n- execute\n- validate".into(),
-        },
-        EngineEvent::AssistantDelta {
-            text: format!("Working on: {prompt}"),
-        },
-        EngineEvent::ToolStarted {
-            tool_call_id: format!("{}-tool-1", context.run_id),
-            tool_name: "fake_tool".into(),
-            input_summary: "Inspect the workspace".into(),
-        },
-        EngineEvent::ToolFinished {
-            tool_call_id: format!("{}-tool-1", context.run_id),
-            tool_name: "fake_tool".into(),
-            output_summary: "Workspace inspected".into(),
-            success: true,
-        },
-        EngineEvent::AssistantDelta {
-            text: "The requested work is complete.".into(),
-        },
-        EngineEvent::RunCompleted {
-            summary: "Completed by the deterministic fake engine".into(),
-            artifacts: Vec::new(),
-            validation: vec!["fake validation passed".into()],
-            limitations: vec!["fake engine only".into()],
-        },
-    ];
+    let mut events = Vec::new();
+    if let Some(transition) = request.transition {
+        events.push(EngineEvent::SessionChanged {
+            transition,
+            reason: None,
+        });
+    }
+    events.push(EngineEvent::RunStarted {
+        model_label: "Fake model".into(),
+    });
 
+    match request.behavior {
+        FakeRunBehavior::Crash => {
+            events.push(EngineEvent::RunFailed {
+                message: "fake engine process crashed".into(),
+            });
+        }
+        FakeRunBehavior::LivenessTimeout => {
+            events.push(EngineEvent::Liveness {
+                state: LivenessState::Stalled,
+            });
+            events.push(EngineEvent::RunFailed {
+                message: "fake engine liveness timed out".into(),
+            });
+        }
+        FakeRunBehavior::HoldUntilAbort => {
+            emit_events(&sink, events, delay, &mut abort).await?;
+            let _ = abort.await;
+            sink.send(EngineEvent::RunFailed {
+                message: "fake engine run was aborted".into(),
+            })
+            .await
+            .map_err(|_| EngineError::ChannelClosed)?;
+            return Err(EngineError::Aborted);
+        }
+        FakeRunBehavior::Complete => {
+            if request.capabilities.thought_stream {
+                events.push(EngineEvent::ThoughtDelta {
+                    text: "Inspecting the Work".into(),
+                });
+            }
+            if request.capabilities.plan_updates {
+                events.push(EngineEvent::PlanChanged {
+                    plan_id: "default".into(),
+                    revision: 1,
+                    text: "- inspect\n- execute\n- validate".into(),
+                });
+            }
+            events.push(EngineEvent::AssistantDelta {
+                text: format!("Working on: {}", request.prompt),
+            });
+            events.push(EngineEvent::ToolStarted {
+                tool_call_id: format!("{}-tool-1", request.context.run_id),
+                tool_name: "fake_tool".into(),
+                input_summary: "Inspect the workspace".into(),
+            });
+            if request.capabilities.parallel_tool_calls {
+                events.push(EngineEvent::ToolStarted {
+                    tool_call_id: format!("{}-tool-2", request.context.run_id),
+                    tool_name: "fake_parallel_tool".into(),
+                    input_summary: "Inspect another file".into(),
+                });
+            }
+            if request.capabilities.tool_progress {
+                events.push(EngineEvent::ToolProgress {
+                    tool_call_id: format!("{}-tool-1", request.context.run_id),
+                    tool_name: "fake_tool".into(),
+                    output_summary: "Halfway complete".into(),
+                });
+            }
+            if request.capabilities.permission_requests {
+                events.push(EngineEvent::PermissionRequested {
+                    request_id: format!("{}-permission-1", request.context.run_id),
+                    tool_call_id: Some(format!("{}-tool-1", request.context.run_id)),
+                    title: "Allow fake tool".into(),
+                    detail: "The conformance fake requests a deterministic permission".into(),
+                });
+                events.push(EngineEvent::PermissionResolved {
+                    request_id: format!("{}-permission-1", request.context.run_id),
+                    outcome: PermissionOutcome::AllowedOnce,
+                });
+            }
+            events.push(EngineEvent::ToolFinished {
+                tool_call_id: format!("{}-tool-1", request.context.run_id),
+                tool_name: "fake_tool".into(),
+                output_summary: "Workspace inspected".into(),
+                success: true,
+            });
+            if request.capabilities.parallel_tool_calls {
+                events.push(EngineEvent::ToolFinished {
+                    tool_call_id: format!("{}-tool-2", request.context.run_id),
+                    tool_name: "fake_parallel_tool".into(),
+                    output_summary: "Another file inspected".into(),
+                    success: true,
+                });
+            }
+            if request.capabilities.usage_reporting {
+                events.push(EngineEvent::UsageUpdated {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    cache_read_tokens: 3,
+                    cache_write_tokens: 4,
+                    total_tokens: 37,
+                });
+            }
+            events.push(EngineEvent::AssistantDelta {
+                text: "The requested work is complete.".into(),
+            });
+            events.push(EngineEvent::RunCompleted {
+                summary: "Completed by the deterministic fake engine".into(),
+                artifacts: Vec::new(),
+                validation: vec!["fake validation passed".into()],
+                limitations: vec!["fake engine only".into()],
+            });
+        }
+    }
+
+    match emit_events(&sink, events, delay, &mut abort).await {
+        Err(EngineError::Aborted) => {
+            sink.send(EngineEvent::RunFailed {
+                message: "fake engine run was aborted".into(),
+            })
+            .await
+            .map_err(|_| EngineError::ChannelClosed)?;
+            Err(EngineError::Aborted)
+        }
+        outcome => outcome,
+    }
+}
+
+async fn emit_events(
+    sink: &mpsc::Sender<EngineEvent>,
+    events: Vec<EngineEvent>,
+    delay: Duration,
+    abort: &mut oneshot::Receiver<()>,
+) -> Result<(), EngineError> {
     for event in events {
         tokio::select! {
             biased;
-            _ = &mut abort => return Err(EngineError::Aborted),
+            _ = &mut *abort => return Err(EngineError::Aborted),
             _ = tokio::time::sleep(delay) => {}
         }
         tokio::select! {
             biased;
-            _ = &mut abort => return Err(EngineError::Aborted),
+            _ = &mut *abort => return Err(EngineError::Aborted),
             result = sink.send(event) => result.map_err(|_| EngineError::ChannelClosed)?,
         }
     }

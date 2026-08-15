@@ -21,7 +21,8 @@ use crate::{
 };
 
 use super::{
-    EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
+    EngineAdapter, EngineCapabilities, EngineError, EngineEvent, EngineInput, EngineRunContext,
+    EngineSessionRef,
 };
 
 const PROVIDER_NAME: &str = "piwork";
@@ -693,6 +694,21 @@ impl EngineAdapter for PiEngineAdapter {
         "pi_rpc"
     }
 
+    fn capabilities(&self) -> EngineCapabilities {
+        EngineCapabilities {
+            session_resume: true,
+            session_rotate: false,
+            native_steer: false,
+            cancel: true,
+            thought_stream: true,
+            plan_updates: false,
+            permission_requests: false,
+            tool_progress: true,
+            usage_reporting: true,
+            parallel_tool_calls: false,
+        }
+    }
+
     async fn model_label(&self, _fallback: &str) -> Result<String, EngineError> {
         self.model_service
             .runtime_configuration()
@@ -809,6 +825,15 @@ impl EngineAdapter for PiEngineAdapter {
             engine_kind: self.kind().into(),
             session_id: context.work_id,
         })
+    }
+
+    async fn resume(
+        &self,
+        context: EngineRunContext,
+        input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        self.start(context, input, sink).await
     }
 
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {

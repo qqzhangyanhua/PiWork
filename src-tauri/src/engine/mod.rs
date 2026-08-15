@@ -35,9 +35,27 @@ pub struct EngineInput {
     pub documents: Vec<EngineDocument>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EngineCapabilities {
+    pub session_resume: bool,
+    pub session_rotate: bool,
+    pub native_steer: bool,
+    pub cancel: bool,
+    pub thought_stream: bool,
+    pub plan_updates: bool,
+    pub permission_requests: bool,
+    pub tool_progress: bool,
+    pub usage_reporting: bool,
+    pub parallel_tool_calls: bool,
+}
+
 #[async_trait]
 pub trait EngineAdapter: Send + Sync {
     fn kind(&self) -> &'static str;
+
+    fn capabilities(&self) -> EngineCapabilities {
+        EngineCapabilities::default()
+    }
 
     async fn model_label(&self, fallback: &str) -> Result<String, EngineError> {
         Ok(fallback.to_owned())
@@ -50,7 +68,34 @@ pub trait EngineAdapter: Send + Sync {
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError>;
 
-    async fn abort(&self, run_id: &str) -> Result<(), EngineError>;
+    async fn resume(
+        &self,
+        _context: EngineRunContext,
+        _input: EngineInput,
+        _sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        let _declared = self.capabilities().session_resume;
+        Err(EngineError::Unsupported("session_resume"))
+    }
+
+    async fn rotate(
+        &self,
+        _context: EngineRunContext,
+        _reason: &str,
+    ) -> Result<EngineSessionRef, EngineError> {
+        let _declared = self.capabilities().session_rotate;
+        Err(EngineError::Unsupported("session_rotate"))
+    }
+
+    async fn steer(&self, _run_id: &str, _input: EngineInput) -> Result<(), EngineError> {
+        let _declared = self.capabilities().native_steer;
+        Err(EngineError::Unsupported("native_steer"))
+    }
+
+    async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
+        let _declared = self.capabilities().cancel;
+        Err(EngineError::Unsupported("cancel"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +114,8 @@ pub enum EngineError {
     NotRunning,
     #[error("engine run was aborted")]
     Aborted,
+    #[error("engine capability is unsupported: {0}")]
+    Unsupported(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +124,12 @@ pub struct EngineRunContext {
     pub run_id: String,
     pub root_path: PathBuf,
     pub permission_mode: PermissionMode,
+    pub assignment_id: String,
+    pub agent_instance_id: String,
+    pub agent_session_id: String,
+    pub session_generation: u32,
+    pub resolved_model_configuration_id: Option<String>,
+    pub effective_permission: PermissionMode,
 }
 
 impl EngineRunContext {
@@ -102,6 +155,12 @@ impl EngineRunContext {
             run_id,
             root_path,
             permission_mode,
+            assignment_id: String::new(),
+            agent_instance_id: String::new(),
+            agent_session_id: String::new(),
+            session_generation: 0,
+            resolved_model_configuration_id: None,
+            effective_permission: permission_mode,
         })
     }
 
@@ -112,6 +171,12 @@ impl EngineRunContext {
             run_id: run_id.into(),
             root_path: std::env::current_dir().unwrap(),
             permission_mode: PermissionMode::Balanced,
+            assignment_id: "assignment:test".into(),
+            agent_instance_id: "agent-instance:test".into(),
+            agent_session_id: "agent-session:test".into(),
+            session_generation: 1,
+            resolved_model_configuration_id: None,
+            effective_permission: PermissionMode::Balanced,
         }
     }
 }
@@ -386,6 +451,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(context.root_path, dunce::canonicalize(child).unwrap());
+        assert!(context.assignment_id.is_empty());
+        assert!(context.agent_instance_id.is_empty());
+        assert!(context.agent_session_id.is_empty());
+        assert_eq!(context.session_generation, 0);
+        assert_eq!(context.resolved_model_configuration_id, None);
+        assert_eq!(context.effective_permission, PermissionMode::Balanced);
     }
 
     #[test]

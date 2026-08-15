@@ -2,8 +2,8 @@ use std::path::Path;
 
 use piwork_lib::{
     engine::{
-        EngineEvent,
-        pi::{PiProviderConfig, RpcEventTranslator},
+        EngineAdapter, EngineCapabilities, EngineEvent,
+        pi::{PiEngineAdapter, PiProviderConfig, RpcEventTranslator},
     },
     model::{ModelProvider, RuntimeModelConfiguration},
 };
@@ -16,6 +16,46 @@ fn configuration(provider: ModelProvider) -> RuntimeModelConfiguration {
         base_url: "https://provider.example/v1".into(),
         model_id: "agent-model".into(),
     }
+}
+
+#[tokio::test]
+async fn pi_declares_only_capabilities_verified_by_its_rpc_translation_and_control_paths() {
+    use std::sync::Arc;
+
+    use piwork_lib::{
+        model::{ModelConfigurationRepository, ModelService},
+        storage::sqlite::Database,
+    };
+
+    let database = Database::open_in_memory().await.unwrap();
+    let model_service = Arc::new(
+        ModelService::production(ModelConfigurationRepository::new(database.pool().clone()))
+            .unwrap(),
+    );
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let adapter = PiEngineAdapter::production_with_executable(
+        model_service,
+        temporary_directory.path().join("sessions"),
+        temporary_directory.path().join("runtime"),
+        Some(std::env::current_exe().unwrap()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        adapter.capabilities(),
+        EngineCapabilities {
+            session_resume: true,
+            session_rotate: false,
+            native_steer: false,
+            cancel: true,
+            thought_stream: true,
+            plan_updates: false,
+            permission_requests: false,
+            tool_progress: true,
+            usage_reporting: true,
+            parallel_tool_calls: false,
+        }
+    );
 }
 
 #[test]
