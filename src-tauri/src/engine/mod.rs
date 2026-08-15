@@ -114,7 +114,7 @@ pub enum EngineError {
     Unsupported(&'static str),
 }
 
-const MAX_ENGINE_IDENTITY_BYTES: usize = 256;
+const MAX_ENGINE_IDENTITY_BYTES: usize = 255;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineRunIdentity {
@@ -712,7 +712,7 @@ mod tests {
             (4, "agent session"),
         ] {
             let mut at_limit = baseline.clone();
-            at_limit[field_index] = "a".repeat(256);
+            at_limit[field_index] = "a".repeat(255);
             EngineRunIdentity::new(
                 at_limit[0].clone(),
                 at_limit[1].clone(),
@@ -724,7 +724,7 @@ mod tests {
             .unwrap();
 
             let mut over_limit = baseline.clone();
-            over_limit[field_index] = "z".repeat(257);
+            over_limit[field_index] = "z".repeat(256);
             let error = EngineRunIdentity::new(
                 over_limit[0].clone(),
                 over_limit[1].clone(),
@@ -737,7 +737,7 @@ mod tests {
 
             assert_eq!(
                 error.to_string(),
-                format!("engine failed to start: {field_name} identity exceeds 256 bytes")
+                format!("engine failed to start: {field_name} identity exceeds 255 bytes")
             );
             assert!(!format!("{error:?}").contains(&over_limit[field_index]));
         }

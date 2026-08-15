@@ -408,6 +408,149 @@ fn rpc_known_events_redact_sensitive_values_before_translation() {
 }
 
 #[test]
+fn rpc_redaction_preserves_protocol_discriminators_and_keys() {
+    let mut translator = RpcEventTranslator::with_sensitive_values([
+        "agent_end",
+        "message_update",
+        "assistant",
+        "toolName",
+    ]);
+
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "delta": "payload contains message_update"
+            }
+        })),
+        Some(EngineEvent::AssistantDelta { text })
+            if text == "payload contains [REDACTED]"
+    ));
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "tool_execution_start",
+            "toolCallId": "call-1",
+            "toolName": "read",
+            "args": {"toolName": "schema-key", "value": "toolName"}
+        })),
+        Some(EngineEvent::ToolStarted { tool_name, input_summary, .. })
+            if tool_name == "read"
+                && input_summary.contains("toolName")
+                && input_summary.contains("[REDACTED]")
+    ));
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "usage": {"input": 1, "output": 2, "totalTokens": 3}
+            }
+        })),
+        Some(EngineEvent::UsageUpdated { .. })
+    ));
+    assert!(matches!(
+        translator.translate(json!({"type": "agent_end", "messages": []})),
+        Some(EngineEvent::RunCompleted { .. })
+    ));
+}
+
+#[test]
+fn rpc_raw_redaction_preserves_keys_while_redacting_payload_values() {
+    let mut translator = RpcEventTranslator::with_sensitive_values(["toolName"]);
+    let event = translator
+        .translate(json!({
+            "type": "future_event",
+            "toolName": "schema-value",
+            "payload": "toolName"
+        }))
+        .unwrap();
+    let EngineEvent::RawEngineEvent { payload_json, .. } = event else {
+        panic!("unknown protocol event must remain raw");
+    };
+    let payload: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
+
+    assert_eq!(payload["toolName"], "schema-value");
+    assert_eq!(payload["payload"], "[REDACTED]");
+}
+
+#[test]
+fn rpc_redacts_windows_path_case_separator_and_verbatim_variants() {
+    let sensitive_path = r"D:\Workspace\Secret Folder";
+    let mut translator = RpcEventTranslator::with_sensitive_values([sensitive_path]);
+
+    for variant in [
+        r"d:\workspace\secret folder",
+        r"d:/workspace/secret folder",
+        r"\\?\D:\Workspace\Secret Folder",
+        r"//?/d:/workspace/secret folder",
+    ] {
+        assert!(matches!(
+            translator.translate(json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_delta", "delta": variant}
+            })),
+            Some(EngineEvent::AssistantDelta { text }) if text == "[REDACTED]"
+        ));
+    }
+
+    let mut verbatim_registered =
+        RpcEventTranslator::with_sensitive_values([r"\\?\D:\Workspace\Secret Folder"]);
+    assert!(matches!(
+        verbatim_registered.translate(json!({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "text_delta",
+                "delta": "d:/workspace/secret folder"
+            }
+        })),
+        Some(EngineEvent::AssistantDelta { text }) if text == "[REDACTED]"
+    ));
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &str) -> String {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "GetShortPathNameW"]
+        fn get_short_path_name_w(long: *const u16, short: *mut u16, capacity: u32) -> u32;
+    }
+
+    let long = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut short = vec![0_u16; 32_768];
+    let length =
+        unsafe { get_short_path_name_w(long.as_ptr(), short.as_mut_ptr(), short.len() as u32) }
+            as usize;
+    assert!(length > 0 && length < short.len());
+    String::from_utf16(&short[..length]).unwrap()
+}
+
+#[cfg(windows)]
+#[test]
+fn rpc_redacts_an_actual_windows_short_path_alias() {
+    let long_path = r"C:\Program Files";
+    let short_path = windows_short_path(long_path);
+    assert_ne!(
+        short_path.to_ascii_lowercase(),
+        long_path.to_ascii_lowercase()
+    );
+    let mut translator = RpcEventTranslator::with_sensitive_values([long_path]);
+
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": short_path}
+        })),
+        Some(EngineEvent::AssistantDelta { text }) if text == "[REDACTED]"
+    ));
+}
+
+#[test]
 fn rpc_raw_event_unicode_is_truncated_to_the_character_limit() {
     let mut translator = RpcEventTranslator::default();
     let payload = "界".repeat(40_000);

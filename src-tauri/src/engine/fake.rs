@@ -331,7 +331,7 @@ impl FakeEngineAdapter {
         }
 
         let delay = self.delay;
-        let active = Arc::clone(&self.active);
+        let active = Arc::downgrade(&self.active);
         let capabilities = self.capabilities;
         let run_behavior = self.run_behavior;
         #[cfg(test)]
@@ -362,14 +362,15 @@ impl FakeEngineAdapter {
             if let Some(completion_gate) = completion_gate {
                 completion_gate.pause_if_armed().await;
             }
-            let mut active = active.lock().await;
-            if active
-                .get(&run_id)
-                .is_some_and(|entry| entry.generation == generation)
-            {
-                active.remove(&run_id);
+            if let Some(active) = active.upgrade() {
+                let mut active = active.lock().await;
+                if active
+                    .get(&run_id)
+                    .is_some_and(|entry| entry.generation == generation)
+                {
+                    active.remove(&run_id);
+                }
             }
-            drop(active);
             completion.complete(outcome);
         });
 

@@ -329,6 +329,9 @@ enum FixtureScenario {
     StartupCrash,
     PromptRejected,
     StartupTimeout,
+    PreAcceptanceEvents,
+    PreAcceptanceTerminal,
+    PreAcceptanceFlood,
     SensitiveRawEvent,
     Backpressure,
     MalformedBackpressure,
@@ -384,6 +387,10 @@ impl AdapterFactory for FakeAdapterFactory {
             FixtureScenario::DuplicateTerminal => FakeRunBehavior::DuplicateTerminal,
             FixtureScenario::StartupCrash => FakeRunBehavior::Crash,
             FixtureScenario::PromptRejected | FixtureScenario::StartupTimeout => {
+                FakeRunBehavior::Crash
+            }
+            FixtureScenario::PreAcceptanceEvents => FakeRunBehavior::Complete,
+            FixtureScenario::PreAcceptanceTerminal | FixtureScenario::PreAcceptanceFlood => {
                 FakeRunBehavior::Crash
             }
             FixtureScenario::SensitiveRawEvent => FakeRunBehavior::Complete,
@@ -513,6 +520,9 @@ fn install_node_fixture(root: &Path, scenario: FixtureScenario) -> PathBuf {
         FixtureScenario::StartupCrash => "startup_crash",
         FixtureScenario::PromptRejected => "prompt_rejected",
         FixtureScenario::StartupTimeout => "startup_timeout",
+        FixtureScenario::PreAcceptanceEvents => "pre_acceptance_events",
+        FixtureScenario::PreAcceptanceTerminal => "pre_acceptance_terminal",
+        FixtureScenario::PreAcceptanceFlood => "pre_acceptance_flood",
         FixtureScenario::SensitiveRawEvent => "sensitive_raw_event",
         FixtureScenario::Backpressure => "backpressure",
         FixtureScenario::MalformedBackpressure => "malformed_backpressure",
@@ -579,6 +589,26 @@ rl.on('line', line => {{
       waitForMarker('startup-release', () => send({{ type: 'response', id: command.id, success: true }}));
       return;
     }}
+    if (scenario === 'pre_acceptance_events') {{
+      send({{ type: 'message_update', assistantMessageEvent: {{ type: 'thinking_delta', delta: 'before-acceptance' }} }});
+      send({{ type: 'future_pre_acceptance', payload: 'buffered-raw' }});
+      send({{ type: 'response', id: command.id, success: true }});
+      send({{ type: 'agent_end', messages: [] }});
+      return;
+    }}
+    if (scenario === 'pre_acceptance_terminal') {{
+      send({{ type: 'message_update', assistantMessageEvent: {{ type: 'error', error: 'early failure' }} }});
+      send({{ type: 'response', id: command.id, success: true }});
+      send({{ type: 'agent_end', messages: [] }});
+      return;
+    }}
+    if (scenario === 'pre_acceptance_flood') {{
+      for (let index = 0; index < 65; index += 1) {{
+        send({{ type: 'future_pre_acceptance', index }});
+      }}
+      fs.writeFileSync(marker('pre-acceptance-flood-emitted'), String(process.pid));
+      return;
+    }}
     send({{ type: 'response', id: command.id, success: true }});
     if (scenario === 'sensitive_raw_event') {{
       const argument = name => process.argv[process.argv.indexOf(name) + 1];
@@ -615,7 +645,7 @@ rl.on('line', line => {{
     }}
     if (scenario === 'inherited_stderr_complete') {{
       spawnStderrHolder();
-      send({{ type: 'agent_end', messages: [] }});
+      waitForMarker('stderr-holder-entered', () => send({{ type: 'agent_end', messages: [] }}));
       return;
     }}
     if (scenario === 'inherited_stderr_hold') {{
@@ -760,12 +790,64 @@ fn fixture_marker(root: &Path, name: &str) -> PathBuf {
 
 async fn wait_for_fixture_marker(root: &Path, name: &str) {
     let path = fixture_marker(root, name);
-    bounded("Pi fixture marker", async {
+    let label = format!("Pi fixture marker {name}");
+    bounded(&label, async {
         while !path.exists() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await;
+}
+
+fn fixture_descendant_pid(root: &Path) -> u32 {
+    std::fs::read_to_string(fixture_marker(root, "stderr-holder-entered"))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[cfg(windows)]
+fn process_is_alive(process_id: u32) -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "OpenProcess"]
+        fn open_process(access: u32, inherit: i32, process_id: u32) -> *mut c_void;
+        #[link_name = "WaitForSingleObject"]
+        fn wait_for_single_object(handle: *mut c_void, milliseconds: u32) -> u32;
+        #[link_name = "CloseHandle"]
+        fn close_handle(handle: *mut c_void) -> i32;
+    }
+
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const WAIT_TIMEOUT: u32 = 258;
+    let handle = unsafe { open_process(SYNCHRONIZE, 0, process_id) };
+    if handle.is_null() {
+        return false;
+    }
+    let alive = unsafe { wait_for_single_object(handle, 0) } == WAIT_TIMEOUT;
+    unsafe {
+        close_handle(handle);
+    }
+    alive
+}
+
+#[cfg(unix)]
+fn process_is_alive(process_id: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(process_id: i32, signal: i32) -> i32;
+    }
+
+    unsafe { kill(process_id as i32, 0) == 0 }
+    || std::io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
+async fn release_fixture_descendant_if_alive(root: &Path, process_id: u32) {
+    if process_is_alive(process_id) {
+        std::fs::write(fixture_marker(root, "stderr-holder-release"), b"release").unwrap();
+        wait_for_fixture_marker(root, "stderr-holder-exited").await;
+    }
 }
 
 async fn abort_returned_before_fixture_marker(
@@ -1025,6 +1107,100 @@ async fn pi_startup_timeout_diagnostic_ignores_stderr() {
 }
 
 #[tokio::test]
+async fn pi_buffers_pre_acceptance_events_until_after_run_started() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::PreAcceptanceEvents).await;
+    let (sender, receiver) = mpsc::channel(8);
+
+    adapter
+        .start(
+            context("run-pre-acceptance-events", 0),
+            input("buffer"),
+            sender,
+        )
+        .await
+        .unwrap();
+    let events = collect_closed(receiver).await;
+
+    assert!(matches!(
+        events.first(),
+        Some(EngineEvent::RunStarted { .. })
+    ));
+    assert!(matches!(
+        events.get(1),
+        Some(EngineEvent::ThoughtDelta { text }) if text == "before-acceptance"
+    ));
+    assert!(matches!(
+        events.get(2),
+        Some(EngineEvent::RawEngineEvent { kind, .. }) if kind == "future_pre_acceptance"
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(EngineEvent::RunCompleted { .. })
+    ));
+    assert_one_terminal(&events);
+}
+
+#[tokio::test]
+async fn pi_treats_a_pre_acceptance_terminal_as_startup_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::PreAcceptanceTerminal).await;
+    let (sender, receiver) = mpsc::channel(8);
+
+    let result = adapter
+        .start(
+            context("run-pre-acceptance-terminal", 0),
+            input("fail"),
+            sender,
+        )
+        .await;
+    let events = collect_closed(receiver).await;
+
+    assert!(matches!(result, Err(EngineError::Start(_))));
+    assert_eq!(events.len(), 1, "unexpected startup events: {events:?}");
+    assert!(matches!(
+        events.first(),
+        Some(EngineEvent::RunFailed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn pi_rejects_a_pre_acceptance_event_flood_without_filling_the_sink() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::PreAcceptanceFlood).await;
+    let (sender, receiver) = mpsc::channel(1);
+    let mut receiver = Some(receiver);
+    let start_adapter = Arc::clone(&adapter);
+    let mut start = tokio::spawn(async move {
+        start_adapter
+            .start(
+                context("run-pre-acceptance-flood", 0),
+                input("flood"),
+                sender,
+            )
+            .await
+    });
+    wait_for_fixture_marker(root.path(), "pre-acceptance-flood-emitted").await;
+
+    let result = match tokio::time::timeout(Duration::from_secs(2), &mut start).await {
+        Ok(result) => result.unwrap(),
+        Err(_) => {
+            drop(receiver.take());
+            let _ = bounded("blocked pre-acceptance flood cleanup", start).await;
+            panic!("pre-acceptance flood filled the public event sink");
+        }
+    };
+    let mut receiver = receiver.unwrap();
+
+    assert!(matches!(result, Err(EngineError::Start(_))));
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunFailed { .. }
+    ));
+    assert!(receiver.recv().await.is_none());
+}
+
+#[tokio::test]
 async fn pi_runtime_context_redacts_sensitive_raw_events() {
     let root = tempfile::tempdir().unwrap();
     let adapter = pi_fixture_adapter(root.path(), FixtureScenario::SensitiveRawEvent).await;
@@ -1242,7 +1418,7 @@ async fn pi_abort_interrupts_error_terminal_backpressure() {
 }
 
 #[tokio::test]
-async fn pi_completion_does_not_wait_for_an_inherited_stderr_handle() {
+async fn pi_completion_reaps_a_descendant_that_inherits_stderr() {
     let root = tempfile::tempdir().unwrap();
     let adapter = pi_fixture_adapter(root.path(), FixtureScenario::InheritedStderrComplete).await;
     let (sender, mut receiver) = mpsc::channel(8);
@@ -1255,6 +1431,7 @@ async fn pi_completion_does_not_wait_for_an_inherited_stderr_handle() {
         .await
         .unwrap();
     wait_for_fixture_marker(root.path(), "stderr-holder-entered").await;
+    let descendant_pid = fixture_descendant_pid(root.path());
     assert!(matches!(
         receive_event(&mut receiver).await,
         EngineEvent::RunStarted { .. }
@@ -1263,36 +1440,18 @@ async fn pi_completion_does_not_wait_for_an_inherited_stderr_handle() {
         receive_event(&mut receiver).await,
         EngineEvent::RunCompleted { .. }
     ));
-
-    let closed_before_watchdog = tokio::select! {
-        event = receiver.recv() => {
-            assert!(event.is_none());
-            !fixture_marker(root.path(), "stderr-holder-watchdog").exists()
-        }
-        _ = wait_for_fixture_marker(root.path(), "stderr-holder-watchdog") => false,
-    };
-    std::fs::write(
-        fixture_marker(root.path(), "stderr-holder-release"),
-        b"release",
-    )
-    .unwrap();
-    wait_for_fixture_marker(root.path(), "stderr-holder-exited").await;
-    if !closed_before_watchdog {
-        assert!(
-            bounded("inherited-stderr receiver closure", receiver.recv())
-                .await
-                .is_none()
-        );
-    }
+    let descendant_survived_terminal = process_is_alive(descendant_pid);
+    assert!(receiver.recv().await.is_none());
+    release_fixture_descendant_if_alive(root.path(), descendant_pid).await;
 
     assert!(
-        closed_before_watchdog,
-        "Pi cleanup waited for a descendant-inherited stderr handle"
+        !descendant_survived_terminal,
+        "Pi emitted RunCompleted while a descendant was still alive"
     );
 }
 
 #[tokio::test]
-async fn pi_abort_does_not_wait_for_an_inherited_stderr_handle() {
+async fn pi_abort_reaps_a_descendant_that_inherits_stderr() {
     let root = tempfile::tempdir().unwrap();
     let adapter = pi_fixture_adapter(root.path(), FixtureScenario::InheritedStderrHold).await;
     let (sender, mut receiver) = mpsc::channel(8);
@@ -1305,43 +1464,31 @@ async fn pi_abort_does_not_wait_for_an_inherited_stderr_handle() {
         .await
         .unwrap();
     wait_for_fixture_marker(root.path(), "stderr-holder-entered").await;
+    let descendant_pid = fixture_descendant_pid(root.path());
     assert!(matches!(
         receive_event(&mut receiver).await,
         EngineEvent::RunStarted { .. }
     ));
 
     let abort_adapter = Arc::clone(&adapter);
-    let mut abort =
-        tokio::spawn(async move { abort_adapter.abort("run-inherited-stderr-abort").await });
-    let finished_before_watchdog = tokio::select! {
-        result = &mut abort => {
-            result.unwrap().unwrap();
-            !fixture_marker(root.path(), "stderr-holder-watchdog").exists()
-        }
-        _ = wait_for_fixture_marker(root.path(), "stderr-holder-watchdog") => false,
-    };
-    std::fs::write(
-        fixture_marker(root.path(), "stderr-holder-release"),
-        b"release",
+    bounded(
+        "inherited-stderr Pi abort",
+        abort_adapter.abort("run-inherited-stderr-abort"),
     )
+    .await
     .unwrap();
-    wait_for_fixture_marker(root.path(), "stderr-holder-exited").await;
-    if !finished_before_watchdog {
-        bounded("inherited-stderr Pi abort", abort)
-            .await
-            .unwrap()
-            .unwrap();
-    }
     collect_closed(receiver).await;
+    let descendant_survived = process_is_alive(descendant_pid);
+    release_fixture_descendant_if_alive(root.path(), descendant_pid).await;
 
     assert!(
-        finished_before_watchdog,
-        "Pi abort waited for a descendant-inherited stderr handle"
+        !descendant_survived,
+        "Pi abort returned while a descendant was still alive"
     );
 }
 
 #[tokio::test]
-async fn dropping_pi_does_not_wait_for_an_inherited_stderr_handle() {
+async fn dropping_pi_reaps_a_descendant_that_inherits_stderr() {
     let root = tempfile::tempdir().unwrap();
     let adapter = pi_fixture_adapter(root.path(), FixtureScenario::InheritedStderrHold).await;
     let (sender, mut receiver) = mpsc::channel(8);
@@ -1354,6 +1501,7 @@ async fn dropping_pi_does_not_wait_for_an_inherited_stderr_handle() {
         .await
         .unwrap();
     wait_for_fixture_marker(root.path(), "stderr-holder-entered").await;
+    let descendant_pid = fixture_descendant_pid(root.path());
     assert!(matches!(
         receive_event(&mut receiver).await,
         EngineEvent::RunStarted { .. }
@@ -1363,32 +1511,18 @@ async fn dropping_pi_does_not_wait_for_an_inherited_stderr_handle() {
     drop(receiver);
     drop(adapter);
 
-    let cleaned_before_watchdog = tokio::select! {
-        _ = async {
-            while agent_directory.exists() {
-                tokio::task::yield_now().await;
-            }
-        } => !fixture_marker(root.path(), "stderr-holder-watchdog").exists(),
-        _ = wait_for_fixture_marker(root.path(), "stderr-holder-watchdog") => false,
-    };
-    std::fs::write(
-        fixture_marker(root.path(), "stderr-holder-release"),
-        b"release",
-    )
-    .unwrap();
-    wait_for_fixture_marker(root.path(), "stderr-holder-exited").await;
-    if !cleaned_before_watchdog {
-        bounded("inherited-stderr Pi drop cleanup", async {
-            while agent_directory.exists() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-    }
+    bounded("inherited-stderr Pi drop cleanup", async {
+        while agent_directory.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    let descendant_survived = process_is_alive(descendant_pid);
+    release_fixture_descendant_if_alive(root.path(), descendant_pid).await;
 
     assert!(
-        cleaned_before_watchdog,
-        "dropping Pi waited for a descendant-inherited stderr handle"
+        !descendant_survived,
+        "dropping Pi returned while a descendant was still alive"
     );
 }
 
@@ -1569,6 +1703,31 @@ async fn dropping_pi_after_receiver_close_releases_the_node_process() {
     .await;
 
     assert!(abort_won, "dropping Pi relied on the fixture watchdog");
+}
+
+#[tokio::test]
+async fn dropping_a_holding_fake_releases_its_run_task() {
+    let adapter = FakeEngineAdapter::configured(
+        FakeEngineConfig::new(full_capabilities())
+            .with_run_behavior(FakeRunBehavior::HoldUntilAbort),
+    );
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(context("run-drop-holding-fake", 0), input("hold"), sender)
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+
+    drop(adapter);
+
+    let events = tokio::time::timeout(Duration::from_secs(1), collect_closed(receiver))
+        .await
+        .expect("dropping the fake adapter left its HoldUntilAbort task alive");
+    assert_one_terminal(&events);
+    assert!(matches!(events.last(), Some(EngineEvent::RunFailed { .. })));
 }
 
 #[tokio::test]
