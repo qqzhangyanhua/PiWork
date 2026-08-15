@@ -43,6 +43,12 @@ fn agent_domain_migration_uses_stable_lf_line_endings() {
     assert!(!migration.contains('\r'));
 }
 
+#[test]
+fn assignment_session_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0006_assignment_sessions.sql");
+    assert!(!migration.contains('\r'));
+}
+
 #[tokio::test]
 async fn agent_domain_migration_seeds_builtin_team_and_capabilities() {
     let database = Database::open_in_memory().await.unwrap();
@@ -1077,6 +1083,59 @@ async fn insert_work(database: &Database, id: &str) {
         .unwrap();
 }
 
+async fn insert_assignment_member(database: &Database, work_id: &str, agent_instance_id: &str) {
+    sqlx::query(
+        "INSERT INTO work_agents \
+         (work_id, agent_instance_id, role_kind, status, permission_policy, joined_at, updated_at) \
+         VALUES (?, ?, 'engineer', 'joined', 'inherit_work', ?, ?)",
+    )
+    .bind(work_id)
+    .bind(agent_instance_id)
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+}
+
+async fn try_insert_assignment(
+    database: &Database,
+    id: &str,
+    work_id: &str,
+    assigned_agent_id: &str,
+    status: &str,
+) -> Result<SqliteQueryResult, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO assignments ( \
+             id, work_id, assigned_agent_id, kind, side_effect, title, instruction, \
+             context_manifest_json, expected_result_schema_json, acceptance_criteria_json, \
+             permission_scope_json, priority, status, attempt_count, max_attempts, \
+             created_at, updated_at \
+         ) VALUES (?, ?, ?, 'member', 'read_only', 'Assignment', 'Do the work', \
+             '{}', '{}', '[]', '{}', 10, ?, 0, 3, ?, ?)",
+    )
+    .bind(id)
+    .bind(work_id)
+    .bind(assigned_agent_id)
+    .bind(status)
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+}
+
+async fn insert_assignment(
+    database: &Database,
+    id: &str,
+    work_id: &str,
+    assigned_agent_id: &str,
+    status: &str,
+) {
+    try_insert_assignment(database, id, work_id, assigned_agent_id, status)
+        .await
+        .unwrap();
+}
+
 async fn insert_work_with_permission_mode(
     database: &Database,
     id: &str,
@@ -1206,6 +1265,7 @@ async fn activity_protocol_migration_adds_nullable_event_context_and_indexes() {
             "idx_events_assignment_sequence",
             vec!["assignment_id", "sequence"],
         ),
+        ("idx_events_run_sequence", vec!["run_id", "sequence"]),
     ] {
         let index_columns =
             sqlx::query_scalar::<_, String>("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
@@ -1218,7 +1278,10 @@ async fn activity_protocol_migration_adds_nullable_event_context_and_indexes() {
 
     let partial_indexes = sqlx::query_as::<_, (String, i64)>(
         "SELECT name, partial FROM pragma_index_list('events') \
-         WHERE name IN ('idx_events_work_turn_sequence', 'idx_events_assignment_sequence') \
+         WHERE name IN ( \
+             'idx_events_work_turn_sequence', 'idx_events_assignment_sequence', \
+             'idx_events_run_sequence' \
+         ) \
          ORDER BY name",
     )
     .fetch_all(database.pool())
@@ -1228,6 +1291,7 @@ async fn activity_protocol_migration_adds_nullable_event_context_and_indexes() {
         partial_indexes,
         vec![
             ("idx_events_assignment_sequence".into(), 1),
+            ("idx_events_run_sequence".into(), 1),
             ("idx_events_work_turn_sequence".into(), 0),
         ]
     );
@@ -1244,8 +1308,8 @@ async fn activity_protocol_migration_adds_nullable_event_context_and_indexes() {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" "),
-        "CREATE INDEX idx_events_assignment_sequence ON events(assignment_id, sequence) \
-         WHERE assignment_id IS NOT NULL"
+        "CREATE UNIQUE INDEX idx_events_assignment_sequence ON events(assignment_id, sequence) \
+         WHERE run_id IS NULL AND assignment_id IS NOT NULL"
     );
 }
 
@@ -1596,4 +1660,714 @@ async fn deleting_a_work_cascades_to_its_run_messages_and_events() {
             .unwrap();
         assert_eq!(count, 0, "rows remain in {table}");
     }
+}
+
+#[tokio::test]
+async fn assignment_migration_creates_complete_schema_and_indexes() {
+    let database = Database::open_in_memory().await.unwrap();
+    let names = database.table_names().await.unwrap();
+    for expected in ["assignments", "assignment_dependencies", "agent_sessions"] {
+        assert!(names.contains(&expected.to_string()), "missing {expected}");
+    }
+
+    let assignment_columns =
+        sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('assignments')")
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+    for expected in [
+        "id",
+        "work_id",
+        "parent_assignment_id",
+        "created_by_agent_id",
+        "assigned_agent_id",
+        "capability_pack_id",
+        "kind",
+        "side_effect",
+        "title",
+        "instruction",
+        "context_manifest_json",
+        "expected_result_schema_json",
+        "acceptance_criteria_json",
+        "permission_scope_json",
+        "priority",
+        "status",
+        "attempt_count",
+        "max_attempts",
+        "not_before",
+        "result_summary",
+        "last_error",
+        "next_attempt_at",
+        "recovery_reason",
+        "runtime_owner_id",
+        "created_at",
+        "claimed_at",
+        "started_at",
+        "completed_at",
+        "updated_at",
+    ] {
+        assert!(
+            assignment_columns.contains(&expected.to_string()),
+            "missing assignments.{expected}"
+        );
+    }
+
+    let run_columns = sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('runs')")
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+    for expected in ["assignment_id", "agent_instance_id", "attempt_number"] {
+        assert!(
+            run_columns.contains(&expected.to_string()),
+            "missing runs.{expected}"
+        );
+    }
+
+    let event_run_not_null: i64 = sqlx::query_scalar(
+        "SELECT \"notnull\" FROM pragma_table_info('events') WHERE name = 'run_id'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(event_run_not_null, 0);
+
+    for expected in [
+        "idx_assignments_one_inflight_per_work",
+        "idx_assignments_schedulable",
+        "idx_events_run_sequence",
+        "idx_events_assignment_sequence",
+        "idx_runs_assignment_attempt",
+    ] {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(expected)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(exists, 1, "missing index {expected}");
+    }
+
+    let session_key_columns = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_index_info( \
+             (SELECT name FROM pragma_index_list('agent_sessions') \
+              WHERE \"unique\" = 1 AND origin = 'u' LIMIT 1) \
+         ) ORDER BY seqno",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        session_key_columns,
+        ["agent_instance_id", "work_id", "engine_kind", "generation"]
+    );
+}
+
+#[tokio::test]
+async fn assignment_rows_dependencies_and_agent_sessions_round_trip() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "assignment-work").await;
+    insert_assignment_member(
+        &database,
+        "assignment-work",
+        "agent-instance:piwork-engineer",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-parent",
+        "assignment-work",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-child",
+        "assignment-work",
+        "agent-instance:piwork-engineer",
+        "waiting",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE assignments SET parent_assignment_id = 'assignment-parent', \
+             created_by_agent_id = 'agent-instance:piwork-engineer', \
+             capability_pack_id = 'capability-pack:engineering-execution:v1', \
+             not_before = '2026-01-01T00:01:00Z', result_summary = 'pending', \
+             last_error = 'transient', next_attempt_at = '2026-01-01T00:02:00Z', \
+             recovery_reason = 'resume safely' WHERE id = 'assignment-child'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO assignment_dependencies (assignment_id, depends_on_assignment_id) \
+         VALUES ('assignment-child', 'assignment-parent')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_sessions ( \
+             id, work_id, agent_instance_id, engine_kind, engine_reference, generation, \
+             current_assignment_id, last_successful_turn_id, status, rotation_reason, \
+             created_at, updated_at \
+         ) VALUES ('session-1', 'assignment-work', 'agent-instance:piwork-engineer', \
+             'pi', 'opaque-engine-reference', 1, 'assignment-child', 'turn-1', \
+             'running', 'continued', '2026-01-01T00:00:00Z', '2026-01-01T00:03:00Z')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let assignment = sqlx::query_as::<_, (String, String, String, String, String)>(
+        "SELECT parent_assignment_id, created_by_agent_id, capability_pack_id, status, \
+             recovery_reason FROM assignments WHERE id = 'assignment-child'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        assignment,
+        (
+            "assignment-parent".into(),
+            "agent-instance:piwork-engineer".into(),
+            "capability-pack:engineering-execution:v1".into(),
+            "waiting".into(),
+            "resume safely".into(),
+        )
+    );
+    let session = sqlx::query_as::<_, (String, String, i64, String, String)>(
+        "SELECT engine_reference, current_assignment_id, generation, \
+             last_successful_turn_id, status FROM agent_sessions WHERE id = 'session-1'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        session,
+        (
+            "opaque-engine-reference".into(),
+            "assignment-child".into(),
+            1,
+            "turn-1".into(),
+            "running".into(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn assignment_value_constraints_reject_invalid_wire_values_json_and_counters() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "assignment-constraints").await;
+    insert_assignment_member(
+        &database,
+        "assignment-constraints",
+        "agent-instance:piwork-engineer",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-valid",
+        "assignment-constraints",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+
+    for statement in [
+        "UPDATE assignments SET kind = 'worker' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET side_effect = 'write' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET status = 'retrying' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET context_manifest_json = '[]' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET expected_result_schema_json = '[]' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET acceptance_criteria_json = '{}' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET permission_scope_json = '[]' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET context_manifest_json = 'not-json' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET priority = -1 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET priority = 4294967296 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET attempt_count = -1 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET attempt_count = 4 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET attempt_count = 4294967296 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET max_attempts = 0 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET max_attempts = 4294967296 WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET title = '' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET instruction = '   ' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET updated_at = '2025-12-31T23:59:59Z' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET not_before = '2025-12-31T23:59:59Z' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET claimed_at = '2025-12-31T23:59:59Z' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET started_at = '2025-12-31T23:59:59Z' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET completed_at = '2025-12-31T23:59:59Z' WHERE id = 'assignment-valid'",
+        "UPDATE assignments SET next_attempt_at = '2025-12-31T23:59:59Z' WHERE id = 'assignment-valid'",
+    ] {
+        let result = sqlx::query(statement).execute(database.pool()).await;
+        assert_database_error_contains(result, "CHECK constraint failed");
+    }
+}
+
+#[tokio::test]
+async fn assignment_relationship_inflight_and_dependency_constraints_are_enforced() {
+    let database = Database::open_in_memory().await.unwrap();
+    for work_id in ["assignment-work-a", "assignment-work-b"] {
+        insert_work(&database, work_id).await;
+        insert_assignment_member(&database, work_id, "agent-instance:piwork-engineer").await;
+    }
+    insert_assignment(
+        &database,
+        "assignment-a",
+        "assignment-work-a",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-b",
+        "assignment-work-b",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+
+    let missing_member = try_insert_assignment(
+        &database,
+        "assignment-unowned",
+        "assignment-work-a",
+        "agent-instance:piwork-reviewer",
+        "queued",
+    )
+    .await;
+    assert_database_error_contains(missing_member, "FOREIGN KEY constraint failed");
+
+    for statement in [
+        "UPDATE assignments SET parent_assignment_id = id WHERE id = 'assignment-a'",
+        "UPDATE assignments SET parent_assignment_id = 'assignment-b' WHERE id = 'assignment-a'",
+        "UPDATE assignments SET created_by_agent_id = 'agent-instance:piwork-reviewer' WHERE id = 'assignment-a'",
+        "UPDATE assignments SET capability_pack_id = 'missing-pack' WHERE id = 'assignment-a'",
+        "INSERT INTO assignment_dependencies (assignment_id, depends_on_assignment_id) VALUES ('assignment-a', 'assignment-a')",
+        "INSERT INTO assignment_dependencies (assignment_id, depends_on_assignment_id) VALUES ('assignment-a', 'missing-assignment')",
+    ] {
+        let result = sqlx::query(statement).execute(database.pool()).await;
+        let expected = if statement.contains("id WHERE")
+            || statement.contains("assignment-a', 'assignment-a")
+        {
+            "CHECK constraint failed"
+        } else {
+            "FOREIGN KEY constraint failed"
+        };
+        assert_database_error_contains(result, expected);
+    }
+
+    sqlx::query(
+        "INSERT INTO assignment_dependencies (assignment_id, depends_on_assignment_id) \
+         VALUES ('assignment-a', 'assignment-b')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    sqlx::query("UPDATE assignments SET status = 'claimed' WHERE id = 'assignment-a'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let second_inflight = try_insert_assignment(
+        &database,
+        "assignment-a-2",
+        "assignment-work-a",
+        "agent-instance:piwork-engineer",
+        "running",
+    )
+    .await;
+    assert_database_error_contains(second_inflight, "UNIQUE constraint failed");
+}
+
+#[tokio::test]
+async fn assignment_agent_session_and_run_identity_constraints_are_enforced() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "assignment-execution").await;
+    for agent in [
+        "agent-instance:piwork-engineer",
+        "agent-instance:piwork-reviewer",
+    ] {
+        insert_assignment_member(&database, "assignment-execution", agent).await;
+    }
+    insert_assignment(
+        &database,
+        "assignment-execution-1",
+        "assignment-execution",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+
+    sqlx::query(
+        "INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, \
+             engine_reference, generation, status, created_at, updated_at) \
+         VALUES ('session-valid', 'assignment-execution', 'agent-instance:piwork-engineer', \
+             'pi', 'opaque', 1, 'ready', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+    for statement in [
+        "INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, engine_reference, generation, status, created_at, updated_at) VALUES ('session-duplicate', 'assignment-execution', 'agent-instance:piwork-engineer', 'pi', 'other', 1, 'ready', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, engine_reference, generation, status, created_at, updated_at) VALUES ('session-no-member', 'assignment-execution', 'agent-instance:piwork-lead', 'pi', 'opaque', 1, 'ready', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, engine_reference, generation, current_assignment_id, status, created_at, updated_at) VALUES ('session-wrong-owner', 'assignment-execution', 'agent-instance:piwork-reviewer', 'pi', 'opaque', 1, 'assignment-execution-1', 'ready', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "UPDATE agent_sessions SET generation = 0 WHERE id = 'session-valid'",
+        "UPDATE agent_sessions SET generation = 4294967296 WHERE id = 'session-valid'",
+        "UPDATE agent_sessions SET status = 'paused' WHERE id = 'session-valid'",
+        "UPDATE agent_sessions SET status = 'invalidated' WHERE id = 'session-valid'",
+        "UPDATE agent_sessions SET updated_at = '2025-12-31T00:00:00Z' WHERE id = 'session-valid'",
+        "UPDATE agent_sessions SET invalidated_at = '2025-12-31T00:00:00Z' WHERE id = 'session-valid'",
+    ] {
+        let result = sqlx::query(statement).execute(database.pool()).await;
+        let expected = if statement.contains("generation = ")
+            || statement.contains("status = 'paused'")
+            || statement.contains("status = 'invalidated'")
+            || statement.contains("SET updated_at")
+            || statement.contains("SET invalidated_at")
+        {
+            "CHECK constraint failed"
+        } else if statement.contains("session-duplicate") {
+            "UNIQUE constraint failed"
+        } else {
+            "FOREIGN KEY constraint failed"
+        };
+        assert_database_error_contains(result, expected);
+    }
+
+    insert_run(&database, "legacy-run", "assignment-execution").await;
+    sqlx::query(
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, \
+             assignment_id, agent_instance_id, attempt_number, created_at, updated_at) \
+         VALUES ('assignment-run-1', 'assignment-execution', 'pi', 'test', 'queued', \
+             'assignment-execution-1', 'agent-instance:piwork-engineer', 1, ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+    for statement in [
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, assignment_id, agent_instance_id, attempt_number, created_at, updated_at) VALUES ('assignment-run-duplicate', 'assignment-execution', 'pi', 'test', 'queued', 'assignment-execution-1', 'agent-instance:piwork-engineer', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, assignment_id, attempt_number, created_at, updated_at) VALUES ('assignment-run-partial', 'assignment-execution', 'pi', 'test', 'queued', 'assignment-execution-1', 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, assignment_id, agent_instance_id, attempt_number, created_at, updated_at) VALUES ('assignment-run-zero', 'assignment-execution', 'pi', 'test', 'queued', 'assignment-execution-1', 'agent-instance:piwork-engineer', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, assignment_id, agent_instance_id, attempt_number, created_at, updated_at) VALUES ('assignment-run-too-large', 'assignment-execution', 'pi', 'test', 'queued', 'assignment-execution-1', 'agent-instance:piwork-engineer', 4294967296, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, assignment_id, agent_instance_id, attempt_number, created_at, updated_at) VALUES ('assignment-run-wrong-agent', 'assignment-execution', 'pi', 'test', 'queued', 'assignment-execution-1', 'agent-instance:piwork-reviewer', 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    ] {
+        let result = sqlx::query(statement).execute(database.pool()).await;
+        let expected = if statement.contains("duplicate") {
+            "UNIQUE constraint failed"
+        } else if statement.contains("partial")
+            || statement.contains("zero")
+            || statement.contains("too-large")
+        {
+            "CHECK constraint failed"
+        } else {
+            "FOREIGN KEY constraint failed"
+        };
+        assert_database_error_contains(result, expected);
+    }
+}
+
+#[tokio::test]
+async fn assignment_events_support_pre_run_round_trip_and_scoped_sequences() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "assignment-events").await;
+    insert_assignment_member(
+        &database,
+        "assignment-events",
+        "agent-instance:piwork-engineer",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-event-1",
+        "assignment-events",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+    let payload = r#"{"type":"assignmentQueued","assignmentId":"assignment-event-1","assignedAgentId":"agent-instance:piwork-engineer","title":"Investigate","priority":10}"#;
+    sqlx::query(
+        "INSERT INTO events (id, work_id, run_id, assignment_id, sequence, version, \
+             occurred_at, payload, turn_id, session_id, agent_id, causation_id, correlation_id) \
+         VALUES ('assignment-event', 'assignment-events', NULL, 'assignment-event-1', 1, 1, \
+             ?, ?, 'turn-1', 'session-1', 'agent-instance:piwork-engineer', 'cause-1', 'correlation-1')",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind(payload)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let stored = sqlx::query_as::<_, (Option<String>, String, String, String, String, String)>(
+        "SELECT run_id, assignment_id, payload, turn_id, causation_id, correlation_id \
+         FROM events WHERE id = 'assignment-event'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored.0, None);
+    assert_eq!(stored.1, "assignment-event-1");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stored.2).unwrap()["type"],
+        "assignmentQueued"
+    );
+    assert_eq!(
+        (&stored.3, &stored.4, &stored.5),
+        (&"turn-1".into(), &"cause-1".into(), &"correlation-1".into())
+    );
+
+    let duplicate = sqlx::query(
+        "INSERT INTO events (id, work_id, assignment_id, sequence, version, occurred_at, payload) \
+         VALUES ('assignment-event-duplicate', 'assignment-events', 'assignment-event-1', 1, 1, ?, '{}')",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await;
+    assert_database_error_contains(duplicate, "UNIQUE constraint failed");
+
+    let no_identity = sqlx::query(
+        "INSERT INTO events (id, work_id, run_id, assignment_id, sequence, version, occurred_at, payload) \
+         VALUES ('identity-less-event', 'assignment-events', NULL, NULL, 2, 1, ?, '{}')",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await;
+    assert_database_error_contains(no_identity, "CHECK constraint failed");
+
+    let missing_assignment = sqlx::query(
+        "INSERT INTO events (id, work_id, assignment_id, sequence, version, occurred_at, payload) \
+         VALUES ('missing-assignment-event', 'assignment-events', 'missing-assignment', 2, 1, ?, '{}')",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await;
+    assert_database_error_contains(missing_assignment, "FOREIGN KEY constraint failed");
+
+    insert_run(&database, "assignment-legacy-run", "assignment-events").await;
+    insert_event(
+        &database,
+        "assignment-legacy-event",
+        "assignment-events",
+        "assignment-legacy-run",
+        1,
+    )
+    .await;
+    let legacy: (String, i64) =
+        sqlx::query_as("SELECT run_id, sequence FROM events WHERE id = 'assignment-legacy-event'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(legacy, ("assignment-legacy-run".into(), 1));
+}
+
+#[tokio::test]
+async fn assignment_migration_upgrades_legacy_runs_messages_and_events() {
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    for (version, description, sql) in [
+        (
+            1,
+            "foundation",
+            include_str!("../migrations/0001_foundation.sql"),
+        ),
+        (
+            2,
+            "resources",
+            include_str!("../migrations/0002_resources.sql"),
+        ),
+        (
+            3,
+            "document derivatives",
+            include_str!("../migrations/0003_document_derivatives.sql"),
+        ),
+        (
+            4,
+            "activity protocol v2",
+            include_str!("../migrations/0004_activity_protocol_v2.sql"),
+        ),
+    ] {
+        apply_agent_domain_migration(&mut connection, version, description, sql).await;
+    }
+    sqlx::query(
+        "INSERT INTO works (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
+         VALUES ('legacy-assignment-work', 'Legacy', 'Goal', '/workspace', 'balanced', 'draft', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    apply_agent_domain_migration(
+        &mut connection,
+        5,
+        "agent domain",
+        include_str!("../migrations/0005_agent_domain.sql"),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO runs (id, work_id, engine_kind, engine_session_id, model_label, status, created_at, updated_at) \
+         VALUES ('legacy-assignment-run', 'legacy-assignment-work', 'pi', 'engine-session', 'model', 'completed', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
+         VALUES ('legacy-assignment-message', 'legacy-assignment-work', 'legacy-assignment-run', 'assistant', 'done', ?)",
+    )
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO resource_blobs (id, plaintext_sha256, size, created_at) \
+         VALUES ('legacy-assignment-blob', ?, 4, ?)",
+    )
+    .bind("a".repeat(64))
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO managed_resources (id, space_id, blob_id, original_name, media_type, size, \
+             origin, status, created_at, updated_at) \
+         VALUES ('legacy-assignment-resource', 'local-personal', 'legacy-assignment-blob', \
+             'legacy.txt', 'text/plain', 4, 'user_upload', 'ready', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO resource_links (id, resource_id, work_id, draft_id, message_id, run_id, role, created_at) \
+         VALUES ('legacy-assignment-link', 'legacy-assignment-resource', 'legacy-assignment-work', \
+             NULL, 'legacy-assignment-message', 'legacy-assignment-run', 'attached', ?)",
+    )
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO events (id, work_id, run_id, sequence, version, occurred_at, payload, \
+             turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id) \
+         VALUES ('legacy-assignment-event', 'legacy-assignment-work', 'legacy-assignment-run', 1, 1, ?, '{}', \
+             'turn-legacy', 'session-legacy', 'agent-legacy', 'legacy-event-assignment', \
+             'cause-legacy', 'correlation-legacy')",
+    )
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let migration_sql = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations/0006_assignment_sessions.sql"),
+    )
+    .unwrap();
+    let migration = Migration::new(
+        6,
+        Cow::Borrowed("assignment sessions"),
+        MigrationType::Simple,
+        Cow::Owned(migration_sql),
+        false,
+    );
+    connection.apply(&migration).await.unwrap();
+
+    let run = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<i64>)>(
+        "SELECT engine_session_id, status, assignment_id, agent_instance_id, attempt_number \
+         FROM runs WHERE id = 'legacy-assignment-run'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        run,
+        (
+            "engine-session".into(),
+            "completed".into(),
+            None,
+            None,
+            None
+        )
+    );
+    let message: (String, String) = sqlx::query_as(
+        "SELECT run_id, content FROM messages WHERE id = 'legacy-assignment-message'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(message, ("legacy-assignment-run".into(), "done".into()));
+    let resource_link: (String, String, String) = sqlx::query_as(
+        "SELECT resource_id, message_id, run_id FROM resource_links \
+         WHERE id = 'legacy-assignment-link'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        resource_link,
+        (
+            "legacy-assignment-resource".into(),
+            "legacy-assignment-message".into(),
+            "legacy-assignment-run".into(),
+        )
+    );
+    let event = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
+        "SELECT run_id, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id \
+         FROM events WHERE id = 'legacy-assignment-event'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        event,
+        (
+            "legacy-assignment-run".into(),
+            "turn-legacy".into(),
+            "session-legacy".into(),
+            "agent-legacy".into(),
+            "legacy-event-assignment".into(),
+            "cause-legacy".into(),
+            "correlation-legacy".into(),
+        )
+    );
+    let legacy_assignment: (String, String, String) = sqlx::query_as(
+        "SELECT assigned_agent_id, side_effect, status FROM assignments \
+         WHERE id = 'legacy-event-assignment'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy_assignment,
+        (
+            "agent-instance:piwork-lead".into(),
+            "unknown".into(),
+            "interrupted".into(),
+        )
+    );
+    let foreign_key_violations: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(foreign_key_violations, 0);
+    let quick_check: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(quick_check, "ok");
 }
