@@ -3,12 +3,14 @@
 PiWork pins its Buzz-derived activity work to
 `block/buzz@5bf78671f45178f8de02ba18d3d321cbbf19cd1f` under the Apache License 2.0.
 
-The source-sync date below remains 2026-08-09. The final local mapping and
-test coverage were audited on 2026-08-10; this audit did not resync upstream.
+The activity source-sync dates below remain 2026-08-09; their final local
+mapping and test coverage were audited on 2026-08-10 without a resync. The
+Assignment queue source was synced separately on 2026-08-16.
 
 | Status | Buzz commit | Upstream path | Local path | Derived tests | PiWork differences | Source sync |
 |---|---|---|---|---|---|---|
 | Implemented | `5bf78671f45178f8de02ba18d3d321cbbf19cd1f` | `crates/buzz-acp/src/observer.rs` | `src-tauri/src/engine/activity_observer.rs` | `src-tauri/src/engine/activity_observer.rs` unit tests | Replays committed `WorkEventEnvelope` values; removes Channel, ACP, and agent-index transport fields. | 2026-08-09 |
+| Implemented | `5bf78671f45178f8de02ba18d3d321cbbf19cd1f` | `crates/buzz-acp/src/queue.rs` | `src-tauri/src/assignment/queue.rs` | `src-tauri/src/assignment/queue.rs` unit tests: oldest-head fairness, per-Work in-flight exclusion, global/per-Agent caps, depth/batch caps, timestamp-preserving pool requeue, deadline release, retry/dead-letter, cancelled merge, hydration/completion boundaries, and Work cancellation | Adapts the upstream queue state machine and applicable test structure rather than copying it line-for-line. Retains per-key queues, oldest-head selection, bounded batches, in-flight deadlines, timestamp-preserving requeue, exponential retry, dead-letter, and cancelled-batch merge. Replaces Channel/Event with Work/Assignment queue items; adds global and per-Agent capacity plus fail-closed validation. Removes Relay replay, Nostr/ACP types, prompt formatting, drop-mode dedup, retry jitter, and native-steer transport state. | 2026-08-16 |
 | Implemented | `5bf78671f45178f8de02ba18d3d321cbbf19cd1f` | `desktop/src/features/agents/ui/agentSessionTypes.ts` | `src/features/activity/activityTypes.ts` | Typechecked through `src/features/activity/activityProjector.test.ts` | Replaces Relay, Nostr, pubkey, and ACP-only identities with Work, Run, Turn, Session, Agent, and Assignment identities. | 2026-08-09 |
 | Implemented | `5bf78671f45178f8de02ba18d3d321cbbf19cd1f` | `desktop/src/features/agents/ui/agentSessionTranscript.ts` | `src/features/activity/activityProjector.ts` | `src/features/activity/activityProjector.test.ts`: delta upsert, monotonic tool merge, plan revision, permission correlation, and persisted/live reconstruction | Projects typed `WorkEventPayload` values; retains PiWork lifecycle, usage, liveness, artifact, validation, and raw-rail events. | 2026-08-09 |
 | Implemented | `5bf78671f45178f8de02ba18d3d321cbbf19cd1f` | `desktop/src/features/agents/ui/agentSessionToolClassifier.ts` | `src/features/activity/activityPresentation.ts` | `src/features/activity/activityPresentation.test.ts` | Keeps Buzz descriptor, render-class, action, and group-key ideas, with descriptor types influenced by `agentSessionTypes.ts`; replaces Buzz, Relay, and MCP-specific providers with Pi read/write/bash classification over best-effort summary JSON. | 2026-08-09 |
