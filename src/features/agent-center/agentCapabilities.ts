@@ -13,19 +13,31 @@ export type AgentCapabilityDomainId =
   | "delivery-knowledge"
   | "ai-governance";
 
-export type AgentCapability = {
-  id: number;
-  catalogId: `catalog-capability:${string}`;
-  status: CapabilityPackStatus;
-  capabilityPackId: string;
-  name: string;
-  domainId: AgentCapabilityDomainId;
-  priority: CapabilityPriority;
-  audiences: string[];
-  coreCapability: string;
-  outputs: string[];
-  implementation: string;
-  suggestedInputs: string[];
+export type StaticAgentCapability = {
+  readonly id: number;
+  readonly catalogId: `catalog-capability:${string}`;
+  readonly name: string;
+  readonly domainId: AgentCapabilityDomainId;
+  readonly priority: CapabilityPriority;
+  readonly audiences: ReadonlyArray<string>;
+  readonly coreCapability: string;
+  readonly outputs: ReadonlyArray<string>;
+  readonly implementation: string;
+  readonly suggestedInputs: ReadonlyArray<string>;
+};
+
+// B6's existing catalog-only components consume the static description shape.
+export type AgentCapability = StaticAgentCapability;
+
+export type ResolvedAgentCapability = StaticAgentCapability & {
+  readonly status: CapabilityPackStatus;
+  readonly capabilityPackId: string;
+};
+
+export type CapabilityLibraryItem = ResolvedAgentCapability;
+
+export type CapabilityLibrarySource = Omit<StaticAgentCapability, "catalogId"> & {
+  readonly catalogId?: unknown;
 };
 
 export type CapabilityFilters = {
@@ -88,7 +100,7 @@ type CapabilityRow = readonly [
   priority: CapabilityPriority,
 ];
 
-export function getCatalogCapabilityId(id: number): AgentCapability["catalogId"] {
+export function getCatalogCapabilityId(id: number): StaticAgentCapability["catalogId"] {
   return `catalog-capability:${String(id).padStart(3, "0")}`;
 }
 
@@ -203,7 +215,7 @@ const SUGGESTED_INPUTS: Record<AgentCapabilityDomainId, string[]> = {
   "ai-governance": ["目标流程、智能体或模型运行记录", "权限、质量、成本或审计约束"],
 };
 
-export const AGENT_CAPABILITIES: AgentCapability[] = ROWS.map(([
+export const AGENT_CAPABILITIES: ReadonlyArray<StaticAgentCapability> = ROWS.map(([
   id,
   name,
   domainId,
@@ -217,8 +229,6 @@ export const AGENT_CAPABILITIES: AgentCapability[] = ROWS.map(([
   return {
     id,
     catalogId,
-    status: "catalog_only",
-    capabilityPackId: catalogId,
     name,
     domainId,
     priority,
@@ -230,10 +240,10 @@ export const AGENT_CAPABILITIES: AgentCapability[] = ROWS.map(([
   };
 });
 
-export function filterCapabilities(
-  items: readonly AgentCapability[],
+export function filterCapabilities<T extends StaticAgentCapability>(
+  items: readonly T[],
   filters: CapabilityFilters,
-) {
+): T[] {
   const query = filters.query.trim().toLocaleLowerCase();
   return items.filter((item) => {
     const searchable = [
@@ -249,7 +259,7 @@ export function filterCapabilities(
   });
 }
 
-export function buildCapabilityPrompt(capability: AgentCapability) {
+export function buildCapabilityPrompt(capability: StaticAgentCapability) {
   return [
     `我想使用「${capability.name}」完成一项任务。`,
     "",

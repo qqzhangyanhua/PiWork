@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {
   AGENT_CAPABILITIES,
   AGENT_CAPABILITY_DOMAINS,
   buildCapabilityPrompt,
   filterCapabilities,
+  type StaticAgentCapability,
 } from "./agentCapabilities";
 
 describe("Magic Factory agent capabilities", () => {
@@ -21,6 +22,17 @@ describe("Magic Factory agent capabilities", () => {
       ),
     );
     expect(new Set(AGENT_CAPABILITIES.map(({ catalogId }) => catalogId)).size).toBe(96);
+    expect(AGENT_CAPABILITIES[0]).not.toHaveProperty("status");
+    expect(AGENT_CAPABILITIES[0]).not.toHaveProperty("capabilityPackId");
+    expectTypeOf(AGENT_CAPABILITIES).toEqualTypeOf<
+      ReadonlyArray<StaticAgentCapability>
+    >();
+    if (false) {
+      // @ts-expect-error Static catalog entries never expose server-owned status.
+      AGENT_CAPABILITIES[0]!.status;
+      // @ts-expect-error Static catalog arrays are readonly.
+      AGENT_CAPABILITIES[0]!.audiences.push("mutated audience");
+    }
     expect(AGENT_CAPABILITY_DOMAINS).toHaveLength(9);
     expect(AGENT_CAPABILITIES.filter(({ priority }) => priority === "P0")).toHaveLength(23);
     expect(

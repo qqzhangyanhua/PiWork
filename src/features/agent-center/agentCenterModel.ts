@@ -6,7 +6,9 @@ import type {
 } from "../../bindings";
 import {
   getCatalogCapabilityId,
-  type AgentCapability,
+  type CapabilityLibraryItem,
+  type CapabilityLibrarySource,
+  type StaticAgentCapability,
 } from "./agentCapabilities";
 
 const CAPABILITY_PACK_STATUSES: ReadonlySet<CapabilityPackStatus> = new Set([
@@ -21,6 +23,15 @@ const SYSTEM_CAPABILITY_PACK_IDS = [
   "capability-pack:engineering-execution:v1",
   "capability-pack:independent-review:v1",
 ] as const;
+
+const CATALOG_CAPABILITY_IDS: ReadonlyArray<string> = Array.from(
+  { length: 96 },
+  (_, index) => getCatalogCapabilityId(index + 1),
+);
+
+const CATALOG_CAPABILITY_ID_SET: ReadonlySet<string> = new Set(
+  CATALOG_CAPABILITY_IDS,
+);
 
 const SYSTEM_CAPABILITY_PACK_ID_SET: ReadonlySet<string> = new Set(
   SYSTEM_CAPABILITY_PACK_IDS,
@@ -44,6 +55,12 @@ function assertCatalogCapabilityPackIdentity(pack: CapabilityPackSummary): void 
       `Catalog capability pack id '${pack.id}' must match catalogCapabilityId '${catalogId}'`,
     );
   }
+}
+
+function isCatalogCapabilityId(
+  value: unknown,
+): value is StaticAgentCapability["catalogId"] {
+  return typeof value === "string" && /^catalog-capability:\d{3}$/.test(value);
 }
 
 export type CapabilityPackGroups = {
@@ -83,10 +100,25 @@ export function validateCapabilityPackInventory(
   packs: readonly CapabilityPackSummary[],
 ): CapabilityPackGroups {
   const groups = splitCapabilityPacks(packs);
-  if (groups.catalog.length !== 96) {
-    throw new Error(
-      `Expected 96 catalog capability packs, received ${groups.catalog.length}`,
-    );
+
+  const catalogIds = new Set<string>();
+  for (const pack of groups.catalog) {
+    const catalogId = pack.catalogCapabilityId;
+    if (!catalogId) {
+      throw new Error(`Server capability pack '${pack.id}' is missing catalogCapabilityId`);
+    }
+    if (!CATALOG_CAPABILITY_ID_SET.has(catalogId)) {
+      throw new Error(`Unknown catalog capability pack '${catalogId}'`);
+    }
+    if (catalogIds.has(catalogId)) {
+      throw new Error(`Duplicate catalog capability pack '${catalogId}'`);
+    }
+    catalogIds.add(catalogId);
+  }
+  for (const id of CATALOG_CAPABILITY_IDS) {
+    if (!catalogIds.has(id)) {
+      throw new Error(`Missing catalog capability pack '${id}'`);
+    }
   }
 
   const systemIds = new Set<string>();
@@ -109,20 +141,32 @@ export function validateCapabilityPackInventory(
 }
 
 export function buildCapabilityLibrary(
-  staticCapabilities: readonly AgentCapability[],
+  staticCapabilities: readonly CapabilityLibrarySource[],
   catalogPacks: readonly CapabilityPackSummary[],
-): AgentCapability[] {
-  const staticByCatalogId = new Map<string, AgentCapability>();
-  for (const capability of staticCapabilities) {
-    if (!capability.catalogId) {
-      throw new Error(`Static capability '${capability.id}' is missing catalogId`);
+): ReadonlyArray<CapabilityLibraryItem> {
+  const validatedCapabilities: StaticAgentCapability[] = [];
+  const staticByCatalogId = new Map<string, StaticAgentCapability>();
+  for (const source of staticCapabilities) {
+    const catalogId = source.catalogId;
+    if (catalogId === undefined || catalogId === null || catalogId === "") {
+      throw new Error(`Static capability '${source.id}' is missing catalogId`);
     }
+    if (!isCatalogCapabilityId(catalogId)) {
+      throw new Error(
+        `Static capability '${source.id}' has malformed catalogId '${String(catalogId)}'`,
+      );
+    }
+    const capability: StaticAgentCapability = {
+      ...source,
+      catalogId,
+    };
     if (staticByCatalogId.has(capability.catalogId)) {
       throw new Error(`Duplicate static catalogId '${capability.catalogId}'`);
     }
     staticByCatalogId.set(capability.catalogId, capability);
+    validatedCapabilities.push(capability);
   }
-  for (const capability of staticCapabilities) {
+  for (const capability of validatedCapabilities) {
     const expectedCatalogId = getCatalogCapabilityId(capability.id);
     if (capability.catalogId !== expectedCatalogId) {
       throw new Error(
@@ -148,7 +192,7 @@ export function buildCapabilityLibrary(
     packByCatalogId.set(catalogId, pack);
   }
 
-  return staticCapabilities.map((capability) => {
+  return validatedCapabilities.map((capability) => {
     const pack = packByCatalogId.get(capability.catalogId);
     if (!pack) {
       throw new Error(
@@ -157,6 +201,9 @@ export function buildCapabilityLibrary(
     }
     return {
       ...capability,
+      audiences: [...capability.audiences],
+      outputs: [...capability.outputs],
+      suggestedInputs: [...capability.suggestedInputs],
       status: pack.status,
       capabilityPackId: pack.id,
     };
@@ -180,7 +227,7 @@ function buildMemberModel(
 
 export function buildTeamModel(team: WorkTeamSummary): TeamMemberModel[] {
   const members = team.members.filter((member) =>
-    member.roleKind !== "lead" && member.instance.id !== team.lead.instance.id
+    member.instance.id !== team.lead.instance.id
   );
   return [
     buildMemberModel(team.lead, true),

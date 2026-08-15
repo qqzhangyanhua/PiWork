@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
 import type {
   CapabilityPackStatus,
@@ -7,7 +7,11 @@ import type {
   WorkAgentSummary,
   WorkTeamSummary,
 } from "../../bindings";
-import { AGENT_CAPABILITIES, type AgentCapability } from "./agentCapabilities";
+import {
+  AGENT_CAPABILITIES,
+  type CapabilityLibraryItem,
+  type CapabilityLibrarySource,
+} from "./agentCapabilities";
 import {
   buildCapabilityLibrary,
   buildTeamModel,
@@ -48,7 +52,7 @@ function capabilityPack({
     conflictsWithCapabilityPackIds: [],
     version: 1,
     status,
-  };
+  } satisfies CapabilityPackSummary;
 }
 
 function catalogCapabilityPacks(): CapabilityPackSummary[] {
@@ -80,13 +84,52 @@ function workAgent(
   instanceId: string,
   capabilityPacks: CapabilityPackSummary[] = [],
 ): WorkAgentSummary {
+  const timestamp = "2026-08-15T00:00:00.000Z";
   return {
+    workId: "work:1",
     roleKind,
     instance: {
       id: instanceId,
-      definition: { capabilityPacks },
+      definition: {
+        id: `agent-definition:${roleKind}:v1`,
+        roleTemplateId: `role-template:${roleKind}:v1`,
+        roleKind,
+        slug: `piwork-${roleKind}`,
+        name: roleKind,
+        description: `${roleKind} definition`,
+        instructions: `Act as the ${roleKind}`,
+        responsibilities: [],
+        nonResponsibilities: [],
+        inputContract: {},
+        resultContract: {},
+        qualityRubric: {},
+        defaultEngineKind: "pi",
+        defaultModelConfigurationId: null,
+        defaultPermissionPolicy: "read_only",
+        defaultParallelism: 1,
+        memoryPolicy: "confirmed_only",
+        capabilityPacks,
+        builtin: true,
+        active: true,
+        version: 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      displayName: roleKind,
+      engineOverride: null,
+      modelConfigurationOverride: null,
+      permissionPolicyOverride: null,
+      parallelismOverride: null,
+      builtin: true,
+      status: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
     },
-  } as WorkAgentSummary;
+    status: "joined",
+    permissionPolicy: "read_only",
+    joinedAt: timestamp,
+    updatedAt: timestamp,
+  } satisfies WorkAgentSummary;
 }
 
 describe("Agent Center model", () => {
@@ -151,13 +194,35 @@ describe("Agent Center model", () => {
     );
   });
 
-  it("fails inventory validation unless exactly 96 catalog packs are present", () => {
+  it("fails inventory validation for an equal-length duplicate catalog id", () => {
+    const duplicateCatalogPack = capabilityPacksFixture();
+    duplicateCatalogPack[95] = { ...duplicateCatalogPack[94]! };
+
+    expect(() => validateCapabilityPackInventory(duplicateCatalogPack)).toThrow(
+      "Duplicate catalog capability pack 'catalog-capability:095'",
+    );
+  });
+
+  it("fails inventory validation for an equal-length unknown catalog id", () => {
+    const unknownCatalogPack = capabilityPacksFixture();
+    unknownCatalogPack[95] = capabilityPack({
+      catalogCapabilityId: "catalog-capability:999",
+      id: "catalog-capability:999",
+      status: "catalog_only",
+    });
+
+    expect(() => validateCapabilityPackInventory(unknownCatalogPack)).toThrow(
+      "Unknown catalog capability pack 'catalog-capability:999'",
+    );
+  });
+
+  it("fails inventory validation for a missing canonical catalog id", () => {
     const missingCatalogPack = capabilityPacksFixture().filter(
       ({ id }) => id !== "catalog-capability:096",
     );
 
     expect(() => validateCapabilityPackInventory(missingCatalogPack)).toThrow(
-      "Expected 96 catalog capability packs, received 95",
+      "Missing catalog capability pack 'catalog-capability:096'",
     );
   });
 
@@ -182,6 +247,28 @@ describe("Agent Center model", () => {
         "范围、约束、交付期望和待确认问题",
       ],
     });
+  });
+
+  it("returns readonly resolved copies without aliasing the static catalog", () => {
+    const model = buildCapabilityLibrary(AGENT_CAPABILITIES, catalogCapabilityPacks());
+    const resolved = model[15]!;
+    const staticCapability = AGENT_CAPABILITIES[15]!;
+
+    expectTypeOf(model).toEqualTypeOf<ReadonlyArray<CapabilityLibraryItem>>();
+    if (false) {
+      // @ts-expect-error The resolved collection is readonly.
+      model.push(resolved);
+      // @ts-expect-error Server-owned resolved fields are readonly.
+      resolved.status = "executable";
+      // @ts-expect-error Resolved nested arrays are readonly.
+      resolved.audiences.push("mutated audience");
+    }
+    expect(resolved.audiences).not.toBe(staticCapability.audiences);
+    expect(resolved.outputs).not.toBe(staticCapability.outputs);
+    expect(resolved.suggestedInputs).not.toBe(staticCapability.suggestedInputs);
+
+    (resolved.audiences as string[])[0] = "mutated resolved audience";
+    expect(staticCapability.audiences[0]).toBe("客户、商务、工程师");
   });
 
   it("keeps a non-executable server status authoritative", () => {
@@ -249,8 +336,13 @@ describe("Agent Center model", () => {
   });
 
   it("fails loudly when static catalog ids are missing or duplicated", () => {
-    const missingCatalogId = AGENT_CAPABILITIES.map((capability) => ({ ...capability }));
-    delete (missingCatalogId[0] as Partial<AgentCapability>).catalogId;
+    const firstCapability = AGENT_CAPABILITIES[0];
+    if (!firstCapability) throw new Error("Static capability fixture is empty");
+    const { catalogId: _catalogId, ...withoutCatalogId } = firstCapability;
+    const missingCatalogId = [
+      withoutCatalogId,
+      ...AGENT_CAPABILITIES.slice(1),
+    ] satisfies ReadonlyArray<CapabilityLibrarySource>;
     const duplicateCatalogId = AGENT_CAPABILITIES.map((capability) => ({ ...capability }));
     duplicateCatalogId[1]!.catalogId = duplicateCatalogId[0]!.catalogId;
 
@@ -259,6 +351,16 @@ describe("Agent Center model", () => {
     );
     expect(() => buildCapabilityLibrary(duplicateCatalogId, catalogCapabilityPacks())).toThrow(
       "Duplicate static catalogId 'catalog-capability:001'",
+    );
+  });
+
+  it("fails loudly with a precise malformed static catalog id diagnostic", () => {
+    const malformedCatalogId = AGENT_CAPABILITIES.map((capability, index) =>
+      index === 0 ? { ...capability, catalogId: 42 } : capability
+    ) satisfies ReadonlyArray<CapabilityLibrarySource>;
+
+    expect(() => buildCapabilityLibrary(malformedCatalogId, catalogCapabilityPacks())).toThrow(
+      "Static capability '1' has malformed catalogId '42'",
     );
   });
 
@@ -273,7 +375,7 @@ describe("Agent Center model", () => {
     );
   });
 
-  it("places the unique lead first and never duplicates it in members", () => {
+  it("places the authoritative lead first and only removes its duplicate instance", () => {
     const lead = workAgent("lead", "agent-instance:lead");
     const researcher = workAgent("researcher", "agent-instance:researcher");
     const duplicateLead = workAgent("lead", "agent-instance:duplicate-lead");
@@ -285,10 +387,15 @@ describe("Agent Center model", () => {
 
     const model = buildTeamModel(team);
 
-    expect(model.map(({ roleKind }) => roleKind)).toEqual(["lead", "researcher"]);
+    expect(model.map(({ roleKind }) => roleKind)).toEqual([
+      "lead",
+      "researcher",
+      "lead",
+    ]);
     expect(model.map(({ instance }) => instance.id)).toEqual([
       "agent-instance:lead",
       "agent-instance:researcher",
+      "agent-instance:duplicate-lead",
     ]);
   });
 
