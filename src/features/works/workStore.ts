@@ -187,13 +187,29 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
 
     if (mutation.type === "startResponse") {
       const { run, userMessage } = mutation.output;
+      if (!run || !userMessage.runId) {
+        return state;
+      }
+      const timelineMessage: MessageSummary = {
+        id: userMessage.id,
+        workId: userMessage.workId,
+        runId: userMessage.runId,
+        role: userMessage.role,
+        content: userMessage.content,
+        resourceIds: userMessage.resourceIds,
+        createdAt: userMessage.createdAt,
+      };
       registerRun(run.workId, run.id, run.createdAt);
-      registerRun(userMessage.workId, userMessage.runId, userMessage.createdAt);
+      registerRun(
+        timelineMessage.workId,
+        timelineMessage.runId,
+        timelineMessage.createdAt,
+      );
       const timelines = {
         ...state.timelines,
         [run.workId]: mergeTimeline(
           state.timelines[run.workId] ?? [],
-          [userMessage],
+          [timelineMessage],
         ),
       };
       const previousLatestRun = state.latestRuns[run.workId];

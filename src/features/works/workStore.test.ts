@@ -12,7 +12,10 @@ import type {
   WorkSummary,
 } from "../../bindings";
 import { isWorkEventTimelineItem } from "../../domain/work";
-import { createMockTauriClient } from "../../test/mockTauriClient";
+import {
+  assignmentSummary,
+  createMockTauriClient,
+} from "../../test/mockTauriClient";
 import {
   createWorkStore,
   didPersistStartInstruction,
@@ -106,6 +109,8 @@ const unusedClient: PiWorkClient = {
 const run: RunSummary = {
   id: "r1",
   workId: "w1",
+  assignmentId: "assignment-1",
+  agentInstanceId: "agent-1",
   engineKind: "codex",
   engineSessionId: null,
   modelLabel: "gpt-5",
@@ -740,6 +745,7 @@ describe("createWorkStore", () => {
       startedAt: null,
     };
     const output: StartWorkOutput = {
+      assignment: assignmentSummary({ id: "assignment-1", workId: "w1" }),
       run: queuedRun,
       userMessage: userMessage(),
     };
@@ -764,8 +770,45 @@ describe("createWorkStore", () => {
     expect(store.getState().timelines.w1).toEqual([output.userMessage]);
   });
 
+  it("does not project a queued assignment as a legacy run", async () => {
+    const output: StartWorkOutput = {
+      assignment: assignmentSummary({
+        id: "assignment-queued",
+        workId: "w1",
+        status: "queued",
+        startedAt: null,
+      }),
+      run: null,
+      userMessage: {
+        id: "message-queued",
+        workId: "w1",
+        assignmentId: "assignment-queued",
+        role: "user",
+        content: "Queue it",
+        resourceIds: [],
+        createdAt: "2026-07-28T09:00:01.000Z",
+      },
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      startWork: async () => output,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+
+    await store.getState().startWork("w1", "Queue it");
+
+    expect(store.getState().works.w1).toEqual(work);
+    expect(store.getState().latestRuns.w1).toBeUndefined();
+    expect(store.getState().timelines.w1).toBeUndefined();
+  });
+
   it("deduplicates the same authoritative message across live start and hydration", async () => {
-    const output: StartWorkOutput = { run, userMessage: userMessage() };
+    const output: StartWorkOutput = {
+      assignment: assignmentSummary({ id: "assignment-1", workId: "w1" }),
+      run,
+      userMessage: userMessage(),
+    };
     const client: PiWorkClient = {
       ...unusedClient,
       startWork: async () => output,
@@ -773,7 +816,7 @@ describe("createWorkStore", () => {
       getWork: async () => ({
         summary: work,
         runs: [run],
-        messages: [output.userMessage],
+        messages: [userMessage()],
         events: [event(1, { type: "runStarted", modelLabel: "gpt-5" })],
       }),
     };
@@ -1065,7 +1108,11 @@ describe("createWorkStore", () => {
 
     store.getState().selectWork("w1");
     const starting = store.getState().startWork("w1", "go");
-    startResult.resolve({ run, userMessage: userMessage({ content: "go" }) });
+    startResult.resolve({
+      assignment: assignmentSummary({ id: "assignment-1", workId: "w1" }),
+      run,
+      userMessage: userMessage({ content: "go" }),
+    });
     await starting;
 
     expect(store.getState().loading).toBe(true);
@@ -1094,7 +1141,11 @@ describe("createWorkStore", () => {
         limitations: [],
       }),
     );
-    startResult.resolve({ run, userMessage: userMessage({ content: "go" }) });
+    startResult.resolve({
+      assignment: assignmentSummary({ id: "assignment-1", workId: "w1" }),
+      run,
+      userMessage: userMessage({ content: "go" }),
+    });
     await starting;
 
     expect(store.getState().works.w1).toMatchObject({

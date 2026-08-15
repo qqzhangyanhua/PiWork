@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PiWorkClient } from "../../app/tauriClient";
 import type { WorkEventEnvelope } from "../../bindings";
+import { assignmentSummary } from "../../test/mockTauriClient";
 import { WorkStoreProvider, useWorkStore } from "./WorkStoreProvider";
 import { useWorkEvents } from "./useWorkEvents";
 
@@ -264,9 +265,12 @@ describe("useWorkEvents", () => {
           events: [],
         }),
         startWork: async () => ({
+          assignment: assignmentSummary({ id: "assignment-1", workId: "w1" }),
           run: {
             id: "r1",
             workId: "w1",
+            assignmentId: "assignment-1",
+            agentInstanceId: "agent-1",
             engineKind: "codex",
             engineSessionId: null,
             modelLabel: "gpt-5",
@@ -316,9 +320,12 @@ describe("useWorkEvents", () => {
         return starts === 1
           ? firstStart.promise
           : Promise.resolve({
+              assignment: assignmentSummary({ id: "assignment-2", workId: "w1" }),
               run: {
                 id: "r2",
                 workId: "w1",
+                assignmentId: "assignment-2",
+                agentInstanceId: "agent-1",
                 engineKind: "codex",
                 engineSessionId: null,
                 modelLabel: "gpt-5",

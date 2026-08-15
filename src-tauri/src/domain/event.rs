@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use ts_rs::TS;
 
+use super::assignment::QueueControlMode;
+
 macro_rules! binding_path {
     () => {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../src/bindings/")
@@ -222,6 +224,71 @@ pub enum WorkEventPayload {
     RawEngineEvent {
         kind: String,
         payload_json: String,
+    },
+    AssignmentQueued {
+        assignment_id: String,
+        assigned_agent_id: String,
+        title: String,
+        priority: u32,
+    },
+    AssignmentClaimed {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: String,
+    },
+    AssignmentStarted {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: String,
+        run_id: String,
+    },
+    AssignmentWaiting {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: String,
+        reason: String,
+    },
+    AssignmentRetryScheduled {
+        assignment_id: String,
+        agent_instance_id: String,
+        attempt_count: u32,
+        next_attempt_at: DateTime<Utc>,
+        reason: String,
+    },
+    AssignmentCompleted {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: String,
+        result_summary: String,
+    },
+    AssignmentFailed {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: String,
+        error: String,
+    },
+    AssignmentInterrupted {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: Option<String>,
+        reason: String,
+    },
+    AssignmentDeadLettered {
+        assignment_id: String,
+        agent_instance_id: String,
+        attempt_count: u32,
+        error: String,
+    },
+    AssignmentRecoveryRequired {
+        assignment_id: String,
+        agent_instance_id: String,
+        recovery_reason: String,
+    },
+    QueueControlApplied {
+        mode: QueueControlMode,
+        assignment_id: String,
+        replaced_assignment_id: Option<String>,
+        summary: String,
     },
 }
 
@@ -516,6 +583,103 @@ mod tests {
 
             let round_trip: WorkEventPayload = serde_json::from_value(serialized).unwrap();
             assert_eq!(round_trip, payload);
+        }
+    }
+
+    #[test]
+    fn assignment_payloads_use_product_discriminators_without_scheduler_internals() {
+        let retry_at = Utc.with_ymd_and_hms(2026, 8, 15, 4, 5, 0).unwrap();
+        let cases = vec![
+            WorkEventPayload::AssignmentQueued {
+                assignment_id: "assignment-1".into(),
+                assigned_agent_id: "agent-1".into(),
+                title: "Investigate".into(),
+                priority: 10,
+            },
+            WorkEventPayload::AssignmentClaimed {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: "session-1".into(),
+            },
+            WorkEventPayload::AssignmentStarted {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: "session-1".into(),
+                run_id: "run-1".into(),
+            },
+            WorkEventPayload::AssignmentWaiting {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: "session-1".into(),
+                reason: "approval".into(),
+            },
+            WorkEventPayload::AssignmentRetryScheduled {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                attempt_count: 2,
+                next_attempt_at: retry_at,
+                reason: "transient failure".into(),
+            },
+            WorkEventPayload::AssignmentCompleted {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: "session-1".into(),
+                result_summary: "done".into(),
+            },
+            WorkEventPayload::AssignmentFailed {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: "session-1".into(),
+                error: "failed".into(),
+            },
+            WorkEventPayload::AssignmentInterrupted {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: Some("session-1".into()),
+                reason: "replaced".into(),
+            },
+            WorkEventPayload::AssignmentDeadLettered {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                attempt_count: 3,
+                error: "exhausted".into(),
+            },
+            WorkEventPayload::AssignmentRecoveryRequired {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                recovery_reason: "unknown side effect".into(),
+            },
+            WorkEventPayload::QueueControlApplied {
+                mode: crate::domain::assignment::QueueControlMode::InterruptAndReplace,
+                assignment_id: "assignment-2".into(),
+                replaced_assignment_id: Some("assignment-1".into()),
+                summary: "replacement queued".into(),
+            },
+        ];
+        let expected = [
+            "assignmentQueued",
+            "assignmentClaimed",
+            "assignmentStarted",
+            "assignmentWaiting",
+            "assignmentRetryScheduled",
+            "assignmentCompleted",
+            "assignmentFailed",
+            "assignmentInterrupted",
+            "assignmentDeadLettered",
+            "assignmentRecoveryRequired",
+            "queueControlApplied",
+        ];
+
+        for (payload, expected_discriminator) in cases.into_iter().zip(expected) {
+            let value = serde_json::to_value(&payload).unwrap();
+            assert_eq!(value["type"], expected_discriminator);
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(!json.contains("slot"));
+            assert!(!json.contains("permit"));
+            assert_eq!(
+                serde_json::from_value::<WorkEventPayload>(value).unwrap(),
+                payload
+            );
         }
     }
 

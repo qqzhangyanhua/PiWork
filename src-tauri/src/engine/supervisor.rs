@@ -364,7 +364,18 @@ async fn run_lifecycle(
             return;
         }
     };
-    let run = started.run;
+    let assignment = started.assignment;
+    let run = match started.run {
+        Some(run) => run,
+        None => {
+            remove_active(&active, &work_id, generation).await;
+            let _ = result_sender.send(Err(AppError::engine_start_failed_with_reason(
+                &work_id,
+                "run was not created for immediate execution",
+            )));
+            return;
+        }
+    };
     let user_message = started.user_message;
     set_run_id(&active, &work_id, generation, &run.id).await;
 
@@ -547,7 +558,8 @@ async fn run_lifecycle(
         return;
     }
     let _ = result_sender.send(Ok(StartWorkOutput {
-        run: attached,
+        assignment,
+        run: Some(attached),
         user_message,
     }));
 
@@ -1201,20 +1213,26 @@ mod tests {
 
         assert_eq!(first.version, 2);
         assert!(first.event_id.is_some());
-        assert_eq!(first.turn_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(
+            first.turn_id.as_deref(),
+            Some(started.run.as_ref().expect("immediate run").id.as_str())
+        );
         assert_eq!(first.session_id.as_deref(), Some("fake-session"));
         assert_eq!(
             first.correlation_id.as_deref(),
-            Some(started.run.id.as_str())
+            Some(started.run.as_ref().expect("immediate run").id.as_str())
         );
         assert_eq!(first.causation_id, None);
         assert_eq!(second.version, 2);
         assert!(second.event_id.is_some());
-        assert_eq!(second.turn_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(
+            second.turn_id.as_deref(),
+            Some(started.run.as_ref().expect("immediate run").id.as_str())
+        );
         assert_eq!(second.session_id.as_deref(), Some("fake-session"));
         assert_eq!(
             second.correlation_id.as_deref(),
-            Some(started.run.id.as_str())
+            Some(started.run.as_ref().expect("immediate run").id.as_str())
         );
         assert_eq!(second.causation_id, first.event_id);
     }

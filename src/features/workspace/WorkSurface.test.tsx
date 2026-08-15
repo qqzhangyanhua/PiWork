@@ -14,6 +14,7 @@ import type {
 } from "../../bindings";
 import { i18n } from "../../i18n";
 import {
+  assignmentSummary,
   createMockTauriClient,
   runCompletedEvent,
 } from "../../test/mockTauriClient";
@@ -532,9 +533,12 @@ describe("WorkSurface", () => {
 
     expect(client.startWork).toHaveBeenCalledTimes(1);
     pendingRun.resolve({
+      assignment: assignmentSummary({ id: "assignment-1", workId: "work-1" }),
       run: {
         id: "run-1",
         workId: "work-1",
+        assignmentId: "assignment-1",
+        agentInstanceId: "agent-1",
         engineKind: "fake",
         engineSessionId: "session-1",
         modelLabel: "Fake model",
@@ -547,6 +551,7 @@ describe("WorkSurface", () => {
         id: "message-1",
         workId: "work-1",
         runId: "run-1",
+        assignmentId: "assignment-1",
         role: "user",
         content: "只执行一次",
         resourceIds: [],
@@ -564,6 +569,8 @@ describe("WorkSurface", () => {
     const failedRun: RunSummary = {
       id: "run-1",
       workId: "work-1",
+      assignmentId: "assignment-1",
+      agentInstanceId: "agent-1",
       engineKind: "fake",
       engineSessionId: null,
       modelLabel: "Fake model",
@@ -702,6 +709,8 @@ describe("WorkSurface", () => {
       {
         id: "run-1",
         workId: "work-1",
+        assignmentId: "assignment-1",
+        agentInstanceId: "agent-1",
         engineKind: "fake",
         engineSessionId: "session-1",
         modelLabel: "Fake model",
@@ -713,6 +722,8 @@ describe("WorkSurface", () => {
       {
         id: "run-2",
         workId: "work-1",
+        assignmentId: "assignment-2",
+        agentInstanceId: "agent-1",
         engineKind: "fake",
         engineSessionId: "session-2",
         modelLabel: "Fake model",
@@ -1274,6 +1285,8 @@ describe("WorkSurface", () => {
     detail.runs = [{
       id: "run-1",
       workId: "work-1",
+      assignmentId: "assignment-1",
+      agentInstanceId: "agent-1",
       engineKind: "codex",
       engineSessionId: "session-1",
       modelLabel: "gpt-5.6-sol",

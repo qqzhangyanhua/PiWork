@@ -8,8 +8,8 @@ use piwork_lib::{
         agent::PermissionPolicy,
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{
-            CreateWorkInput, MessageRole, PermissionMode, RunStatus, StartWorkInput, WorkDetail,
-            WorkStatus,
+            CreateWorkInput, MessageRole, PermissionMode, RunStatus, RunSummary, StartWorkInput,
+            StartWorkOutput, WorkDetail, WorkStatus,
         },
     },
     engine::{
@@ -29,6 +29,10 @@ struct TestHarness {
     pool: sqlx::SqlitePool,
     repository: WorkRepository,
     workspace_path: std::path::PathBuf,
+}
+
+fn immediate_run(output: &StartWorkOutput) -> &RunSummary {
+    output.run.as_ref().expect("immediate execution has a run")
 }
 
 struct StartCountingEngine {
@@ -915,7 +919,7 @@ async fn stopping_an_active_work_aborts_once_and_persists_stopped_state() {
 
     assert_eq!(engine.abort_calls(), 1);
     assert_eq!(detail.summary.status, WorkStatus::Stopped);
-    assert_eq!(detail.runs[0].id, started.run.id);
+    assert_eq!(detail.runs[0].id, immediate_run(&started).id);
     assert_eq!(detail.runs[0].status, RunStatus::Stopped);
     assert!(detail.runs[0].completed_at.is_some());
     assert_authoritative_prompt(&detail, "Keep working", RunStatus::Stopped);
@@ -992,8 +996,12 @@ async fn receiver_observes_exact_event_id_only_after_it_is_journaled() {
         .await
         .unwrap();
     let event = published.recv().await.unwrap();
-    assert_eq!(event.run_id, run.id);
-    let persisted = harness.repository.events_for_run(&run.id).await.unwrap();
+    assert_eq!(event.run_id, immediate_run(&run).id);
+    let persisted = harness
+        .repository
+        .events_for_run(&immediate_run(&run).id)
+        .await
+        .unwrap();
     assert!(event.event_id.is_some());
     assert!(
         persisted
@@ -1033,7 +1041,7 @@ async fn start_work_returns_before_the_engine_stream_finishes() {
     .expect("start_work waited for the engine event stream")
     .unwrap();
 
-    assert_eq!(run.status, RunStatus::Running);
+    assert_eq!(immediate_run(&run).status, RunStatus::Running);
 }
 
 struct BlockingStartEngine {
@@ -1334,7 +1342,11 @@ async fn adapter_can_fill_more_than_the_engine_channel_before_start_returns() {
     .expect("adapter.start deadlocked against the bounded event channel")
     .unwrap();
     let events = receive_complete_run(&mut published).await;
-    let persisted = harness.repository.events_for_run(&run.id).await.unwrap();
+    let persisted = harness
+        .repository
+        .events_for_run(&immediate_run(&run).id)
+        .await
+        .unwrap();
 
     assert_eq!(events.len(), 22);
     assert_eq!(persisted.len(), 22);
@@ -1585,7 +1597,7 @@ async fn channel_close_before_terminal_is_journaled_as_a_failed_run() {
     assert_eq!(failed.sequence, 2);
     assert!(matches!(failed.payload, WorkEventPayload::RunFailed { .. }));
     assert_eq!(detail.summary.status, WorkStatus::Failed);
-    assert_eq!(detail.runs[0].id, run.id);
+    assert_eq!(detail.runs[0].id, immediate_run(&run).id);
     assert_eq!(detail.runs[0].status, RunStatus::Failed);
 
     supervisor
@@ -1641,7 +1653,7 @@ async fn fake_run_completes_with_the_stable_result_payload_and_terminal_state() 
             && limitations == &["fake engine only"]
     ));
     assert_eq!(detail.summary.status, WorkStatus::Completed);
-    assert_eq!(detail.runs[0].id, run.id);
+    assert_eq!(detail.runs[0].id, immediate_run(&run).id);
     assert_eq!(detail.runs[0].status, RunStatus::Completed);
     assert!(detail.runs[0].completed_at.is_some());
 }
@@ -1699,7 +1711,7 @@ async fn completed_work_can_start_a_second_run_with_fresh_sequence_numbers() {
         .unwrap()
         .unwrap();
 
-    assert_ne!(first.id, second.id);
+    assert_ne!(immediate_run(&first).id, immediate_run(&second).id);
     assert_eq!(first_events[0].sequence, 1);
     assert_eq!(second_events[0].sequence, 1);
     assert_eq!(detail.runs.len(), 2);
@@ -1736,10 +1748,28 @@ async fn begin_run_returns_the_authoritative_user_message_and_get_replays_it() {
         .unwrap();
 
     assert_eq!(started.user_message.work_id, work.summary.id);
-    assert_eq!(started.user_message.run_id, started.run.id);
-    assert_eq!(started.user_message.role, MessageRole::User);
+    assert!(started.assignment.id.starts_with("legacy-run:"));
+    assert_eq!(
+        started.assignment.status,
+        piwork_lib::domain::assignment::AssignmentStatus::Running
+    );
+    assert!(started.assignment.context_manifest.is_null());
+    assert!(started.assignment.permission_scope.is_null());
+    assert_eq!(immediate_run(&started).assignment_id, None);
+    assert_eq!(immediate_run(&started).agent_instance_id, None);
+    assert_eq!(
+        started.user_message.assignment_id.as_deref(),
+        Some(started.assignment.id.as_str())
+    );
+    assert_eq!(
+        started.user_message.run_id.as_deref(),
+        Some(immediate_run(&started).id.as_str())
+    );
     assert_eq!(started.user_message.content, "Keep this user instruction");
-    assert_eq!(detail.messages, vec![started.user_message]);
+    assert_eq!(detail.messages.len(), 1);
+    assert_eq!(detail.messages[0].id, started.user_message.id);
+    assert_eq!(detail.messages[0].role, MessageRole::User);
+    assert_eq!(detail.messages[0].content, started.user_message.content);
 }
 
 #[tokio::test]
@@ -1770,7 +1800,7 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
             version: 1,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
-            run_id: first.run.id.clone(),
+            run_id: immediate_run(&first).id.clone(),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1809,8 +1839,8 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
             .map(|message| (&message.run_id, message.content.as_str()))
             .collect::<Vec<_>>(),
         vec![
-            (&first.run.id, "First prompt"),
-            (&second.run.id, "Second prompt"),
+            (&immediate_run(&first).id, "First prompt"),
+            (&immediate_run(&second).id, "Second prompt"),
         ]
     );
 }
@@ -1856,9 +1886,12 @@ async fn engine_execution_identity_survives_database_reopen() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(detail.runs[0].id, started.id);
+    assert_eq!(detail.runs[0].id, immediate_run(&started).id);
     assert_eq!(detail.runs[0].engine_kind, "fake");
-    assert_eq!(detail.runs[0].engine_session_id, started.engine_session_id);
+    assert_eq!(
+        detail.runs[0].engine_session_id,
+        immediate_run(&started).engine_session_id
+    );
     assert!(detail.runs[0].engine_session_id.is_some());
     assert_eq!(detail.runs[0].model_label, "Fake model");
 }
@@ -1962,7 +1995,11 @@ async fn publisher_failure_does_not_stop_the_persisted_event_stream() {
         .unwrap();
     let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let events = harness.repository.events_for_run(&run.id).await.unwrap();
+            let events = harness
+                .repository
+                .events_for_run(&immediate_run(&run).id)
+                .await
+                .unwrap();
             if events.len() == 8 {
                 return events;
             }
@@ -2003,7 +2040,7 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
         version: 1,
         event_id: Some(Uuid::new_v4().to_string()),
         work_id: work.summary.id.clone(),
-        run_id: run.id.clone(),
+        run_id: immediate_run(&run).id.clone(),
         turn_id: None,
         session_id: None,
         agent_id: None,
@@ -2029,7 +2066,11 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
         .await
         .expect("consumer did not publish its finalized failure")
         .unwrap();
-    let events = harness.repository.events_for_run(&run.id).await.unwrap();
+    let events = harness
+        .repository
+        .events_for_run(&immediate_run(&run).id)
+        .await
+        .unwrap();
 
     assert_eq!(failed.sequence, 2);
     assert!(matches!(failed.payload, WorkEventPayload::RunFailed { .. }));
@@ -2140,7 +2181,8 @@ async fn publisher_panic_aborts_the_engine_once_and_gets_a_durable_failure_fallb
 
     assert_eq!(detail.runs[0].status, RunStatus::Failed);
     assert!(detail.events.iter().any(|event| {
-        event.run_id == run.id && matches!(event.payload, WorkEventPayload::RunFailed { .. })
+        event.run_id == immediate_run(&run).id
+            && matches!(event.payload, WorkEventPayload::RunFailed { .. })
     }));
     assert_eq!(engine.abort_calls(), 1);
     wait_for_no_controlled_producers(&engine).await;
@@ -2159,7 +2201,7 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
         version: 1,
         event_id: Some(Uuid::new_v4().to_string()),
         work_id: work.summary.id.clone(),
-        run_id: run.id.clone(),
+        run_id: immediate_run(&run).id.clone(),
         turn_id: None,
         session_id: None,
         agent_id: None,
@@ -2193,7 +2235,7 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
             version: 1,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
-            run_id: run.id.clone(),
+            run_id: immediate_run(&run).id.clone(),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -2214,7 +2256,11 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
             "invalid_work_state"
         );
     }
-    let events = harness.repository.events_for_run(&run.id).await.unwrap();
+    let events = harness
+        .repository
+        .events_for_run(&immediate_run(&run).id)
+        .await
+        .unwrap();
 
     assert_eq!(events, vec![completed]);
 }

@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod assignment;
 pub mod environment;
 pub mod event;
 pub mod resource;
@@ -17,6 +18,11 @@ mod tests {
             PermissionPolicy, RoleKind, RoleTemplateSummary, SaveAgentAssemblyInput,
             WorkAgentStatus, WorkAgentSummary, WorkTeamSummary,
         },
+        assignment::{
+            AgentSessionStatus, AgentSessionSummary, AssignmentKind, AssignmentSideEffect,
+            AssignmentStatus, AssignmentSummary, InterruptWorkInput, QueueControlMode,
+            QueueWorkInput, SteerAssignmentInput, UserMessageSummary,
+        },
         environment::{RuntimeCheck, RuntimeStatus},
         event::{
             LivenessState, PermissionOutcome, SessionTransition, WorkEventEnvelope,
@@ -31,6 +37,23 @@ mod tests {
             StartWorkOutput, WorkDetail, WorkStatus, WorkSummary,
         },
     };
+
+    #[test]
+    fn assignment_contract_types_are_exportable() {
+        fn assert_exportable<T: TS>() {}
+
+        assert_exportable::<AssignmentStatus>();
+        assert_exportable::<AssignmentKind>();
+        assert_exportable::<AssignmentSideEffect>();
+        assert_exportable::<AgentSessionStatus>();
+        assert_exportable::<QueueControlMode>();
+        assert_exportable::<AssignmentSummary>();
+        assert_exportable::<AgentSessionSummary>();
+        assert_exportable::<QueueWorkInput>();
+        assert_exportable::<SteerAssignmentInput>();
+        assert_exportable::<InterruptWorkInput>();
+        assert_exportable::<UserMessageSummary>();
+    }
 
     fn bindings_semantically_equal(before: &str, after: &str) -> bool {
         before.replace("\r\n", "\n") == after.replace("\r\n", "\n")
@@ -78,6 +101,17 @@ mod tests {
         WorkTeamSummary::export().unwrap();
         AssemblyDiagnostic::export().unwrap();
         SaveAgentAssemblyInput::export().unwrap();
+        AssignmentStatus::export().unwrap();
+        AssignmentKind::export().unwrap();
+        AssignmentSideEffect::export().unwrap();
+        AgentSessionStatus::export().unwrap();
+        QueueControlMode::export().unwrap();
+        AssignmentSummary::export().unwrap();
+        AgentSessionSummary::export().unwrap();
+        QueueWorkInput::export().unwrap();
+        SteerAssignmentInput::export().unwrap();
+        InterruptWorkInput::export().unwrap();
+        UserMessageSummary::export().unwrap();
         RuntimeCheck::export().unwrap();
         RuntimeStatus::export().unwrap();
         WorkStatus::export().unwrap();
@@ -126,6 +160,17 @@ mod tests {
             "WorkTeamSummary",
             "AssemblyDiagnostic",
             "SaveAgentAssemblyInput",
+            "AssignmentStatus",
+            "AssignmentKind",
+            "AssignmentSideEffect",
+            "AgentSessionStatus",
+            "QueueControlMode",
+            "AssignmentSummary",
+            "AgentSessionSummary",
+            "QueueWorkInput",
+            "SteerAssignmentInput",
+            "InterruptWorkInput",
+            "UserMessageSummary",
             "RuntimeCheck",
             "RuntimeStatus",
             "WorkStatus",
@@ -191,6 +236,26 @@ mod tests {
                 "binding index is missing {type_name}"
             );
         }
+        for type_name in [
+            "AssignmentStatus",
+            "AssignmentKind",
+            "AssignmentSideEffect",
+            "AgentSessionStatus",
+            "QueueControlMode",
+            "AssignmentSummary",
+            "AgentSessionSummary",
+            "QueueWorkInput",
+            "SteerAssignmentInput",
+            "InterruptWorkInput",
+            "UserMessageSummary",
+        ] {
+            assert!(
+                binding_index.contains(&format!(
+                    "export type {{ {type_name} }} from \"./{type_name}\";"
+                )),
+                "binding index is missing {type_name}"
+            );
+        }
 
         let envelope = std::fs::read_to_string(output_dir.join("WorkEventEnvelope.ts")).unwrap();
         assert!(
@@ -219,6 +284,17 @@ mod tests {
             "validationProduced",
             "usageUpdated",
             "rawEngineEvent",
+            "assignmentQueued",
+            "assignmentClaimed",
+            "assignmentStarted",
+            "assignmentWaiting",
+            "assignmentRetryScheduled",
+            "assignmentCompleted",
+            "assignmentFailed",
+            "assignmentInterrupted",
+            "assignmentDeadLettered",
+            "assignmentRecoveryRequired",
+            "queueControlApplied",
         ] {
             assert!(
                 payload.contains(&format!("\"type\": \"{discriminator}\"")),
@@ -251,7 +327,19 @@ mod tests {
         assert!(work.contains("id: string"));
 
         let run = std::fs::read_to_string(output_dir.join("RunSummary.ts")).unwrap();
-        assert!(run.contains("id: string") && run.contains("workId: string"));
+        assert!(
+            run.contains("id: string")
+                && run.contains("workId: string")
+                && run.contains("assignmentId: string | null")
+                && run.contains("agentInstanceId: string | null")
+        );
+
+        let start = std::fs::read_to_string(output_dir.join("StartWorkOutput.ts")).unwrap();
+        assert!(
+            start.contains("assignment: AssignmentSummary")
+                && start.contains("run: RunSummary | null")
+                && start.contains("userMessage: UserMessageSummary")
+        );
 
         let permission = std::fs::read_to_string(output_dir.join("PermissionMode.ts")).unwrap();
         assert!(permission.contains("\"ask_every_step\" | \"balanced\" | \"auto_execute\""));

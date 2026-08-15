@@ -520,6 +520,19 @@ const processActivityEventIntoDraft = (
         payloadJson: payload.payloadJson,
       });
       return;
+
+    case "assignmentQueued":
+    case "assignmentClaimed":
+    case "assignmentStarted":
+    case "assignmentWaiting":
+    case "assignmentRetryScheduled":
+    case "assignmentCompleted":
+    case "assignmentFailed":
+    case "assignmentInterrupted":
+    case "assignmentDeadLettered":
+    case "assignmentRecoveryRequired":
+    case "queueControlApplied":
+      return;
   }
 
   return assertNever(payload);

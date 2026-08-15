@@ -6,6 +6,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
+        assignment::{
+            AssignmentKind, AssignmentSideEffect, AssignmentStatus, AssignmentSummary,
+            UserMessageSummary,
+        },
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{
             CreateWorkInput, MessageRole, MessageSummary, PermissionMode, RunStatus, RunSummary,
@@ -338,6 +342,8 @@ impl WorkRepository {
         let run = RunSummary {
             id: Uuid::new_v4().to_string(),
             work_id: work_id.to_owned(),
+            assignment_id: None,
+            agent_instance_id: None,
             engine_kind: "manual".into(),
             engine_session_id: None,
             model_label: model_label.to_owned(),
@@ -434,10 +440,22 @@ impl WorkRepository {
             .map_err(|_| AppError::invalid_work_state(work_id, work.status, WorkStatus::Queued))?;
         let running = transition(queued, WorkAction::Start)
             .map_err(|_| AppError::invalid_work_state(work_id, queued, WorkStatus::Running))?;
+        let assigned_agent_id = sqlx::query_scalar::<_, String>(
+            "SELECT agent_instance_id FROM work_agents \
+             WHERE work_id = ? AND role_kind = 'lead' AND status = 'joined'",
+        )
+        .bind(work_id)
+        .fetch_one(&mut *transaction)
+        .await?;
         let now = Utc::now();
+        let run_id = Uuid::new_v4().to_string();
+        let assignment =
+            legacy_compatibility_assignment(&work, prompt, &assigned_agent_id, &run_id, now);
         let run = RunSummary {
-            id: Uuid::new_v4().to_string(),
+            id: run_id,
             work_id: work_id.to_owned(),
+            assignment_id: None,
+            agent_instance_id: None,
             engine_kind: engine_kind.to_owned(),
             engine_session_id: None,
             model_label: model_label.to_owned(),
@@ -446,10 +464,11 @@ impl WorkRepository {
             started_at: Some(now),
             completed_at: None,
         };
-        let user_message = MessageSummary {
+        let user_message = UserMessageSummary {
             id: Uuid::new_v4().to_string(),
             work_id: work_id.to_owned(),
-            run_id: run.id.clone(),
+            assignment_id: Some(assignment.id.clone()),
+            run_id: Some(run.id.clone()),
             role: MessageRole::User,
             content: prompt.to_owned(),
             resource_ids: resource_ids.clone(),
@@ -489,7 +508,7 @@ impl WorkRepository {
         )
         .bind(&user_message.id)
         .bind(&user_message.work_id)
-        .bind(&user_message.run_id)
+        .bind(user_message.run_id.as_deref().expect("new run has an id"))
         .bind(&user_message.content)
         .bind(user_message.created_at)
         .execute(&mut *transaction)
@@ -511,7 +530,11 @@ impl WorkRepository {
         }
         transaction.commit().await?;
 
-        Ok(StartWorkOutput { run, user_message })
+        Ok(StartWorkOutput {
+            assignment,
+            run: Some(run),
+            user_message,
+        })
     }
 
     pub async fn append_event_and_transition(
@@ -1022,6 +1045,48 @@ impl WorkRepository {
     }
 }
 
+// Delete this adapter when C9 switches start acceptance to persisted Assignments.
+// Its namespace and empty execution metadata prevent legacy output from being
+// mistaken for a persisted, schedulable, or recoverable Assignment.
+fn legacy_compatibility_assignment(
+    work: &WorkRow,
+    instruction: &str,
+    assigned_agent_id: &str,
+    run_id: &str,
+    now: DateTime<Utc>,
+) -> AssignmentSummary {
+    AssignmentSummary {
+        id: format!("legacy-run:{run_id}"),
+        work_id: work.id.clone(),
+        parent_assignment_id: None,
+        created_by_agent_id: None,
+        assigned_agent_id: assigned_agent_id.to_owned(),
+        capability_pack_id: None,
+        kind: AssignmentKind::Lead,
+        side_effect: AssignmentSideEffect::Unknown,
+        title: work.title.clone(),
+        instruction: instruction.to_owned(),
+        context_manifest: serde_json::Value::Null,
+        expected_result_schema: serde_json::Value::Null,
+        acceptance_criteria: serde_json::Value::Null,
+        permission_scope: serde_json::Value::Null,
+        priority: 0,
+        status: AssignmentStatus::Running,
+        attempt_count: 1,
+        max_attempts: 1,
+        not_before: None,
+        result_summary: None,
+        last_error: None,
+        next_attempt_at: None,
+        recovery_reason: None,
+        created_at: now,
+        claimed_at: None,
+        started_at: Some(now),
+        completed_at: None,
+        updated_at: now,
+    }
+}
+
 fn work_action_for_target(status: WorkStatus) -> Option<WorkAction> {
     match status {
         WorkStatus::Draft => None,
@@ -1131,6 +1196,8 @@ impl From<RunRow> for RunSummary {
         Self {
             id: row.id,
             work_id: row.work_id,
+            assignment_id: None,
+            agent_instance_id: None,
             engine_kind: row.engine_kind,
             engine_session_id: row.engine_session_id,
             model_label: row.model_label,
@@ -1237,7 +1304,7 @@ mod tests {
         let mut session_attachment = database.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
         sqlx::query("UPDATE runs SET engine_session_id = ? WHERE id = ?")
             .bind("session-1")
-            .bind(&started.run.id)
+            .bind(&started.run.as_ref().expect("immediate run").id)
             .execute(&mut *session_attachment)
             .await
             .unwrap();
@@ -1247,7 +1314,7 @@ mod tests {
             version: 1,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
-            run_id: started.run.id.clone(),
+            run_id: started.run.as_ref().expect("immediate run").id.clone(),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1305,7 +1372,7 @@ mod tests {
             version: 2,
             event_id: Some("event-1".into()),
             work_id: work.summary.id.clone(),
-            run_id: started.run.id.clone(),
+            run_id: started.run.as_ref().expect("immediate run").id.clone(),
             turn_id: Some("turn-1".into()),
             session_id: Some("session-1".into()),
             agent_id: Some("agent-1".into()),
@@ -1326,7 +1393,10 @@ mod tests {
             .await
             .unwrap();
 
-        let loaded = repository.events_for_run(&started.run.id).await.unwrap();
+        let loaded = repository
+            .events_for_run(&started.run.as_ref().expect("immediate run").id)
+            .await
+            .unwrap();
         assert_eq!(loaded, vec![envelope.clone()]);
         let detail = repository.get(&work.summary.id).await.unwrap().unwrap();
         assert_eq!(detail.events, vec![envelope]);
@@ -1356,18 +1426,28 @@ mod tests {
             .unwrap();
 
         let failed = repository
-            .finalize_run_failure(&started.run.id, &work.summary.id, "engine failed")
+            .finalize_run_failure(
+                &started.run.as_ref().expect("immediate run").id,
+                &work.summary.id,
+                "engine failed",
+            )
             .await
             .unwrap();
-        let loaded = repository.events_for_run(&started.run.id).await.unwrap();
+        let loaded = repository
+            .events_for_run(&started.run.as_ref().expect("immediate run").id)
+            .await
+            .unwrap();
 
         assert!(failed.event_id.is_some());
         assert_eq!(failed.event_id, loaded[0].event_id);
         assert_eq!(failed.version, 2);
-        assert_eq!(failed.turn_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(
+            failed.turn_id.as_deref(),
+            Some(started.run.as_ref().expect("immediate run").id.as_str())
+        );
         assert_eq!(
             failed.correlation_id.as_deref(),
-            Some(started.run.id.as_str())
+            Some(started.run.as_ref().expect("immediate run").id.as_str())
         );
         assert_eq!(failed.session_id, None);
         assert_eq!(failed.causation_id, None);
@@ -1398,12 +1478,20 @@ mod tests {
             .await
             .unwrap();
         repository
-            .attach_engine_session(&started.run.id, "test-engine", "test-session")
+            .attach_engine_session(
+                &started.run.as_ref().expect("immediate run").id,
+                "test-engine",
+                "test-session",
+            )
             .await
             .unwrap();
 
         let failed = repository
-            .finalize_run_failure(&started.run.id, &work.summary.id, "engine failed")
+            .finalize_run_failure(
+                &started.run.as_ref().expect("immediate run").id,
+                &work.summary.id,
+                "engine failed",
+            )
             .await
             .unwrap();
 
@@ -1435,7 +1523,11 @@ mod tests {
             .await
             .unwrap();
         repository
-            .attach_engine_session(&started.run.id, "test-engine", "test-session")
+            .attach_engine_session(
+                &started.run.as_ref().expect("immediate run").id,
+                "test-engine",
+                "test-session",
+            )
             .await
             .unwrap();
         let committed_id = Uuid::new_v4().to_string();
@@ -1443,7 +1535,7 @@ mod tests {
             version: 1,
             event_id: Some(committed_id.clone()),
             work_id: work.summary.id.clone(),
-            run_id: started.run.id.clone(),
+            run_id: started.run.as_ref().expect("immediate run").id.clone(),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1473,10 +1565,17 @@ mod tests {
             .unwrap_err();
 
         let failed = repository
-            .finalize_run_failure(&started.run.id, &work.summary.id, "engine failed")
+            .finalize_run_failure(
+                &started.run.as_ref().expect("immediate run").id,
+                &work.summary.id,
+                "engine failed",
+            )
             .await
             .unwrap();
-        let loaded = repository.events_for_run(&started.run.id).await.unwrap();
+        let loaded = repository
+            .events_for_run(&started.run.as_ref().expect("immediate run").id)
+            .await
+            .unwrap();
 
         assert_eq!(failed.version, 2);
         assert_eq!(failed.sequence, 2);
@@ -1512,7 +1611,7 @@ mod tests {
             version: 2,
             event_id: None,
             work_id: work.summary.id,
-            run_id: started.run.id,
+            run_id: started.run.as_ref().expect("immediate run").id.clone(),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1574,7 +1673,7 @@ mod tests {
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&work.summary.id)
-        .bind(&started.run.id)
+        .bind(&started.run.as_ref().expect("immediate run").id)
         .bind(Utc::now())
         .bind(r#"{"type":"runStarted","modelLabel":"test-model"}"#)
         .execute(&mut *event_append)
@@ -1582,7 +1681,7 @@ mod tests {
         .unwrap();
 
         let attach_repository = repository.clone();
-        let run_id = started.run.id.clone();
+        let run_id = started.run.as_ref().expect("immediate run").id.clone();
         let attachment = tokio::spawn(async move {
             attach_repository
                 .attach_engine_session(&run_id, "test-engine", "session-1")

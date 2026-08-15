@@ -2,7 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::event::WorkEventEnvelope;
+use super::{
+    assignment::{AssignmentSummary, UserMessageSummary},
+    event::WorkEventEnvelope,
+};
 
 macro_rules! binding_path {
     () => {
@@ -85,6 +88,8 @@ pub struct RunSummary {
     pub id: String,
     // Canonical UUID string of the owning Work.
     pub work_id: String,
+    pub assignment_id: Option<String>,
+    pub agent_instance_id: Option<String>,
     pub engine_kind: String,
     pub engine_session_id: Option<String>,
     pub model_label: String,
@@ -114,16 +119,9 @@ pub struct MessageSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = binding_path!())]
 pub struct StartWorkOutput {
-    pub run: RunSummary,
-    pub user_message: MessageSummary,
-}
-
-impl std::ops::Deref for StartWorkOutput {
-    type Target = RunSummary;
-
-    fn deref(&self) -> &Self::Target {
-        &self.run
-    }
+    pub assignment: AssignmentSummary,
+    pub run: Option<RunSummary>,
+    pub user_message: UserMessageSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -233,6 +231,8 @@ mod tests {
         let run = RunSummary {
             id: "10000000-0000-0000-0000-000000000000".into(),
             work_id: "20000000-0000-0000-0000-000000000000".into(),
+            assignment_id: Some("assignment-1".into()),
+            agent_instance_id: Some("agent-1".into()),
             engine_kind: "test-engine".into(),
             engine_session_id: Some("session-1".into()),
             model_label: "test-model".into(),
@@ -247,6 +247,8 @@ mod tests {
 
         assert_string(&round_trip.id);
         assert_string(&round_trip.work_id);
+        assert_eq!(round_trip.assignment_id.as_deref(), Some("assignment-1"));
+        assert_eq!(round_trip.agent_instance_id.as_deref(), Some("agent-1"));
         assert_eq!(round_trip, run);
     }
 

@@ -3,6 +3,7 @@ import { vi, type Mock } from "vitest";
 import type { PiWorkClient } from "../app/tauriClient";
 import type {
   AgentInstanceSummary,
+  AssignmentSummary,
   AssemblyDiagnostic,
   CapabilityPackSummary,
   CreateWorkInput,
@@ -17,6 +18,40 @@ import type {
   WorkSummary,
   WorkTeamSummary,
 } from "../bindings";
+
+export const assignmentSummary = (
+  overrides: Partial<AssignmentSummary> = {},
+): AssignmentSummary => ({
+  id: "assignment-1",
+  workId: "work-1",
+  parentAssignmentId: null,
+  createdByAgentId: null,
+  assignedAgentId: "00000000-0000-0000-0000-000000000001",
+  capabilityPackId: null,
+  kind: "lead",
+  sideEffect: "unknown",
+  title: "Run work",
+  instruction: "go",
+  contextManifest: {},
+  expectedResultSchema: {},
+  acceptanceCriteria: [],
+  permissionScope: {},
+  priority: 0,
+  status: "running",
+  attemptCount: 1,
+  maxAttempts: 1,
+  notBefore: null,
+  resultSummary: null,
+  lastError: null,
+  nextAttemptAt: null,
+  recoveryReason: null,
+  createdAt: "2026-07-28T08:00:10.000Z",
+  claimedAt: "2026-07-28T08:00:10.000Z",
+  startedAt: "2026-07-28T08:00:10.000Z",
+  completedAt: null,
+  updatedAt: "2026-07-28T08:00:10.000Z",
+  ...overrides,
+});
 
 export type MockTauriClient = PiWorkClient & {
   getRuntimeStatus: Mock<Required<PiWorkClient>["getRuntimeStatus"]>;
@@ -505,6 +540,8 @@ export const createMockTauriClient = (): MockTauriClient => {
     const run: RunSummary = {
       id,
       workId,
+      assignmentId: `assignment-${runSequence}`,
+      agentInstanceId: "00000000-0000-0000-0000-000000000001",
       engineKind: "fake",
       engineSessionId: `session-${runSequence}`,
       modelLabel: "Fake model",
@@ -526,7 +563,19 @@ export const createMockTauriClient = (): MockTauriClient => {
     detail.messages.push(userMessage);
     detail.summary.status = "running";
     detail.summary.updatedAt = run.createdAt;
-      return { run, userMessage } satisfies StartWorkOutput;
+      return {
+        assignment: assignmentSummary({
+          id: run.assignmentId ?? `assignment-${runSequence}`,
+          workId,
+          instruction: prompt.trim(),
+          createdAt: run.createdAt,
+          claimedAt: run.createdAt,
+          startedAt: run.createdAt,
+          updatedAt: run.createdAt,
+        }),
+        run,
+        userMessage,
+      } satisfies StartWorkOutput;
     },
   );
   const stopWork: Mock<PiWorkClient["stopWork"]> = vi.fn(async (workId) => {
