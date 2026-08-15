@@ -12,7 +12,15 @@ import {
   buildCapabilityLibrary,
   buildTeamModel,
   splitCapabilityPacks,
+  validateCapabilityPackInventory,
 } from "./agentCenterModel";
+
+const SYSTEM_CAPABILITY_PACK_IDS = [
+  "capability-pack:lead-coordination:v1",
+  "capability-pack:source-research:v1",
+  "capability-pack:engineering-execution:v1",
+  "capability-pack:independent-review:v1",
+] as const;
 
 function capabilityPack({
   catalogCapabilityId,
@@ -46,12 +54,25 @@ function capabilityPack({
 function catalogCapabilityPacks(): CapabilityPackSummary[] {
   return Array.from({ length: 96 }, (_, index) => {
     const sequence = String(index + 1).padStart(3, "0");
+    const catalogCapabilityId = `catalog-capability:${sequence}`;
     return capabilityPack({
-      catalogCapabilityId: `catalog-capability:${sequence}`,
-      id: `capability-pack:catalog-${sequence}:v1`,
+      catalogCapabilityId,
+      id: catalogCapabilityId,
       status: "catalog_only",
     });
   });
+}
+
+function systemCapabilityPacks(): CapabilityPackSummary[] {
+  return SYSTEM_CAPABILITY_PACK_IDS.map((id) => capabilityPack({
+    catalogCapabilityId: null,
+    id,
+    status: "executable",
+  }));
+}
+
+function capabilityPacksFixture(): CapabilityPackSummary[] {
+  return [...catalogCapabilityPacks(), ...systemCapabilityPacks()];
 }
 
 function workAgent(
@@ -69,10 +90,10 @@ function workAgent(
 }
 
 describe("Agent Center model", () => {
-  it("splits business catalog packs from system packs without rewriting server status", () => {
+  it("splits business catalog packs from system packs without rewriting known status", () => {
     const catalog = capabilityPack({
       catalogCapabilityId: "catalog-capability:001",
-      id: "capability-pack:catalog-001:v1",
+      id: "catalog-capability:001",
       status: "deprecated",
     });
     const executableSystemPack = capabilityPack({
@@ -80,24 +101,64 @@ describe("Agent Center model", () => {
       id: "capability-pack:lead-coordination:v1",
       status: "executable",
     });
-    const unknownSystemPack = {
-      ...capabilityPack({
-        catalogCapabilityId: null,
-        id: "capability-pack:future-system:v1",
-        status: "deprecated",
-      }),
+    const packs = splitCapabilityPacks([executableSystemPack, catalog]);
+
+    expect(packs.catalog).toEqual([catalog]);
+    expect(packs.system).toEqual([executableSystemPack]);
+    expect(packs.catalog[0]?.status).toBe("deprecated");
+  });
+
+  it.each([
+    { catalogCapabilityId: null, id: "capability-pack:future-system:v1", kind: "system" },
+    { catalogCapabilityId: "catalog-capability:001", id: "catalog-capability:001", kind: "catalog" },
+  ])("fails loudly for an unknown $kind pack status", ({ catalogCapabilityId, id }) => {
+    const pack = {
+      ...capabilityPack({ catalogCapabilityId, id, status: "deprecated" }),
       status: "future_server_status",
     } as unknown as CapabilityPackSummary;
 
-    const packs = splitCapabilityPacks([
-      executableSystemPack,
-      catalog,
-      unknownSystemPack,
-    ]);
+    expect(() => splitCapabilityPacks([pack])).toThrow(
+      `Unknown server capability pack status 'future_server_status' for '${id}'`,
+    );
+  });
 
-    expect(packs.catalog).toEqual([catalog]);
-    expect(packs.system).toEqual([executableSystemPack, unknownSystemPack]);
-    expect(packs.system[1]?.status).toBe("future_server_status");
+  it("splits the canonical inventory into 96 catalog and 4 system packs", () => {
+    const { catalog, system } = splitCapabilityPacks(capabilityPacksFixture());
+
+    expect(catalog).toHaveLength(96);
+    expect(system).toHaveLength(4);
+    expect(system.map(({ id }) => id)).toEqual(SYSTEM_CAPABILITY_PACK_IDS);
+  });
+
+  it("fails inventory validation for missing or duplicate stable system packs", () => {
+    const missingSystemPack = capabilityPacksFixture().filter(
+      ({ id }) => id !== "capability-pack:source-research:v1",
+    );
+    const duplicateSystemPack = capabilityPack({
+      catalogCapabilityId: null,
+      id: "capability-pack:lead-coordination:v1",
+      status: "executable",
+    });
+
+    expect(() => validateCapabilityPackInventory(missingSystemPack)).toThrow(
+      "Missing system capability pack 'capability-pack:source-research:v1'",
+    );
+    expect(() => validateCapabilityPackInventory([
+      ...capabilityPacksFixture(),
+      duplicateSystemPack,
+    ])).toThrow(
+      "Duplicate system capability pack 'capability-pack:lead-coordination:v1'",
+    );
+  });
+
+  it("fails inventory validation unless exactly 96 catalog packs are present", () => {
+    const missingCatalogPack = capabilityPacksFixture().filter(
+      ({ id }) => id !== "catalog-capability:096",
+    );
+
+    expect(() => validateCapabilityPackInventory(missingCatalogPack)).toThrow(
+      "Expected 96 catalog capability packs, received 95",
+    );
   });
 
   it("merges all 96 static descriptions with authoritative catalog status", () => {
@@ -110,7 +171,7 @@ describe("Agent Center model", () => {
     expect(requirementClarification).toMatchObject({
       id: 16,
       catalogId: "catalog-capability:016",
-      capabilityPackId: "capability-pack:catalog-016:v1",
+      capabilityPackId: "catalog-capability:016",
       status: "catalog_only",
       name: "需求澄清智能体",
       domainId: "requirements-assessment",
@@ -132,6 +193,18 @@ describe("Agent Center model", () => {
     expect(model.find(({ id }) => id === 16)?.status).toBe("deprecated");
   });
 
+  it("fails loudly when a catalog pack id differs from its catalog capability id", () => {
+    const packs = catalogCapabilityPacks();
+    packs[15] = {
+      ...packs[15]!,
+      id: "catalog-capability:999",
+    };
+    const message = "Catalog capability pack id 'catalog-capability:999' must match catalogCapabilityId 'catalog-capability:016'";
+
+    expect(() => splitCapabilityPacks([packs[15]!])).toThrow(message);
+    expect(() => buildCapabilityLibrary(AGENT_CAPABILITIES, packs)).toThrow(message);
+  });
+
   it("fails closed for an unknown server catalog status", () => {
     const packs = catalogCapabilityPacks();
     packs[15] = {
@@ -140,7 +213,7 @@ describe("Agent Center model", () => {
     } as unknown as CapabilityPackSummary;
 
     expect(() => buildCapabilityLibrary(AGENT_CAPABILITIES, packs)).toThrow(
-      "Unknown server capability pack status 'future_server_status' for 'capability-pack:catalog-016:v1'",
+      "Unknown server capability pack status 'future_server_status' for 'catalog-capability:016'",
     );
   });
 
@@ -227,7 +300,7 @@ describe("Agent Center model", () => {
     });
     const catalogPack = capabilityPack({
       catalogCapabilityId: "catalog-capability:001",
-      id: "capability-pack:catalog-001:v1",
+      id: "catalog-capability:001",
       status: "catalog_only",
     });
     const lead = workAgent("lead", "agent-instance:lead", [systemPack, catalogPack]);

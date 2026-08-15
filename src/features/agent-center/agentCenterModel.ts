@@ -15,6 +15,37 @@ const CAPABILITY_PACK_STATUSES: ReadonlySet<CapabilityPackStatus> = new Set([
   "deprecated",
 ]);
 
+const SYSTEM_CAPABILITY_PACK_IDS = [
+  "capability-pack:lead-coordination:v1",
+  "capability-pack:source-research:v1",
+  "capability-pack:engineering-execution:v1",
+  "capability-pack:independent-review:v1",
+] as const;
+
+const SYSTEM_CAPABILITY_PACK_ID_SET: ReadonlySet<string> = new Set(
+  SYSTEM_CAPABILITY_PACK_IDS,
+);
+
+function assertKnownCapabilityPackStatus(pack: CapabilityPackSummary): void {
+  if (!CAPABILITY_PACK_STATUSES.has(pack.status)) {
+    throw new Error(
+      `Unknown server capability pack status '${pack.status}' for '${pack.id}'`,
+    );
+  }
+}
+
+function assertCatalogCapabilityPackIdentity(pack: CapabilityPackSummary): void {
+  const catalogId = pack.catalogCapabilityId;
+  if (!catalogId) {
+    throw new Error(`Server capability pack '${pack.id}' is missing catalogCapabilityId`);
+  }
+  if (pack.id !== catalogId) {
+    throw new Error(
+      `Catalog capability pack id '${pack.id}' must match catalogCapabilityId '${catalogId}'`,
+    );
+  }
+}
+
 export type CapabilityPackGroups = {
   catalog: CapabilityPackSummary[];
   system: CapabilityPackSummary[];
@@ -36,10 +67,45 @@ export function splitCapabilityPacks(
   const system: CapabilityPackSummary[] = [];
 
   for (const pack of packs) {
-    (pack.catalogCapabilityId === null ? system : catalog).push(pack);
+    assertKnownCapabilityPackStatus(pack);
+    if (pack.catalogCapabilityId === null) {
+      system.push(pack);
+    } else {
+      assertCatalogCapabilityPackIdentity(pack);
+      catalog.push(pack);
+    }
   }
 
   return { catalog, system };
+}
+
+export function validateCapabilityPackInventory(
+  packs: readonly CapabilityPackSummary[],
+): CapabilityPackGroups {
+  const groups = splitCapabilityPacks(packs);
+  if (groups.catalog.length !== 96) {
+    throw new Error(
+      `Expected 96 catalog capability packs, received ${groups.catalog.length}`,
+    );
+  }
+
+  const systemIds = new Set<string>();
+  for (const pack of groups.system) {
+    if (!SYSTEM_CAPABILITY_PACK_ID_SET.has(pack.id)) {
+      throw new Error(`Unknown system capability pack '${pack.id}'`);
+    }
+    if (systemIds.has(pack.id)) {
+      throw new Error(`Duplicate system capability pack '${pack.id}'`);
+    }
+    systemIds.add(pack.id);
+  }
+  for (const id of SYSTEM_CAPABILITY_PACK_IDS) {
+    if (!systemIds.has(id)) {
+      throw new Error(`Missing system capability pack '${id}'`);
+    }
+  }
+
+  return groups;
 }
 
 export function buildCapabilityLibrary(
@@ -77,11 +143,8 @@ export function buildCapabilityLibrary(
     if (!staticByCatalogId.has(catalogId)) {
       throw new Error(`Unknown server catalogCapabilityId '${catalogId}'`);
     }
-    if (!CAPABILITY_PACK_STATUSES.has(pack.status)) {
-      throw new Error(
-        `Unknown server capability pack status '${pack.status}' for '${pack.id}'`,
-      );
-    }
+    assertCatalogCapabilityPackIdentity(pack);
+    assertKnownCapabilityPackStatus(pack);
     packByCatalogId.set(catalogId, pack);
   }
 
