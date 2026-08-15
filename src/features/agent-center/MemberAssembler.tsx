@@ -242,7 +242,7 @@ export function MemberAssembler({
           <input
             aria-describedby={isEditing ? validationId : undefined}
             aria-label={t("agentCenter.assembler.displayName")}
-            disabled={!isEditing}
+            disabled={!isEditing || saving}
             onChange={(event) => setDisplayName(event.target.value)}
             value={displayName}
           />
@@ -252,7 +252,7 @@ export function MemberAssembler({
           <input
             aria-describedby={isEditing ? validationId : undefined}
             aria-label={t("agentCenter.assembler.engine")}
-            disabled={!isEditing}
+            disabled={!isEditing || saving}
             onChange={(event) => setEngineOverride(event.target.value)}
             placeholder={source.definition.defaultEngineKind}
             value={engineOverride}
@@ -263,7 +263,7 @@ export function MemberAssembler({
           <input
             aria-describedby={isEditing ? validationId : undefined}
             aria-label={t("agentCenter.assembler.model")}
-            disabled={!isEditing}
+            disabled={!isEditing || saving}
             onChange={(event) => setModelOverride(event.target.value)}
             placeholder={source.definition.defaultModelConfigurationId ?? t("agentCenter.member.modelDefault")}
             value={modelOverride}
@@ -274,7 +274,7 @@ export function MemberAssembler({
           <select
             aria-describedby={isEditing ? validationId : undefined}
             aria-label={t("agentCenter.assembler.permission")}
-            disabled={!isEditing}
+            disabled={!isEditing || saving}
             onChange={(event) => setPermissionOverride(event.target.value as PermissionPolicy | "")}
             value={permissionOverride}
           >
@@ -291,7 +291,7 @@ export function MemberAssembler({
           <input
             aria-describedby={isEditing ? validationId : undefined}
             aria-label={t("agentCenter.assembler.parallelism")}
-            disabled={!isEditing}
+            disabled={!isEditing || saving}
             inputMode="numeric"
             max={8}
             min={1}
@@ -331,7 +331,7 @@ export function MemberAssembler({
                 <input
                   aria-describedby={isEditing ? validationId : undefined}
                   checked={selectedPackIds.has(pack.id)}
-                  disabled={!isEditing}
+                  disabled={!isEditing || saving}
                   onChange={() => togglePack(pack.id)}
                   type="checkbox"
                 />

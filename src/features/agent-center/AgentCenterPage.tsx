@@ -198,6 +198,8 @@ export function AgentCenterPage({
 
   useEffect(() => {
     let current = true;
+    setWorkTeam(null);
+    setSelectedMemberId(null);
     setLoading(true);
     setLoadError(null);
     void Promise.all([

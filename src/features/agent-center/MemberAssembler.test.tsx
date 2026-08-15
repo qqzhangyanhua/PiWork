@@ -66,6 +66,49 @@ describe("MemberAssembler", () => {
     }));
   });
 
+  it("locks_all_mutable_controls_while_a_save_is_pending", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    const source = {
+      ...(await client.listAgentInstances()).find(
+        ({ definition }) => definition.roleKind === "researcher",
+      )!,
+      builtin: false,
+    };
+    const capabilityPacks = await client.listCapabilityPacks();
+    const businessPack = {
+      ...capabilityPacks.find(({ id }) => id === "catalog-capability:001")!,
+      compatibleRoleTemplateIds: [source.definition.roleTemplateId],
+      name: "可切换业务能力",
+      status: "executable" as const,
+    };
+    let resolveSave!: (member: AgentInstanceSummary) => void;
+    client.saveAgentCopy.mockReturnValue(new Promise((resolve) => {
+      resolveSave = resolve;
+    }));
+    render(
+      <MemberAssembler
+        capabilityPacks={[...capabilityPacks, businessPack]}
+        client={client}
+        onSaved={vi.fn()}
+        source={source}
+      />,
+    );
+    const save = screen.getByRole("button", { name: "保存长期成员" });
+    await waitFor(() => expect(save).toBeEnabled());
+
+    await user.click(save);
+
+    expect(screen.getByRole("textbox", { name: "成员名称" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Engine 覆盖" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Model 覆盖" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "权限策略" })).toBeDisabled();
+    expect(screen.getByRole("spinbutton", { name: "并行上限" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: /可切换业务能力/u })).toBeDisabled();
+
+    await act(async () => resolveSave(source));
+  });
+
   it("blocks_save_for_every_server_diagnostic", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();

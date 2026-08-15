@@ -249,6 +249,74 @@ describe("AgentCenterPage", () => {
     expect(client.getWorkTeam.mock.calls).toEqual([["work-1"], ["work-2"]]);
   });
 
+  it("clears_the_previous_work_team_and_member_drawer_when_a_new_work_fails_to_load", async () => {
+    const user = userEvent.setup();
+    const { client, instances } = await configureAgentCenterClient();
+    const lead = instances.find(({ definition }) => definition.roleKind === "lead")!;
+    const researcher = instances.find(({ definition }) => definition.roleKind === "researcher")!;
+    client.getWorkTeam
+      .mockResolvedValueOnce(workTeam("work-1", lead, [researcher]))
+      .mockRejectedValueOnce({ code: "database_error", message: "work-2 unavailable" });
+    const view = renderAgentCenter(client, "work-1");
+
+    await user.click(await screen.findByRole("button", { name: "查看研究员详情" }));
+    expect(within(screen.getByRole("dialog", { name: "研究员" }))
+      .getByRole("button", { name: "已加入当前 Work" })).toBeDisabled();
+
+    view.rerender(
+      <AgentCenterPage
+        client={client}
+        currentWorkId="work-2"
+        onStartCatalogCapability={vi.fn()}
+      />,
+    );
+    expect((await screen.findAllByText("无法加载团队和能力库")).length).toBeGreaterThan(0);
+
+    expect(screen.queryByRole("dialog", { name: "研究员" })).not.toBeInTheDocument();
+    expect(screen.queryByText("已加入当前 Work")).not.toBeInTheDocument();
+  });
+
+  it("ignores_an_add_result_after_the_drawer_switches_to_a_saved_copy", async () => {
+    const user = userEvent.setup();
+    const { client, instances } = await configureAgentCenterClient();
+    const lead = instances.find(({ definition }) => definition.roleKind === "lead")!;
+    const researcher = instances.find(({ definition }) => definition.roleKind === "researcher")!;
+    const savedCopy: AgentInstanceSummary = {
+      ...researcher,
+      id: "agent-instance:local:saved-researcher",
+      displayName: "本地研究副本",
+      builtin: false,
+      definition: {
+        ...researcher.definition,
+        id: "agent-definition:local:saved-researcher:v1",
+        builtin: false,
+      },
+    };
+    let rejectAdd!: (error: unknown) => void;
+    client.getWorkTeam.mockResolvedValue(workTeam("work-1", lead, []));
+    client.addWorkMember.mockReturnValue(new Promise((_, reject) => {
+      rejectAdd = reject;
+    }));
+    client.saveAgentCopy.mockResolvedValue(savedCopy);
+    renderAgentCenter(client, "work-1");
+
+    await user.click(await screen.findByRole("button", { name: "查看研究员详情" }));
+    let dialog = screen.getByRole("dialog", { name: "研究员" });
+    await user.click(within(dialog).getByRole("button", { name: "加入当前 Work" }));
+    await waitFor(() => expect(client.addWorkMember).toHaveBeenCalledWith("work-1", researcher.id));
+    await user.click(within(dialog).getByRole("button", { name: "自定义副本" }));
+    const save = within(dialog).getByRole("button", { name: "保存长期成员" });
+    await waitFor(() => expect(save).toBeEnabled());
+    await user.click(save);
+    dialog = await screen.findByRole("dialog", { name: "本地研究副本" });
+
+    await act(async () => rejectAdd({ code: "database_error", message: "late failure" }));
+
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "加入当前 Work" })).toBeEnabled();
+  });
+
   it("localizes_structured_add_member_errors", async () => {
     const user = userEvent.setup();
     const { client, instances } = await configureAgentCenterClient();

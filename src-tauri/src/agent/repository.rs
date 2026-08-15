@@ -3,11 +3,11 @@ use std::{collections::HashMap, io};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use sqlx::{FromRow, SqliteConnection, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
-    agent::assembly::ResolvedAgentAssembly,
+    agent::assembly::{ResolvedAgentAssembly, least_permission},
     domain::agent::{
         AgentDefinitionSummary, AgentInstanceSummary, AgentStatus, CapabilityPackStatus,
         CapabilityPackSummary, MemoryPolicy, PermissionPolicy, RoleKind, RoleTemplateSummary,
@@ -45,6 +45,25 @@ impl AgentRepository {
 
     pub async fn list_agent_instances(&self) -> Result<Vec<AgentInstanceSummary>, AppError> {
         self.load_agent_instances(None).await
+    }
+
+    #[doc(hidden)]
+    pub async fn list_agent_instances_after_instances_loaded<F>(
+        &self,
+        after_instances_loaded: F,
+    ) -> Result<Vec<AgentInstanceSummary>, AppError>
+    where
+        F: FnOnce(),
+    {
+        let mut transaction = self.pool.begin().await?;
+        let instances = load_agent_instances_on_connection_after_rows_loaded(
+            &mut transaction,
+            None,
+            after_instances_loaded,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(instances)
     }
 
     pub async fn get_agent_instance(
@@ -199,7 +218,11 @@ impl AgentRepository {
         .bind(work_id)
         .fetch_all(&mut *transaction)
         .await?;
-        let packs = capability_packs_by_definition(&mut transaction).await?;
+        let definition_ids = member_rows
+            .iter()
+            .map(|row| row.instance.definition_id.clone())
+            .collect::<Vec<_>>();
+        let packs = capability_packs_by_definition(&mut transaction, &definition_ids).await?;
         let members = member_rows
             .into_iter()
             .map(|row| row.into_summary(&packs))
@@ -304,8 +327,10 @@ impl AgentRepository {
         &self,
         id: Option<&str>,
     ) -> Result<Vec<AgentInstanceSummary>, AppError> {
-        let mut connection = self.pool.acquire().await?;
-        load_agent_instances_on_connection(&mut connection, id).await
+        let mut transaction = self.pool.begin().await?;
+        let instances = load_agent_instances_on_connection(&mut transaction, id).await?;
+        transaction.commit().await?;
+        Ok(instances)
     }
 }
 
@@ -330,6 +355,17 @@ async fn load_agent_instances_on_connection(
     connection: &mut SqliteConnection,
     id: Option<&str>,
 ) -> Result<Vec<AgentInstanceSummary>, AppError> {
+    load_agent_instances_on_connection_after_rows_loaded(connection, id, || {}).await
+}
+
+async fn load_agent_instances_on_connection_after_rows_loaded<F>(
+    connection: &mut SqliteConnection,
+    id: Option<&str>,
+    after_instances_loaded: F,
+) -> Result<Vec<AgentInstanceSummary>, AppError>
+where
+    F: FnOnce(),
+{
     let rows = if let Some(id) = id {
         sqlx::query_as::<_, AgentInstanceRow>(&format!(
             "{} WHERE ai.id = ? ORDER BY ai.id",
@@ -343,7 +379,12 @@ async fn load_agent_instances_on_connection(
             .fetch_all(&mut *connection)
             .await?
     };
-    let packs = capability_packs_by_definition(connection).await?;
+    after_instances_loaded();
+    let definition_ids = rows
+        .iter()
+        .map(|row| row.definition_id.clone())
+        .collect::<Vec<_>>();
+    let packs = capability_packs_by_definition(connection, &definition_ids).await?;
     rows.into_iter()
         .map(|row| row.into_summary(&packs))
         .collect()
@@ -420,25 +461,36 @@ async fn load_capability_packs(
 
 async fn capability_packs_by_definition(
     connection: &mut SqliteConnection,
+    definition_ids: &[String],
 ) -> Result<HashMap<String, Vec<CapabilityPackSummary>>, AppError> {
-    let packs = load_capability_packs(connection).await?;
-    let packs_by_id = packs
-        .into_iter()
-        .map(|pack| (pack.id.clone(), pack))
-        .collect::<HashMap<_, _>>();
-    let bindings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT agent_definition_id, capability_pack_id \
-         FROM agent_capability_bindings ORDER BY agent_definition_id, capability_pack_id",
-    )
-    .fetch_all(&mut *connection)
-    .await?;
+    if definition_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT acb.agent_definition_id, cp.id, cp.catalog_capability_id, cp.name, \
+                cp.description, cp.instructions, cp.input_schema_json, cp.output_schema_json, \
+                cp.procedure_json, cp.validation_rubric_json, cp.required_tools_json, \
+                cp.default_permission_scope, cp.compatible_role_template_ids_json, \
+                cp.required_engine_capabilities_json, cp.conflicts_with_capability_pack_ids_json, \
+                cp.version, cp.status FROM agent_capability_bindings acb \
+         JOIN capability_packs cp ON cp.id = acb.capability_pack_id \
+         WHERE acb.agent_definition_id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for definition_id in definition_ids {
+        separated.push_bind(definition_id);
+    }
+    separated.push_unseparated(") ORDER BY acb.agent_definition_id, acb.capability_pack_id");
+    let bindings = query
+        .build_query_as::<DefinitionCapabilityPackRow>()
+        .fetch_all(&mut *connection)
+        .await?;
     let mut result: HashMap<String, Vec<CapabilityPackSummary>> = HashMap::new();
-    for (definition_id, pack_id) in bindings {
-        let pack = packs_by_id
-            .get(&pack_id)
-            .cloned()
-            .ok_or_else(|| invariant_error("capability binding references missing pack"))?;
-        result.entry(definition_id).or_default().push(pack);
+    for binding in bindings {
+        result
+            .entry(binding.agent_definition_id)
+            .or_default()
+            .push(binding.pack.try_into()?);
     }
     Ok(result)
 }
@@ -494,7 +546,9 @@ async fn membership_source(
     }
     Ok(MembershipSource {
         role_kind,
-        permission_policy: permission_override.unwrap_or(default_permission),
+        permission_policy: permission_override
+            .map(|permission| least_permission(default_permission, permission))
+            .unwrap_or(default_permission),
         now: Utc::now(),
     })
 }
@@ -584,6 +638,13 @@ struct CapabilityPackRow {
     conflicts_with_capability_pack_ids_json: String,
     version: i64,
     status: CapabilityPackStatus,
+}
+
+#[derive(FromRow)]
+struct DefinitionCapabilityPackRow {
+    agent_definition_id: String,
+    #[sqlx(flatten)]
+    pack: CapabilityPackRow,
 }
 
 impl TryFrom<CapabilityPackRow> for CapabilityPackSummary {

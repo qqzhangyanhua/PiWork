@@ -5,6 +5,7 @@ use piwork_lib::{
     agent::{repository::AgentRepository, service::AgentService},
     app_state::AppState,
     domain::{
+        agent::PermissionPolicy,
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{
             CreateWorkInput, MessageRole, PermissionMode, RunStatus, StartWorkInput, WorkDetail,
@@ -252,6 +253,70 @@ async fn creating_a_work_atomically_assigns_the_builtin_lead() {
         )]
     );
     assert_eq!(lead.0, "agent-instance:piwork-lead");
+}
+
+#[tokio::test]
+async fn adding_a_member_clamps_instance_permission_override_to_definition_default() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Least privilege member").await;
+    sqlx::query(
+        "UPDATE agent_instances SET permission_policy_override = 'work_write' WHERE id = ?",
+    )
+    .bind("agent-instance:piwork-reviewer")
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    let repository = AgentRepository::new(harness.pool.clone());
+
+    let team = repository
+        .add_work_member(&work.summary.id, "agent-instance:piwork-reviewer")
+        .await
+        .unwrap();
+    let reviewer = team
+        .members
+        .iter()
+        .find(|member| member.instance.id == "agent-instance:piwork-reviewer")
+        .unwrap();
+    let persisted: String = sqlx::query_scalar(
+        "SELECT permission_policy FROM work_agents WHERE work_id = ? AND agent_instance_id = ?",
+    )
+    .bind(&work.summary.id)
+    .bind("agent-instance:piwork-reviewer")
+    .fetch_one(&harness.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(reviewer.permission_policy, PermissionPolicy::ReadOnly);
+    assert_eq!(persisted, "read_only");
+}
+
+#[tokio::test]
+async fn getting_work_team_ignores_malformed_packs_for_nonmembers() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Scoped team packs").await;
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE capability_packs SET required_tools_json = 'not-json' WHERE id = ?")
+        .bind("capability-pack:independent-review:v1")
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    let repository = AgentRepository::new(harness.pool.clone());
+
+    let team = repository
+        .get_work_team(&work.summary.id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(team.members.len(), 1);
+    assert_eq!(team.lead.instance.id, "agent-instance:piwork-lead");
+    assert_eq!(
+        team.lead.instance.definition.capability_packs[0].id,
+        "capability-pack:lead-coordination:v1"
+    );
 }
 
 #[tokio::test]

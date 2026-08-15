@@ -49,10 +49,21 @@ export function MemberDetailDrawer({
   const drawerRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const onCloseRef = useRef(onClose);
+  const addContext = `${currentWorkId ?? ""}:${member.id}`;
+  const activeAddContextRef = useRef(addContext);
+  const addGenerationRef = useRef(0);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<AppError | null>(null);
   const [addWarning, setAddWarning] = useState<AppError | null>(null);
   onCloseRef.current = onClose;
+  activeAddContextRef.current = addContext;
+
+  useEffect(() => {
+    addGenerationRef.current += 1;
+    setAdding(false);
+    setAddError(null);
+    setAddWarning(null);
+  }, [addContext]);
 
   useEffect(() => {
     closeRef.current?.focus();
@@ -92,15 +103,30 @@ export function MemberDetailDrawer({
   const permission = member.permissionPolicyOverride ?? definition.defaultPermissionPolicy;
 
   const addToWork = async () => {
+    const context = addContext;
+    const generation = addGenerationRef.current + 1;
+    addGenerationRef.current = generation;
     setAdding(true);
     setAddError(null);
     setAddWarning(null);
     try {
-      setAddWarning(await onAddToWork(member));
+      const warning = await onAddToWork(member);
+      if (
+        activeAddContextRef.current !== context
+        || addGenerationRef.current !== generation
+      ) return;
+      setAddWarning(warning);
     } catch (error) {
+      if (
+        activeAddContextRef.current !== context
+        || addGenerationRef.current !== generation
+      ) return;
       setAddError(normalizeAppError(error));
     } finally {
-      setAdding(false);
+      if (
+        activeAddContextRef.current === context
+        && addGenerationRef.current === generation
+      ) setAdding(false);
     }
   };
 

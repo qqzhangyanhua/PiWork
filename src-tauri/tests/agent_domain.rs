@@ -141,6 +141,94 @@ async fn repository_lists_builtin_instances_and_capabilities() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_instance_read_keeps_definition_and_packs_in_one_snapshot() {
+    let temporary_directory = tempfile::tempdir().unwrap();
+    let database_path = temporary_directory.path().join("agent-snapshot.sqlite3");
+    let database = Database::open(&database_path).await.unwrap();
+    let repository = AgentRepository::new(database.pool().clone());
+    let before = repository
+        .get_agent_instance("agent-instance:piwork-lead")
+        .await
+        .unwrap()
+        .unwrap();
+    let before_definition_name = before.definition.name;
+    let before_pack_name = before.definition.capability_packs[0].name.clone();
+    let writer_pool = database.pool().clone();
+    let (start_writer, writer_started) = tokio::sync::oneshot::channel();
+    let (writer_finished, wait_for_writer) = std::sync::mpsc::sync_channel(0);
+    let writer = tokio::spawn(async move {
+        writer_started.await.unwrap();
+        let mut transaction = writer_pool.begin().await.unwrap();
+        sqlx::query("UPDATE agent_definitions SET name = 'snapshot definition after' WHERE id = ?")
+            .bind("agent-definition:piwork-lead:v1")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE capability_packs SET name = 'snapshot pack after' WHERE id = ?")
+            .bind("capability-pack:lead-coordination:v1")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        writer_finished.send(()).unwrap();
+    });
+
+    let during = repository
+        .list_agent_instances_after_instances_loaded(move || {
+            start_writer.send(()).unwrap();
+            wait_for_writer
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("concurrent Agent update did not finish");
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|instance| instance.id == "agent-instance:piwork-lead")
+        .unwrap();
+    writer.await.unwrap();
+    let after = repository
+        .get_agent_instance("agent-instance:piwork-lead")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(during.definition.name, before_definition_name);
+    assert_eq!(during.definition.capability_packs[0].name, before_pack_name);
+    assert_eq!(after.definition.name, "snapshot definition after");
+    assert_eq!(
+        after.definition.capability_packs[0].name,
+        "snapshot pack after"
+    );
+}
+
+#[tokio::test]
+async fn getting_one_agent_instance_ignores_malformed_unrelated_packs() {
+    let database = Database::open_in_memory().await.unwrap();
+    let repository = AgentRepository::new(database.pool().clone());
+    sqlx::query("PRAGMA ignore_check_constraints = ON")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE capability_packs SET required_tools_json = 'not-json' WHERE id = ?")
+        .bind("capability-pack:independent-review:v1")
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+    let lead = repository
+        .get_agent_instance("agent-instance:piwork-lead")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(lead.definition.id, "agent-definition:piwork-lead:v1");
+    assert_eq!(
+        lead.definition.capability_packs[0].id,
+        "capability-pack:lead-coordination:v1"
+    );
+}
+
 async fn builtin_fixture(
     instance_id: &str,
 ) -> (
