@@ -163,13 +163,45 @@ impl Drop for OutboxClaimGuard {
         };
         let pool = self.pool.clone();
         drop(runtime.spawn(async move {
-            let now = Utc::now();
-            let _ = sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = 'delivery interrupted before acknowledgement; details redacted', updated_at = ? WHERE status = 'delivering' AND lease_token = ?")
-                .bind(now)
-                .bind(lease_token)
-                .execute(&pool)
-                .await;
+            release_abandoned_claim(pool, lease_token).await;
         }));
+    }
+}
+
+async fn release_abandoned_claim(pool: SqlitePool, lease_token: String) {
+    let mut retry = OutboxClaimPoll::default();
+    let mut failure_reported = false;
+    loop {
+        if pool.is_closed() {
+            return;
+        }
+        let now = Utc::now();
+        let released = sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = 'delivery interrupted before acknowledgement; details redacted', updated_at = ? WHERE status = 'delivering' AND lease_token = ?")
+            .bind(now)
+            .bind(&lease_token)
+            .execute(&pool)
+            .await;
+        match released {
+            Ok(_) => return,
+            Err(_) if pool.is_closed() => return,
+            Err(_) => {
+                if !failure_reported {
+                    eprintln!("PiWork outbox claim cleanup is retrying after a database error.");
+                    failure_reported = true;
+                }
+            }
+        }
+        let still_owned = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM assignment_event_outbox WHERE status = 'delivering' AND lease_token = ? LIMIT 1)",
+        )
+        .bind(&lease_token)
+        .fetch_one(&pool)
+        .await;
+        match still_owned {
+            Ok(0) => return,
+            Err(_) if pool.is_closed() => return,
+            Ok(_) | Err(_) => tokio::time::sleep(retry.next_delay()).await,
+        }
     }
 }
 

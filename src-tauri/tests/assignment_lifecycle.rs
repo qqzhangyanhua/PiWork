@@ -1006,6 +1006,57 @@ async fn repository_abandoned_claim_is_released_when_the_drain_task_unwinds() {
     assert_eq!(recovered_sink.0.lock().unwrap().len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_abandoned_claim_cleanup_retries_after_transient_database_failure() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-outbox-cleanup-retry").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let setup = AssignmentRepository::with_event_sink(database.pool().clone(), failing);
+    setup
+        .accept(accept_input("work-outbox-cleanup-retry", "Cleanup retry"))
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_abandoned_claim_cleanup BEFORE UPDATE OF status ON assignment_event_outbox WHEN OLD.status = 'delivering' AND NEW.status = 'pending' AND NEW.last_error = 'delivery interrupted before acknowledgement; details redacted' BEGIN SELECT RAISE(ABORT, 'forced cleanup failure'); END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let panicking =
+        AssignmentRepository::with_event_sink(database.pool().clone(), Arc::new(PanickingSink));
+
+    let drain = tokio::spawn(async move { panicking.drain_pending_events().await });
+    assert!(drain.await.unwrap_err().is_panic());
+    let recovered_sink = Arc::new(RecordingSink::default());
+    let recovered =
+        AssignmentRepository::with_event_sink(database.pool().clone(), recovered_sink.clone());
+    let waiting = tokio::spawn(async move { recovered.drain_pending_events().await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!waiting.is_finished());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM assignment_event_outbox ORDER BY ordinal LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        "delivering"
+    );
+
+    sqlx::query("DROP TRIGGER fail_abandoned_claim_cleanup")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(3), waiting)
+        .await
+        .expect("cleanup did not retry after the transient database failure")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.published, 1);
+    assert_eq!(recovered_sink.0.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn repository_malformed_claim_rolls_back_without_stranding_a_delivery() {
     let database = Database::open_in_memory().await.unwrap();
