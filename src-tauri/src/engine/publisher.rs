@@ -1,3 +1,5 @@
+use std::{collections::HashSet, sync::Mutex};
+
 use async_trait::async_trait;
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -23,9 +25,48 @@ where
     observer.emit_committed_after(envelope, emit).map(|_| ())
 }
 
+#[derive(Default)]
+struct AssignmentDeliveryTracker {
+    published_unacked_event_ids: Mutex<HashSet<String>>,
+}
+
+impl AssignmentDeliveryTracker {
+    fn publish_if_unacked<F>(
+        &self,
+        observer: &ActivityObserverHandle,
+        envelope: WorkEventEnvelope,
+        emit: F,
+    ) -> Result<(), AppError>
+    where
+        F: FnOnce(WorkEventEnvelope) -> Result<(), AppError>,
+    {
+        let Some(event_id) = envelope.event_id.clone() else {
+            return publish_if_new(observer, envelope, emit);
+        };
+        let mut published_unacked = self
+            .published_unacked_event_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if published_unacked.contains(&event_id) {
+            return Ok(());
+        }
+        publish_if_new(observer, envelope, emit)?;
+        published_unacked.insert(event_id);
+        Ok(())
+    }
+
+    fn delivery_confirmed(&self, event_id: &str) {
+        self.published_unacked_event_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(event_id);
+    }
+}
+
 pub struct TauriEventPublisher {
     app_handle: tauri::AppHandle,
     observer: ActivityObserverHandle,
+    assignment_deliveries: AssignmentDeliveryTracker,
 }
 
 impl TauriEventPublisher {
@@ -37,6 +78,7 @@ impl TauriEventPublisher {
         Self {
             app_handle,
             observer,
+            assignment_deliveries: AssignmentDeliveryTracker::default(),
         }
     }
 
@@ -58,7 +100,16 @@ impl EventPublisher for TauriEventPublisher {
 
 impl AssignmentEventSink for TauriEventPublisher {
     fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
-        self.publish_now(event)
+        self.assignment_deliveries
+            .publish_if_unacked(&self.observer, event, |event| {
+                self.app_handle
+                    .emit("piwork://work-event", event)
+                    .map_err(|error| AppError::event_publish(error.to_string()))
+            })
+    }
+
+    fn delivery_confirmed(&self, event_id: &str) {
+        self.assignment_deliveries.delivery_confirmed(event_id);
     }
 }
 
@@ -97,7 +148,7 @@ mod tests {
         engine::activity_observer::ActivityObserverHandle,
     };
 
-    use super::publish_if_new;
+    use super::{AssignmentDeliveryTracker, publish_if_new};
 
     fn committed_event() -> WorkEventEnvelope {
         WorkEventEnvelope {
@@ -241,5 +292,57 @@ mod tests {
         assert!(first.join().unwrap().is_err());
         assert!(second.join().unwrap().is_ok());
         assert_eq!(observer.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn assignment_replay_stays_suppressed_after_observer_eviction_until_ack_confirmation() {
+        let observer = ActivityObserverHandle::in_process();
+        let tracker = AssignmentDeliveryTracker::default();
+        let emitted = Mutex::new(Vec::new());
+        let assignment_event = committed_event();
+
+        tracker
+            .publish_if_unacked(&observer, assignment_event.clone(), |event| {
+                emitted.lock().unwrap().push(event);
+                Ok(())
+            })
+            .unwrap();
+        for index in 0..=1000 {
+            let mut unrelated = committed_event();
+            unrelated.event_id = Some(format!("unrelated-engine-event-{index}"));
+            observer.emit_committed(unrelated);
+        }
+        tracker
+            .publish_if_unacked(&observer, assignment_event, |event| {
+                emitted.lock().unwrap().push(event);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(observer.snapshot().len(), 1000);
+        assert_eq!(emitted.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn assignment_delivery_confirmation_releases_the_unacked_receipt() {
+        let observer = ActivityObserverHandle::in_process();
+        let tracker = AssignmentDeliveryTracker::default();
+        let event = committed_event();
+        let event_id = event.event_id.clone().unwrap();
+
+        tracker
+            .publish_if_unacked(&observer, event, |_| Ok(()))
+            .unwrap();
+        assert_eq!(tracker.published_unacked_event_ids.lock().unwrap().len(), 1);
+
+        tracker.delivery_confirmed(&event_id);
+
+        assert!(
+            tracker
+                .published_unacked_event_ids
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

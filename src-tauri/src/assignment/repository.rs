@@ -22,8 +22,12 @@ const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_OUTBOX_ERROR_BYTES: usize = 512;
 const ASSIGNMENT_EVENT_VERSION: u32 = 2;
 const OUTBOX_BATCH_SIZE: i64 = 64;
+const OUTBOX_DIAGNOSTIC_LIMIT: usize = 256;
 const OUTBOX_LEASE_DURATION: chrono::Duration = chrono::Duration::seconds(30);
 const OUTBOX_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const OUTBOX_CLAIM_POLL_MAX_INTERVAL: Duration = Duration::from_millis(250);
+const HAS_PENDING_EVENT_DELIVERIES_SQL: &str =
+    "SELECT EXISTS(SELECT 1 FROM assignment_event_outbox WHERE status <> 'delivered' LIMIT 1)";
 const RECOVERY_RETRY_BASE: Duration = Duration::from_secs(1);
 const RECOVERY_RETRY_MAX: Duration = Duration::from_secs(60);
 
@@ -48,10 +52,15 @@ pub struct AcceptAssignmentInput {
     pub not_before: Option<DateTime<Utc>>,
 }
 
-/// Receives an at-least-once stream. Implementations must deduplicate the stable `event_id` before
-/// applying externally visible side effects because a crash can occur after publish but before ack.
+/// Receives an at-least-once transport stream. Implementations and end-to-end consumers must
+/// deduplicate the stable `event_id` before applying externally visible side effects because a
+/// process crash can occur after publish but before database acknowledgement. The confirmation
+/// callback is only a process-local lifecycle hint; it does not provide distributed exactly-once
+/// delivery.
 pub trait AssignmentEventSink: Send + Sync {
     fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError>;
+
+    fn delivery_confirmed(&self, _event_id: &str) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +109,29 @@ pub struct AssignmentRepository {
 struct OutboxClaimGuard {
     pool: SqlitePool,
     lease_token: Option<String>,
+}
+
+struct OutboxClaimPoll {
+    delay: Duration,
+}
+
+impl Default for OutboxClaimPoll {
+    fn default() -> Self {
+        Self {
+            delay: OUTBOX_CLAIM_POLL_INTERVAL,
+        }
+    }
+}
+
+impl OutboxClaimPoll {
+    fn next_delay(&mut self) -> Duration {
+        let current = self.delay;
+        self.delay = self
+            .delay
+            .saturating_mul(2)
+            .min(OUTBOX_CLAIM_POLL_MAX_INTERVAL);
+        current
+    }
 }
 
 impl OutboxClaimGuard {
@@ -1109,12 +1141,30 @@ impl AssignmentRepository {
         .collect()
     }
 
+    /// Returns a bounded diagnostic snapshot rather than materializing the entire outbox backlog.
     pub async fn pending_event_deliveries(&self) -> Result<Vec<PendingEventDelivery>, AppError> {
+        self.pending_event_deliveries_limited(OUTBOX_DIAGNOSTIC_LIMIT)
+            .await
+    }
+
+    pub async fn pending_event_deliveries_limited(
+        &self,
+        requested_limit: usize,
+    ) -> Result<Vec<PendingEventDelivery>, AppError> {
+        let limit = requested_limit.min(OUTBOX_DIAGNOSTIC_LIMIT) as i64;
         Ok(sqlx::query_as::<_, PendingEventDelivery>(
-            "SELECT ordinal, event_id, assignment_id, status, attempt_count, last_attempt_at, last_error, lease_expires_at FROM assignment_event_outbox WHERE status <> 'delivered' ORDER BY ordinal",
+            "SELECT ordinal, event_id, assignment_id, status, attempt_count, last_attempt_at, last_error, lease_expires_at FROM assignment_event_outbox WHERE status <> 'delivered' ORDER BY ordinal LIMIT ?",
         )
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    async fn has_pending_event_deliveries(&self) -> Result<bool, AppError> {
+        let exists: i64 = sqlx::query_scalar(HAS_PENDING_EVENT_DELIVERIES_SQL)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(exists != 0)
     }
 
     /// Drains globally ordered, fixed-size batches of undelivered Assignment events.
@@ -1131,14 +1181,15 @@ impl AssignmentRepository {
             failed_event_ids: Vec::new(),
         };
         loop {
+            let mut claim_poll = OutboxClaimPoll::default();
             let (mut claim_guard, events) = loop {
                 if let Some(claimed) = self.claim_pending_batch().await? {
                     break claimed;
                 }
-                if self.pending_event_deliveries().await?.is_empty() {
+                if !self.has_pending_event_deliveries().await? {
                     return Ok(report);
                 }
-                tokio::time::sleep(OUTBOX_CLAIM_POLL_INTERVAL).await;
+                tokio::time::sleep(claim_poll.next_delay()).await;
             };
             let lease_token = claim_guard.lease_token().to_owned();
             let mut publish_failed = false;
@@ -1159,6 +1210,7 @@ impl AssignmentRepository {
                             let _ = self.release_claimed_batch_after_error(&lease_token).await;
                             return Err(error);
                         }
+                        self.event_sink.delivery_confirmed(event_id);
                         report.published += 1;
                     }
                     Err(error) => {
@@ -1713,5 +1765,44 @@ impl TryFrom<EventRow> for WorkEventEnvelope {
             occurred_at: row.occurred_at,
             payload,
         })
+    }
+}
+
+#[cfg(test)]
+mod outbox_poll_tests {
+    use std::time::Duration;
+
+    use crate::storage::sqlite::Database;
+
+    use super::{HAS_PENDING_EVENT_DELIVERIES_SQL, OutboxClaimPoll};
+
+    #[test]
+    fn outbox_claim_poll_uses_bounded_exponential_backoff() {
+        let mut poll = OutboxClaimPoll::default();
+
+        assert_eq!(poll.next_delay(), Duration::from_millis(10));
+        assert_eq!(poll.next_delay(), Duration::from_millis(20));
+        assert_eq!(poll.next_delay(), Duration::from_millis(40));
+        assert_eq!(poll.next_delay(), Duration::from_millis(80));
+        assert_eq!(poll.next_delay(), Duration::from_millis(160));
+        assert_eq!(poll.next_delay(), Duration::from_millis(250));
+        assert_eq!(poll.next_delay(), Duration::from_millis(250));
+    }
+
+    #[tokio::test]
+    async fn pending_probe_uses_the_partial_outbox_index() {
+        let database = Database::open_in_memory().await.unwrap();
+        let plan = sqlx::query_as::<_, (i64, i64, i64, String)>(&format!(
+            "EXPLAIN QUERY PLAN {HAS_PENDING_EVENT_DELIVERIES_SQL}"
+        ))
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+
+        assert!(
+            plan.iter()
+                .any(|(_, _, _, detail)| detail.contains("idx_assignment_event_outbox_pending")),
+            "pending probe query plan did not use the partial index: {plan:?}"
+        );
     }
 }
