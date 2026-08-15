@@ -74,7 +74,6 @@ pub trait EngineAdapter: Send + Sync {
         _input: EngineInput,
         _sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
-        let _declared = self.capabilities().session_resume;
         Err(EngineError::Unsupported("session_resume"))
     }
 
@@ -83,17 +82,14 @@ pub trait EngineAdapter: Send + Sync {
         _context: EngineRunContext,
         _reason: &str,
     ) -> Result<EngineSessionRef, EngineError> {
-        let _declared = self.capabilities().session_rotate;
         Err(EngineError::Unsupported("session_rotate"))
     }
 
     async fn steer(&self, _run_id: &str, _input: EngineInput) -> Result<(), EngineError> {
-        let _declared = self.capabilities().native_steer;
         Err(EngineError::Unsupported("native_steer"))
     }
 
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
-        let _declared = self.capabilities().cancel;
         Err(EngineError::Unsupported("cancel"))
     }
 }
@@ -117,6 +113,8 @@ pub enum EngineError {
     #[error("engine capability is unsupported: {0}")]
     Unsupported(&'static str),
 }
+
+const MAX_ENGINE_IDENTITY_BYTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineRunIdentity {
@@ -147,6 +145,23 @@ impl EngineRunIdentity {
             if value.trim().is_empty() {
                 return Err(EngineError::Start(format!(
                     "{name} identity must not be empty"
+                )));
+            }
+            if value.len() > MAX_ENGINE_IDENTITY_BYTES {
+                return Err(EngineError::Start(format!(
+                    "{name} identity exceeds {MAX_ENGINE_IDENTITY_BYTES} bytes"
+                )));
+            }
+        }
+        for (name, value) in [("work", work_id.as_str()), ("run", run_id.as_str())] {
+            let portable = value != "."
+                && value != ".."
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            if !portable {
+                return Err(EngineError::Start(format!(
+                    "{name} identity must be a portable path segment"
                 )));
             }
         }
@@ -619,6 +634,112 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains("must not be empty"));
+        }
+    }
+
+    #[test]
+    fn run_identity_rejects_non_portable_work_and_run_segments() {
+        let valid = [
+            "work.AZ_09-",
+            "run.AZ_09-",
+            "assignment-1",
+            "agent-instance-1",
+            "agent-session-1",
+        ];
+        EngineRunIdentity::new(
+            valid[0].into(),
+            valid[1].into(),
+            valid[2].into(),
+            valid[3].into(),
+            valid[4].into(),
+            0,
+        )
+        .unwrap();
+
+        for (field_index, field_name) in [(0, "work"), (1, "run")] {
+            for invalid in [
+                "/tmp/escape",
+                r"C:\escape",
+                r"\\server\share",
+                ".",
+                "..",
+                "nested/path",
+                r"nested\path",
+                "nested//path",
+                r"nested\\path",
+                "contains space",
+                "\0",
+                "工作",
+            ] {
+                let mut values = valid.map(str::to_owned);
+                values[field_index] = invalid.into();
+
+                let error = EngineRunIdentity::new(
+                    values[0].clone(),
+                    values[1].clone(),
+                    values[2].clone(),
+                    values[3].clone(),
+                    values[4].clone(),
+                    0,
+                )
+                .unwrap_err();
+
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "engine failed to start: {field_name} identity must be a portable path segment"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn run_identity_bounds_every_identity_field_without_echoing_the_value() {
+        let baseline = [
+            "work-1".to_owned(),
+            "run-1".to_owned(),
+            "assignment-1".to_owned(),
+            "agent-instance-1".to_owned(),
+            "agent-session-1".to_owned(),
+        ];
+
+        for (field_index, field_name) in [
+            (0, "work"),
+            (1, "run"),
+            (2, "assignment"),
+            (3, "agent instance"),
+            (4, "agent session"),
+        ] {
+            let mut at_limit = baseline.clone();
+            at_limit[field_index] = "a".repeat(256);
+            EngineRunIdentity::new(
+                at_limit[0].clone(),
+                at_limit[1].clone(),
+                at_limit[2].clone(),
+                at_limit[3].clone(),
+                at_limit[4].clone(),
+                0,
+            )
+            .unwrap();
+
+            let mut over_limit = baseline.clone();
+            over_limit[field_index] = "z".repeat(257);
+            let error = EngineRunIdentity::new(
+                over_limit[0].clone(),
+                over_limit[1].clone(),
+                over_limit[2].clone(),
+                over_limit[3].clone(),
+                over_limit[4].clone(),
+                0,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!("engine failed to start: {field_name} identity exceeds 256 bytes")
+            );
+            assert!(!format!("{error:?}").contains(&over_limit[field_index]));
         }
     }
 

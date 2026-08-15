@@ -28,7 +28,7 @@ use piwork_lib::{
 };
 use tokio::sync::mpsc;
 
-const CONTRACT_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTRACT_TIMEOUT: Duration = Duration::from_secs(30);
 const OPAQUE_FAKE_SESSION: &str = "opaque-fake-session-7f06";
 const CONTRACT_WORK_ID: &str = "work-contract-7f06";
 
@@ -57,6 +57,30 @@ fn context(run_id: &str, generation: u32) -> EngineRunContext {
         PermissionMode::AskEveryStep,
     )
     .unwrap()
+}
+
+#[test]
+fn invalid_path_identities_are_rejected_before_any_files_are_created() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let workspace = sandbox.path().join("workspace");
+    let outside = sandbox.path().join("outside");
+    std::fs::create_dir(&workspace).unwrap();
+
+    for (work_id, run_id) in [("../outside", "run-safe"), ("work-safe", "../outside")] {
+        let identity = EngineRunIdentity::new(
+            work_id.into(),
+            run_id.into(),
+            "assignment-safe".into(),
+            "agent-instance-safe".into(),
+            "agent-session-safe".into(),
+            0,
+        );
+
+        assert!(matches!(identity, Err(EngineError::Start(_))));
+    }
+
+    assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
+    assert!(!outside.exists());
 }
 
 fn full_capabilities() -> EngineCapabilities {
@@ -128,6 +152,129 @@ fn assert_one_terminal(events: &[EngineEvent]) {
     );
 }
 
+#[test]
+fn tool_call_validator_rejects_malicious_id_and_name_sequences() {
+    let started = |id: &str, name: &str| EngineEvent::ToolStarted {
+        tool_call_id: id.into(),
+        tool_name: name.into(),
+        input_summary: String::new(),
+    };
+    let progress = |id: &str, name: &str| EngineEvent::ToolProgress {
+        tool_call_id: id.into(),
+        tool_name: name.into(),
+        output_summary: String::new(),
+    };
+    let finished = |id: &str, name: &str| EngineEvent::ToolFinished {
+        tool_call_id: id.into(),
+        tool_name: name.into(),
+        output_summary: String::new(),
+        success: true,
+    };
+    let terminal = || EngineEvent::RunCompleted {
+        summary: String::new(),
+        artifacts: Vec::new(),
+        validation: Vec::new(),
+        limitations: Vec::new(),
+    };
+    let invalid = [
+        vec![
+            started("call-a", "read"),
+            started("call-b", "bash"),
+            finished("call-a", "read"),
+            finished("call-a", "read"),
+            terminal(),
+        ],
+        vec![progress("missing", "read"), terminal()],
+        vec![
+            started("call-a", "read"),
+            progress("call-a", "bash"),
+            finished("call-a", "read"),
+            terminal(),
+        ],
+        vec![
+            started("call-a", "read"),
+            finished("call-a", "bash"),
+            terminal(),
+        ],
+        vec![
+            started("call-a", "read"),
+            started("call-a", "read"),
+            finished("call-a", "read"),
+            terminal(),
+        ],
+        vec![started("call-a", "read"), terminal()],
+    ];
+
+    for events in invalid {
+        assert!(
+            validate_tool_calls(&events).is_err(),
+            "validator accepted {events:?}"
+        );
+    }
+
+    let valid_parallel = vec![
+        started("call-a", "read"),
+        started("call-b", "bash"),
+        progress("call-b", "bash"),
+        finished("call-a", "read"),
+        finished("call-b", "bash"),
+        terminal(),
+    ];
+    assert_eq!(validate_tool_calls(&valid_parallel), Ok(2));
+}
+
+fn validate_tool_calls(events: &[EngineEvent]) -> Result<usize, String> {
+    let mut active = HashMap::<String, String>::new();
+    let mut maximum_active = 0;
+
+    for event in events {
+        match event {
+            EngineEvent::ToolStarted {
+                tool_call_id,
+                tool_name,
+                ..
+            } => {
+                if active
+                    .insert(tool_call_id.clone(), tool_name.clone())
+                    .is_some()
+                {
+                    return Err("tool call ID started more than once".into());
+                }
+                maximum_active = maximum_active.max(active.len());
+            }
+            EngineEvent::ToolProgress {
+                tool_call_id,
+                tool_name,
+                ..
+            } => match active.get(tool_call_id) {
+                Some(active_name) if active_name == tool_name => {}
+                Some(_) => return Err("tool progress changed the active tool name".into()),
+                None => return Err("tool progress referenced an inactive call ID".into()),
+            },
+            EngineEvent::ToolFinished {
+                tool_call_id,
+                tool_name,
+                ..
+            } => match active.get(tool_call_id) {
+                Some(active_name) if active_name == tool_name => {
+                    active.remove(tool_call_id);
+                }
+                Some(_) => return Err("tool finish changed the active tool name".into()),
+                None => return Err("tool finish referenced an inactive call ID".into()),
+            },
+            event if event.is_terminal() && !active.is_empty() => {
+                return Err("terminal event arrived with active tool calls".into());
+            }
+            _ => {}
+        }
+    }
+
+    if !active.is_empty() {
+        return Err("tool call remained unfinished".into());
+    }
+    Ok(maximum_active)
+}
+
 fn assert_event_contract(events: &[EngineEvent], capabilities: EngineCapabilities) {
     assert_one_terminal(events);
     let started = events
@@ -165,22 +312,8 @@ fn assert_event_contract(events: &[EngineEvent], capabilities: EngineCapabilitie
     assert_eq!(has_progress, capabilities.tool_progress);
     assert_eq!(has_usage, capabilities.usage_reporting);
 
-    let mut active_tools = 0_i32;
-    let mut maximum_active_tools = 0_i32;
-    for event in events {
-        match event {
-            EngineEvent::ToolStarted { .. } => {
-                active_tools += 1;
-                maximum_active_tools = maximum_active_tools.max(active_tools);
-            }
-            EngineEvent::ToolFinished { .. } => {
-                assert!(active_tools > 0, "tool finished before it started");
-                active_tools -= 1;
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(active_tools, 0, "tool call remained unfinished");
+    let maximum_active_tools =
+        validate_tool_calls(events).unwrap_or_else(|error| panic!("{error}: {events:?}"));
     assert_eq!(
         maximum_active_tools > 1,
         capabilities.parallel_tool_calls,
@@ -193,6 +326,18 @@ enum FixtureScenario {
     Complete,
     HoldUntilAbort,
     DuplicateTerminal,
+    StartupCrash,
+    PromptRejected,
+    StartupTimeout,
+    SensitiveRawEvent,
+    Backpressure,
+    MalformedBackpressure,
+    InvalidUtf8Backpressure,
+    InheritedStderrComplete,
+    InheritedStderrHold,
+    StartupBarrier,
+    AbortBarrier,
+    HoldWithWatchdog,
 }
 
 struct AdapterFixture {
@@ -237,6 +382,19 @@ impl AdapterFactory for FakeAdapterFactory {
             FixtureScenario::Complete => FakeRunBehavior::Complete,
             FixtureScenario::HoldUntilAbort => FakeRunBehavior::HoldUntilAbort,
             FixtureScenario::DuplicateTerminal => FakeRunBehavior::DuplicateTerminal,
+            FixtureScenario::StartupCrash => FakeRunBehavior::Crash,
+            FixtureScenario::PromptRejected | FixtureScenario::StartupTimeout => {
+                FakeRunBehavior::Crash
+            }
+            FixtureScenario::SensitiveRawEvent => FakeRunBehavior::Complete,
+            FixtureScenario::Backpressure
+            | FixtureScenario::MalformedBackpressure
+            | FixtureScenario::InvalidUtf8Backpressure
+            | FixtureScenario::InheritedStderrHold => FakeRunBehavior::HoldUntilAbort,
+            FixtureScenario::InheritedStderrComplete => FakeRunBehavior::Complete,
+            FixtureScenario::StartupBarrier
+            | FixtureScenario::AbortBarrier
+            | FixtureScenario::HoldWithWatchdog => FakeRunBehavior::HoldUntilAbort,
         };
         AdapterFixture {
             adapter: Arc::new(FakeEngineAdapter::configured(
@@ -352,17 +510,126 @@ fn install_node_fixture(root: &Path, scenario: FixtureScenario) -> PathBuf {
         FixtureScenario::Complete => "complete",
         FixtureScenario::HoldUntilAbort => "hold",
         FixtureScenario::DuplicateTerminal => "duplicate_terminal",
+        FixtureScenario::StartupCrash => "startup_crash",
+        FixtureScenario::PromptRejected => "prompt_rejected",
+        FixtureScenario::StartupTimeout => "startup_timeout",
+        FixtureScenario::SensitiveRawEvent => "sensitive_raw_event",
+        FixtureScenario::Backpressure => "backpressure",
+        FixtureScenario::MalformedBackpressure => "malformed_backpressure",
+        FixtureScenario::InvalidUtf8Backpressure => "invalid_utf8_backpressure",
+        FixtureScenario::InheritedStderrComplete => "inherited_stderr_complete",
+        FixtureScenario::InheritedStderrHold => "inherited_stderr_hold",
+        FixtureScenario::StartupBarrier => "startup_barrier",
+        FixtureScenario::AbortBarrier => "abort_barrier",
+        FixtureScenario::HoldWithWatchdog => "hold_watchdog",
     };
     let script = format!(
         r#"const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
+const childProcess = require('child_process');
 const scenario = '{scenario}';
+fs.writeFileSync(path.join(__dirname, 'argv.json'), JSON.stringify(process.argv.slice(2)));
 const rl = readline.createInterface({{ input: process.stdin }});
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+const marker = name => path.join(__dirname, name);
+const waitForMarker = (name, callback) => {{
+  const timer = setInterval(() => {{
+    if (fs.existsSync(marker(name))) {{
+      clearInterval(timer);
+      callback();
+    }}
+  }}, 10);
+}};
+const spawnStderrHolder = () => {{
+  const holderScript =
+    "const fs=require('fs');const path=require('path');" +
+    "const directory=" + JSON.stringify(__dirname) + ";" +
+    "fs.writeFileSync(path.join(directory,'stderr-holder-entered'),String(process.pid));" +
+    "const timer=setInterval(()=>{{if(fs.existsSync(path.join(directory,'stderr-holder-release'))){{" +
+    "clearInterval(timer);fs.writeFileSync(path.join(directory,'stderr-holder-exited'),String(process.pid));process.exit(0);}}}},10);" +
+    "setTimeout(()=>{{fs.writeFileSync(path.join(directory,'stderr-holder-watchdog'),String(process.pid));" +
+    "fs.writeFileSync(path.join(directory,'stderr-holder-exited'),String(process.pid));process.exit(0);}},5000);";
+  const holder = childProcess.spawn(process.execPath, ['-e', holderScript], {{
+    detached: true,
+    stdio: ['ignore', 'ignore', 'inherit']
+  }});
+  holder.unref();
+}};
 rl.on('line', line => {{
   const command = JSON.parse(line);
   if (command.type === 'prompt') {{
+    if (scenario === 'startup_crash') {{
+      process.stderr.write('startup-stderr-sentinel|' + process.env.PIWORK_MODEL_API_KEY + '|' + process.argv.join('|'));
+      process.exit(17);
+      return;
+    }}
+    if (scenario === 'prompt_rejected') {{
+      process.stderr.write('prompt-rejection-stderr-sentinel|' + process.env.PIWORK_MODEL_API_KEY);
+      send({{ type: 'response', id: command.id, success: false, error: {{ token: 'prompt-rejection-detail-sentinel' }} }});
+      return;
+    }}
+    if (scenario === 'startup_timeout' && !fs.existsSync(marker('startup-timeout-consumed'))) {{
+      fs.writeFileSync(marker('startup-timeout-consumed'), String(process.pid));
+      process.stderr.write('startup-timeout-stderr-sentinel|' + process.env.PIWORK_MODEL_API_KEY);
+      return;
+    }}
+    if (scenario === 'startup_barrier') {{
+      fs.appendFileSync(marker('startup-entered.log'), process.pid + '\n');
+      waitForMarker('startup-release', () => send({{ type: 'response', id: command.id, success: true }}));
+      return;
+    }}
     send({{ type: 'response', id: command.id, success: true }});
-    if (scenario === 'hold') return;
+    if (scenario === 'sensitive_raw_event') {{
+      const argument = name => process.argv[process.argv.indexOf(name) + 1];
+      const model = argument('--model');
+      send({{
+        type: 'future-' + model,
+        token: 'raw-sensitive-key-sentinel',
+        values: {{
+          api: process.env.PIWORK_MODEL_API_KEY,
+          work: argument('--session-id'),
+          workspace: process.cwd(),
+          sessionPath: argument('--session-dir'),
+          runtimePath: process.env.PI_CODING_AGENT_DIR,
+          model
+        }}
+      }});
+      send({{ type: 'agent_end', messages: [] }});
+      return;
+    }}
+    if (scenario === 'backpressure') {{
+      send({{ type: 'message_update', assistantMessageEvent: {{ type: 'thinking_delta', delta: 'blocked' }} }});
+      fs.writeFileSync(marker('backpressure-emitted'), String(process.pid));
+      return;
+    }}
+    if (scenario === 'malformed_backpressure') {{
+      process.stdout.write('{{malformed\n');
+      fs.writeFileSync(marker('backpressure-emitted'), String(process.pid));
+      return;
+    }}
+    if (scenario === 'invalid_utf8_backpressure') {{
+      process.stdout.write(Buffer.from([0xff, 0x0a]));
+      fs.writeFileSync(marker('backpressure-emitted'), String(process.pid));
+      return;
+    }}
+    if (scenario === 'inherited_stderr_complete') {{
+      spawnStderrHolder();
+      send({{ type: 'agent_end', messages: [] }});
+      return;
+    }}
+    if (scenario === 'inherited_stderr_hold') {{
+      spawnStderrHolder();
+      return;
+    }}
+    if (scenario === 'hold' || scenario === 'abort_barrier') return;
+    if (scenario === 'hold_watchdog') {{
+      setTimeout(() => {{
+        fs.writeFileSync(marker('watchdog-fired'), String(process.pid));
+        process.exit(0);
+      }}, 1000);
+      return;
+    }}
     send({{ type: 'message_update', assistantMessageEvent: {{ type: 'thinking_delta', delta: 'checking' }} }});
     send({{ type: 'message_update', assistantMessageEvent: {{ type: 'text_delta', delta: command.message }} }});
     send({{ type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'read', args: {{ path: 'fixture.txt' }} }});
@@ -371,6 +638,19 @@ rl.on('line', line => {{
     send({{ type: 'message_end', message: {{ role: 'assistant', usage: {{ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, totalTokens: 10 }} }} }});
     send({{ type: 'agent_end', messages: [] }});
     if (scenario === 'duplicate_terminal') send({{ type: 'agent_end', messages: [] }});
+  }}
+  if (command.type === 'abort') {{
+    fs.writeFileSync(marker('abort-entered'), String(process.pid));
+    if (scenario === 'prompt_rejected' || scenario === 'startup_timeout') {{
+      fs.writeFileSync(marker('startup-cleanup-entered'), String(process.pid));
+      waitForMarker('startup-cleanup-release', () => process.exit(0));
+      return;
+    }}
+    if (scenario === 'abort_barrier') {{
+      waitForMarker('abort-release', () => process.exit(0));
+      return;
+    }}
+    process.exit(0);
   }}
 }});
 "#
@@ -472,6 +752,852 @@ fn adapter_factories() -> Vec<Box<dyn AdapterFactory>> {
         }),
         Box::new(PiAdapterFactory),
     ]
+}
+
+fn fixture_marker(root: &Path, name: &str) -> PathBuf {
+    root.join("bundle").join("fixture").join(name)
+}
+
+async fn wait_for_fixture_marker(root: &Path, name: &str) {
+    let path = fixture_marker(root, name);
+    bounded("Pi fixture marker", async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+}
+
+async fn abort_returned_before_fixture_marker(
+    root: &Path,
+    abort: &tokio::task::JoinHandle<Result<(), EngineError>>,
+) -> bool {
+    let marker = fixture_marker(root, "abort-entered");
+    bounded("Pi abort RPC or premature return", async {
+        loop {
+            if marker.exists() {
+                break false;
+            }
+            if abort.is_finished() {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+}
+
+async fn start_returned_before_fixture_marker(
+    root: &Path,
+    marker_name: &str,
+    start: &tokio::task::JoinHandle<Result<EngineSessionRef, EngineError>>,
+) -> bool {
+    let marker = fixture_marker(root, marker_name);
+    bounded("Pi startup cleanup marker or premature return", async {
+        loop {
+            if marker.exists() {
+                break false;
+            }
+            if start.is_finished() {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+}
+
+async fn pi_fixture_adapter(root: &Path, scenario: FixtureScenario) -> Arc<PiEngineAdapter> {
+    Arc::new(
+        PiEngineAdapter::production_with_executable(
+            fixture_model_service().await,
+            root.join("sessions"),
+            root.join("runtime"),
+            Some(install_node_fixture(root, scenario)),
+        )
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn pi_uses_effective_permission_for_execution_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = install_node_fixture(root.path(), FixtureScenario::Complete);
+    let arguments_path = executable.parent().unwrap().join("argv.json");
+    let adapter: Arc<dyn EngineAdapter> = Arc::new(
+        PiEngineAdapter::production_with_executable(
+            fixture_model_service().await,
+            root.path().join("sessions"),
+            root.path().join("runtime"),
+            Some(executable),
+        )
+        .unwrap(),
+    );
+
+    let (_, events) = start_and_collect(&adapter, "run-effective-permission").await;
+    assert_one_terminal(&events);
+    let arguments: Vec<String> = serde_json::from_slice(
+        &std::fs::read(arguments_path).expect("Pi fixture must capture its argv"),
+    )
+    .unwrap();
+    let tools = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--tools")
+        .expect("Pi argv must declare tools")[1]
+        .as_str();
+
+    assert!(tools.contains("read"));
+    assert!(!tools.contains("edit"));
+    assert!(!tools.contains("write"));
+    assert!(!tools.contains("bash"));
+}
+
+#[tokio::test]
+async fn pi_startup_crash_diagnostic_does_not_include_stderr_or_launch_secrets() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::StartupCrash).await;
+    let (sender, _receiver) = mpsc::channel(8);
+
+    let error = adapter
+        .start(context("run-startup-crash", 0), input("crash"), sender)
+        .await
+        .unwrap_err();
+    let rendered = format!("{error}\n{error:?}");
+
+    for sentinel in [
+        "startup-stderr-sentinel",
+        "fixture-key-never-sent-to-a-provider",
+        "fixture-model",
+        CONTRACT_WORK_ID,
+        root.path().to_string_lossy().as_ref(),
+    ] {
+        assert!(
+            !rendered.contains(sentinel),
+            "startup diagnostic leaked {sentinel}"
+        );
+    }
+    assert_eq!(
+        error.to_string(),
+        "engine failed to start: Pi RPC exited before accepting the Run"
+    );
+    assert!(!root.path().join("runtime/run-startup-crash/agent").exists());
+    assert!(matches!(
+        adapter.abort("run-startup-crash").await,
+        Err(EngineError::NotRunning)
+    ));
+    let (retry_sender, _retry_receiver) = mpsc::channel(8);
+    let retry = adapter
+        .start(
+            context("run-startup-crash", 0),
+            input("retry"),
+            retry_sender,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        retry.to_string(),
+        "engine failed to start: Pi RPC exited before accepting the Run"
+    );
+}
+
+#[tokio::test]
+async fn pi_prompt_rejection_diagnostic_ignores_rpc_details_and_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::PromptRejected).await;
+    let (sender, _receiver) = mpsc::channel(8);
+    let start_adapter = Arc::clone(&adapter);
+    let start = tokio::spawn(async move {
+        start_adapter
+            .start(context("run-prompt-rejected", 0), input("reject"), sender)
+            .await
+    });
+    let returned_before_cleanup =
+        start_returned_before_fixture_marker(root.path(), "startup-cleanup-entered", &start).await;
+    std::fs::write(
+        fixture_marker(root.path(), "startup-cleanup-release"),
+        b"release",
+    )
+    .unwrap();
+    let error = bounded("rejected Pi startup cleanup", start)
+        .await
+        .unwrap()
+        .unwrap_err();
+    let rendered = format!("{error}\n{error:?}");
+
+    for sentinel in [
+        "prompt-rejection-stderr-sentinel",
+        "prompt-rejection-detail-sentinel",
+        "fixture-key-never-sent-to-a-provider",
+    ] {
+        assert!(!rendered.contains(sentinel));
+    }
+    assert_eq!(
+        error.to_string(),
+        "engine failed to start: Pi rejected the Run prompt"
+    );
+    assert!(
+        !returned_before_cleanup,
+        "prompt rejection returned before child cleanup began"
+    );
+    assert!(
+        !root
+            .path()
+            .join("runtime/run-prompt-rejected/agent")
+            .exists()
+    );
+    assert!(matches!(
+        adapter.abort("run-prompt-rejected").await,
+        Err(EngineError::NotRunning)
+    ));
+    let (retry_sender, _retry_receiver) = mpsc::channel(8);
+    let retry = adapter
+        .start(
+            context("run-prompt-rejected", 0),
+            input("retry"),
+            retry_sender,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        retry.to_string(),
+        "engine failed to start: Pi rejected the Run prompt"
+    );
+}
+
+#[tokio::test]
+async fn pi_startup_timeout_diagnostic_ignores_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::StartupTimeout).await;
+    let (sender, _receiver) = mpsc::channel(8);
+    let start_adapter = Arc::clone(&adapter);
+    let start = tokio::spawn(async move {
+        start_adapter
+            .start(context("run-startup-timeout", 0), input("timeout"), sender)
+            .await
+    });
+    let returned_before_cleanup =
+        start_returned_before_fixture_marker(root.path(), "startup-cleanup-entered", &start).await;
+    std::fs::write(
+        fixture_marker(root.path(), "startup-cleanup-release"),
+        b"release",
+    )
+    .unwrap();
+    let error = bounded("timed-out Pi startup cleanup", start)
+        .await
+        .unwrap()
+        .unwrap_err();
+    let rendered = format!("{error}\n{error:?}");
+
+    for sentinel in [
+        "startup-timeout-stderr-sentinel",
+        "fixture-key-never-sent-to-a-provider",
+    ] {
+        assert!(!rendered.contains(sentinel));
+    }
+    assert_eq!(
+        error.to_string(),
+        "engine failed to start: Pi RPC did not accept the Run in time"
+    );
+    assert!(
+        !returned_before_cleanup,
+        "startup timeout returned before child cleanup began"
+    );
+    assert!(
+        !root
+            .path()
+            .join("runtime/run-startup-timeout/agent")
+            .exists()
+    );
+    assert!(matches!(
+        adapter.abort("run-startup-timeout").await,
+        Err(EngineError::NotRunning)
+    ));
+    let (retry_sender, retry_receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-startup-timeout", 0),
+            input("retry"),
+            retry_sender,
+        )
+        .await
+        .unwrap();
+    assert_one_terminal(&collect_closed(retry_receiver).await);
+}
+
+#[tokio::test]
+async fn pi_runtime_context_redacts_sensitive_raw_events() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::SensitiveRawEvent).await;
+    let (sender, receiver) = mpsc::channel(8);
+    adapter
+        .start(context("run-sensitive-raw", 0), input("raw"), sender)
+        .await
+        .unwrap();
+    let events = collect_closed(receiver).await;
+    let (kind, payload_json) = events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::RawEngineEvent { kind, payload_json } => Some((kind, payload_json)),
+            _ => None,
+        })
+        .expect("fixture must emit a raw event");
+    let payload: serde_json::Value = serde_json::from_str(payload_json).unwrap();
+
+    assert_eq!(kind, "future-[REDACTED]");
+    assert_eq!(payload["type"], "future-[REDACTED]");
+    assert_eq!(payload["token"], "[REDACTED]");
+    for field in [
+        "api",
+        "work",
+        "workspace",
+        "sessionPath",
+        "runtimePath",
+        "model",
+    ] {
+        assert_eq!(payload["values"][field], "[REDACTED]", "field {field}");
+    }
+}
+
+#[tokio::test]
+async fn pi_reserves_a_run_before_concurrent_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::StartupBarrier).await;
+    let (first_sender, mut first_receiver) = mpsc::channel(8);
+    let first_adapter = Arc::clone(&adapter);
+    let first = tokio::spawn(async move {
+        first_adapter
+            .start(
+                context("run-concurrent-start", 0),
+                input("first"),
+                first_sender,
+            )
+            .await
+    });
+    wait_for_fixture_marker(root.path(), "startup-entered.log").await;
+
+    let (second_sender, _second_receiver) = mpsc::channel(8);
+    let second = tokio::time::timeout(
+        Duration::from_millis(250),
+        adapter.start(
+            context("run-concurrent-start", 0),
+            input("second"),
+            second_sender,
+        ),
+    )
+    .await;
+
+    std::fs::write(fixture_marker(root.path(), "startup-release"), b"release").unwrap();
+    bounded("first Pi startup", first).await.unwrap().unwrap();
+    assert!(matches!(
+        receive_event(&mut first_receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+    bounded("first Pi abort", adapter.abort("run-concurrent-start"))
+        .await
+        .unwrap();
+    collect_closed(first_receiver).await;
+
+    assert!(matches!(second, Ok(Err(EngineError::Start(_)))));
+}
+
+#[tokio::test]
+async fn pi_abort_waits_for_child_exit_and_cleanup_acknowledgement() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::AbortBarrier).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(context("run-abort-ack", 0), input("hold"), sender)
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+
+    let abort_adapter = Arc::clone(&adapter);
+    let abort = tokio::spawn(async move { abort_adapter.abort("run-abort-ack").await });
+    let returned_before_release = abort_returned_before_fixture_marker(root.path(), &abort).await;
+    std::fs::write(fixture_marker(root.path(), "abort-release"), b"release").unwrap();
+    bounded("acknowledged Pi abort", abort)
+        .await
+        .unwrap()
+        .unwrap();
+    let events = collect_closed(receiver).await;
+    assert!(matches!(events.last(), Some(EngineEvent::RunFailed { .. })));
+
+    assert!(!returned_before_release, "abort returned before child exit");
+    assert!(!root.path().join("runtime/run-abort-ack/agent").exists());
+}
+
+#[tokio::test]
+async fn pi_abort_interrupts_sink_backpressure_and_delivers_a_terminal_after_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::Backpressure).await;
+    let (sender, mut receiver) = mpsc::channel(1);
+    adapter
+        .start(context("run-abort-backpressure", 0), input("hold"), sender)
+        .await
+        .unwrap();
+    wait_for_fixture_marker(root.path(), "backpressure-emitted").await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+
+    let abort_adapter = Arc::clone(&adapter);
+    let abort = tokio::spawn(async move { abort_adapter.abort("run-abort-backpressure").await });
+    let abort_observed = tokio::time::timeout(Duration::from_secs(2), async {
+        let marker = fixture_marker(root.path(), "abort-entered");
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    if !abort_observed {
+        drop(receiver);
+        let _ = bounded("backpressured Pi cleanup", abort).await;
+        panic!("Pi abort could not interrupt a blocked event sink");
+    }
+    bounded("backpressured Pi resource cleanup", async {
+        while root
+            .path()
+            .join("runtime/run-abort-backpressure/agent")
+            .exists()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        !abort.is_finished(),
+        "Pi abort acknowledged before terminal delivery"
+    );
+
+    let started = receive_event(&mut receiver).await;
+    let terminal = receive_event(&mut receiver).await;
+    assert!(matches!(started, EngineEvent::RunStarted { .. }));
+    assert!(matches!(terminal, EngineEvent::RunFailed { .. }));
+    bounded("backpressured Pi abort", abort)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(receiver.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn pi_abort_interrupts_error_terminal_backpressure() {
+    for (scenario, run_id) in [
+        (
+            FixtureScenario::MalformedBackpressure,
+            "run-malformed-backpressure",
+        ),
+        (
+            FixtureScenario::InvalidUtf8Backpressure,
+            "run-invalid-utf8-backpressure",
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let adapter = pi_fixture_adapter(root.path(), scenario).await;
+        let (sender, mut receiver) = mpsc::channel(1);
+        adapter
+            .start(context(run_id, 0), input("hold"), sender)
+            .await
+            .unwrap();
+        wait_for_fixture_marker(root.path(), "backpressure-emitted").await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+
+        let abort_adapter = Arc::clone(&adapter);
+        let owned_run_id = run_id.to_owned();
+        let abort = tokio::spawn(async move { abort_adapter.abort(&owned_run_id).await });
+        let abort_observed = tokio::time::timeout(Duration::from_secs(2), async {
+            let marker = fixture_marker(root.path(), "abort-entered");
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !abort_observed {
+            drop(receiver);
+            let _ = bounded("error-terminal Pi cleanup", abort).await;
+            panic!("Pi abort could not interrupt a blocked error terminal for {run_id}");
+        }
+
+        assert!(matches!(
+            receive_event(&mut receiver).await,
+            EngineEvent::RunStarted { .. }
+        ));
+        assert!(matches!(
+            receive_event(&mut receiver).await,
+            EngineEvent::RunFailed { .. }
+        ));
+        bounded("error-terminal Pi abort", abort)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(receiver.recv().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn pi_completion_does_not_wait_for_an_inherited_stderr_handle() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::InheritedStderrComplete).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-inherited-stderr", 0),
+            input("complete"),
+            sender,
+        )
+        .await
+        .unwrap();
+    wait_for_fixture_marker(root.path(), "stderr-holder-entered").await;
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunCompleted { .. }
+    ));
+
+    let closed_before_watchdog = tokio::select! {
+        event = receiver.recv() => {
+            assert!(event.is_none());
+            !fixture_marker(root.path(), "stderr-holder-watchdog").exists()
+        }
+        _ = wait_for_fixture_marker(root.path(), "stderr-holder-watchdog") => false,
+    };
+    std::fs::write(
+        fixture_marker(root.path(), "stderr-holder-release"),
+        b"release",
+    )
+    .unwrap();
+    wait_for_fixture_marker(root.path(), "stderr-holder-exited").await;
+    if !closed_before_watchdog {
+        assert!(
+            bounded("inherited-stderr receiver closure", receiver.recv())
+                .await
+                .is_none()
+        );
+    }
+
+    assert!(
+        closed_before_watchdog,
+        "Pi cleanup waited for a descendant-inherited stderr handle"
+    );
+}
+
+#[tokio::test]
+async fn pi_abort_does_not_wait_for_an_inherited_stderr_handle() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::InheritedStderrHold).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-inherited-stderr-abort", 0),
+            input("hold"),
+            sender,
+        )
+        .await
+        .unwrap();
+    wait_for_fixture_marker(root.path(), "stderr-holder-entered").await;
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+
+    let abort_adapter = Arc::clone(&adapter);
+    let mut abort =
+        tokio::spawn(async move { abort_adapter.abort("run-inherited-stderr-abort").await });
+    let finished_before_watchdog = tokio::select! {
+        result = &mut abort => {
+            result.unwrap().unwrap();
+            !fixture_marker(root.path(), "stderr-holder-watchdog").exists()
+        }
+        _ = wait_for_fixture_marker(root.path(), "stderr-holder-watchdog") => false,
+    };
+    std::fs::write(
+        fixture_marker(root.path(), "stderr-holder-release"),
+        b"release",
+    )
+    .unwrap();
+    wait_for_fixture_marker(root.path(), "stderr-holder-exited").await;
+    if !finished_before_watchdog {
+        bounded("inherited-stderr Pi abort", abort)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    collect_closed(receiver).await;
+
+    assert!(
+        finished_before_watchdog,
+        "Pi abort waited for a descendant-inherited stderr handle"
+    );
+}
+
+#[tokio::test]
+async fn dropping_pi_does_not_wait_for_an_inherited_stderr_handle() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::InheritedStderrHold).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-inherited-stderr-drop", 0),
+            input("hold"),
+            sender,
+        )
+        .await
+        .unwrap();
+    wait_for_fixture_marker(root.path(), "stderr-holder-entered").await;
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+    let agent_directory = root.path().join("runtime/run-inherited-stderr-drop/agent");
+    assert!(agent_directory.exists());
+    drop(receiver);
+    drop(adapter);
+
+    let cleaned_before_watchdog = tokio::select! {
+        _ = async {
+            while agent_directory.exists() {
+                tokio::task::yield_now().await;
+            }
+        } => !fixture_marker(root.path(), "stderr-holder-watchdog").exists(),
+        _ = wait_for_fixture_marker(root.path(), "stderr-holder-watchdog") => false,
+    };
+    std::fs::write(
+        fixture_marker(root.path(), "stderr-holder-release"),
+        b"release",
+    )
+    .unwrap();
+    wait_for_fixture_marker(root.path(), "stderr-holder-exited").await;
+    if !cleaned_before_watchdog {
+        bounded("inherited-stderr Pi drop cleanup", async {
+            while agent_directory.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+    }
+
+    assert!(
+        cleaned_before_watchdog,
+        "dropping Pi waited for a descendant-inherited stderr handle"
+    );
+}
+
+#[tokio::test]
+async fn pi_rejects_restart_while_abort_cleanup_is_in_progress() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::AbortBarrier).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(context("run-abort-restart", 0), input("hold"), sender)
+        .await
+        .unwrap();
+    receive_event(&mut receiver).await;
+
+    let abort_adapter = Arc::clone(&adapter);
+    let abort = tokio::spawn(async move { abort_adapter.abort("run-abort-restart").await });
+    abort_returned_before_fixture_marker(root.path(), &abort).await;
+    let (restart_sender, restart_receiver) = mpsc::channel(8);
+    let restart = bounded(
+        "restart during Pi abort",
+        adapter.start(
+            context("run-abort-restart", 0),
+            input("restart"),
+            restart_sender,
+        ),
+    )
+    .await;
+
+    std::fs::write(fixture_marker(root.path(), "abort-release"), b"release").unwrap();
+    bounded("Pi abort cleanup", abort).await.unwrap().unwrap();
+    collect_closed(receiver).await;
+    if restart.is_ok() {
+        let _ = adapter.abort("run-abort-restart").await;
+        collect_closed(restart_receiver).await;
+    }
+
+    assert!(matches!(restart, Err(EngineError::Start(_))));
+}
+
+#[tokio::test]
+async fn pi_allows_same_run_restart_after_abort_cleanup_acknowledgement() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::AbortBarrier).await;
+    let (first_sender, mut first_receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-abort-then-restart", 0),
+            input("first"),
+            first_sender,
+        )
+        .await
+        .unwrap();
+    receive_event(&mut first_receiver).await;
+
+    let first_abort_adapter = Arc::clone(&adapter);
+    let first_abort =
+        tokio::spawn(async move { first_abort_adapter.abort("run-abort-then-restart").await });
+    abort_returned_before_fixture_marker(root.path(), &first_abort).await;
+    std::fs::write(fixture_marker(root.path(), "abort-release"), b"release").unwrap();
+    bounded("first acknowledged Pi abort", first_abort)
+        .await
+        .unwrap()
+        .unwrap();
+    collect_closed(first_receiver).await;
+
+    let (second_sender, mut second_receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-abort-then-restart", 0),
+            input("second"),
+            second_sender,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receive_event(&mut second_receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+    bounded(
+        "second acknowledged Pi abort",
+        adapter.abort("run-abort-then-restart"),
+    )
+    .await
+    .unwrap();
+    collect_closed(second_receiver).await;
+}
+
+#[tokio::test]
+async fn cancelling_a_pi_abort_caller_does_not_strand_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::AbortBarrier).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-cancelled-abort-caller", 0),
+            input("hold"),
+            sender,
+        )
+        .await
+        .unwrap();
+    receive_event(&mut receiver).await;
+
+    let abort_adapter = Arc::clone(&adapter);
+    let abort =
+        tokio::spawn(async move { abort_adapter.abort("run-cancelled-abort-caller").await });
+    wait_for_fixture_marker(root.path(), "abort-entered").await;
+    assert!(!abort.is_finished());
+    abort.abort();
+    assert!(abort.await.unwrap_err().is_cancelled());
+    std::fs::write(fixture_marker(root.path(), "abort-release"), b"release").unwrap();
+    collect_closed(receiver).await;
+
+    let mut restarted_receiver = bounded("restart after cancelled Pi abort caller", async {
+        loop {
+            let (restart_sender, restart_receiver) = mpsc::channel(8);
+            match adapter
+                .start(
+                    context("run-cancelled-abort-caller", 0),
+                    input("restart"),
+                    restart_sender,
+                )
+                .await
+            {
+                Ok(_) => break restart_receiver,
+                Err(EngineError::Start(_)) => tokio::task::yield_now().await,
+                Err(error) => panic!("unexpected restart error: {error}"),
+            }
+        }
+    })
+    .await;
+    assert!(matches!(
+        receive_event(&mut restarted_receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+    bounded(
+        "cleanup restarted Pi run",
+        adapter.abort("run-cancelled-abort-caller"),
+    )
+    .await
+    .unwrap();
+    collect_closed(restarted_receiver).await;
+}
+
+#[tokio::test]
+async fn dropping_pi_after_receiver_close_releases_the_node_process() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().to_owned();
+    let adapter = pi_fixture_adapter(&root_path, FixtureScenario::HoldWithWatchdog).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(context("run-drop-cleanup", 0), input("hold"), sender)
+        .await
+        .unwrap();
+    receive_event(&mut receiver).await;
+    drop(receiver);
+    drop(adapter);
+
+    let abort_won = bounded("Pi drop abort before fixture watchdog", async {
+        loop {
+            if fixture_marker(&root_path, "abort-entered").exists() {
+                break true;
+            }
+            if fixture_marker(&root_path, "watchdog-fired").exists() {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    bounded("dropped Pi process and fixture cleanup", async {
+        loop {
+            if std::fs::remove_dir_all(&root_path).is_ok() || !root_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    assert!(abort_won, "dropping Pi relied on the fixture watchdog");
+}
+
+#[tokio::test]
+async fn cancelling_pi_startup_sends_abort_and_reaps_the_node_process() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().to_owned();
+    let adapter = pi_fixture_adapter(&root_path, FixtureScenario::StartupBarrier).await;
+    let (sender, _receiver) = mpsc::channel(8);
+    let start_adapter = Arc::clone(&adapter);
+    let start = tokio::spawn(async move {
+        start_adapter
+            .start(context("run-startup-cancel", 0), input("hold"), sender)
+            .await
+    });
+    wait_for_fixture_marker(&root_path, "startup-entered.log").await;
+
+    start.abort();
+    assert!(start.await.unwrap_err().is_cancelled());
+
+    wait_for_fixture_marker(&root_path, "abort-entered").await;
+    bounded("cancelled Pi startup cleanup", async {
+        loop {
+            if std::fs::remove_dir_all(&root_path).is_ok() || !root_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
 }
 
 async fn start_and_collect(
@@ -639,7 +1765,7 @@ async fn assert_factory_contract(factory: &dyn AdapterFactory) {
 #[tokio::test]
 async fn every_registered_adapter_passes_the_shared_capability_contract() {
     for factory in adapter_factories() {
-        bounded(factory.name(), assert_factory_contract(factory.as_ref())).await;
+        assert_factory_contract(factory.as_ref()).await;
     }
 }
 

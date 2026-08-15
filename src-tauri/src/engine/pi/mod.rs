@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
 
@@ -10,9 +10,9 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, mpsc},
+    sync::{Notify, mpsc, oneshot, watch},
 };
 
 use crate::{
@@ -93,6 +93,7 @@ fn escape_xml_attribute(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 const RPC_START_TIMEOUT: Duration = Duration::from_secs(15);
+const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 // Pi lifecycle records may contain cumulative/full assistant output up to the
 // configured 32,768-token ceiling. 1 MiB admits those records while retaining
 // a hard bound before UTF-8 validation and JSON parsing.
@@ -101,6 +102,9 @@ const INITIAL_RPC_RECORD_BYTES: usize = 8 * 1_024;
 const MAX_SUMMARY_CHARS: usize = 2_000;
 const MAX_RAW_EVENT_CHARS: usize = 32_000;
 const MAX_RAW_EVENT_KIND_CHARS: usize = 256;
+const PI_STARTUP_EXITED_DIAGNOSTIC: &str = "Pi RPC exited before accepting the Run";
+const PI_STARTUP_REJECTED_DIAGNOSTIC: &str = "Pi rejected the Run prompt";
+const PI_STARTUP_TIMEOUT_DIAGNOSTIC: &str = "Pi RPC did not accept the Run in time";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RpcRecordReadError {
@@ -300,12 +304,25 @@ pub struct RpcEventTranslator {
     tool_count: usize,
     artifacts: Vec<String>,
     validation: Vec<String>,
+    redactor: SensitiveRedactor,
 }
 
 impl RpcEventTranslator {
-    pub fn translate(&mut self, message: Value) -> Option<EngineEvent> {
+    pub fn with_sensitive_values<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            redactor: SensitiveRedactor::new(values),
+            ..Self::default()
+        }
+    }
+
+    pub fn translate(&mut self, mut message: Value) -> Option<EngineEvent> {
+        self.redactor.redact_known_values(&mut message);
         let semantic = self.translate_known(&message);
-        Some(semantic.unwrap_or_else(|| raw_event(message)))
+        Some(semantic.unwrap_or_else(|| raw_event(message, &self.redactor)))
     }
 
     fn translate_known(&mut self, message: &Value) -> Option<EngineEvent> {
@@ -418,6 +435,93 @@ impl RpcEventTranslator {
     }
 }
 
+#[derive(Default)]
+struct SensitiveRedactor {
+    values: Vec<String>,
+}
+
+impl SensitiveRedactor {
+    fn new<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut values = values
+            .into_iter()
+            .map(Into::into)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        values.dedup();
+        Self { values }
+    }
+
+    fn redact_text(&self, text: &str) -> String {
+        self.values.iter().fold(text.to_owned(), |rendered, value| {
+            rendered.replace(value, "[REDACTED]")
+        })
+    }
+
+    fn redact_known_values(&self, value: &mut Value) {
+        match value {
+            Value::String(text) => *text = self.redact_text(text),
+            Value::Array(values) => {
+                for value in values {
+                    self.redact_known_values(value);
+                }
+            }
+            Value::Object(object) => {
+                let entries = std::mem::take(object);
+                for (key, mut value) in entries {
+                    self.redact_known_values(&mut value);
+                    object.insert(self.redact_text(&key), value);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
+    fn redact_value(&self, value: &mut Value) {
+        match value {
+            Value::String(text) => *text = self.redact_text(text),
+            Value::Array(values) => {
+                for value in values {
+                    self.redact_value(value);
+                }
+            }
+            Value::Object(object) => {
+                let entries = std::mem::take(object);
+                for (key, mut value) in entries {
+                    if sensitive_json_key(&key) {
+                        value = Value::String("[REDACTED]".into());
+                    } else {
+                        self.redact_value(&mut value);
+                    }
+                    object.insert(self.redact_text(&key), value);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+}
+
+fn sensitive_json_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key == "key"
+        || key.ends_with("key")
+        || [
+            "token",
+            "secret",
+            "authorization",
+            "path",
+            "directory",
+            "session",
+            "model",
+        ]
+        .iter()
+        .any(|sensitive| key.contains(sensitive))
+}
+
 fn usage_event(message: &Value) -> Option<EngineEvent> {
     let usage = message.pointer("/message/usage")?;
     usage.as_object()?;
@@ -436,12 +540,13 @@ fn usage_field(usage: &Value, field: &str) -> Option<u32> {
         .map_or(Some(0), |value| u32::try_from(value.as_u64()?).ok())
 }
 
-fn raw_event(message: Value) -> EngineEvent {
+fn raw_event(mut message: Value, redactor: &SensitiveRedactor) -> EngineEvent {
     let kind = message
         .get("type")
         .and_then(Value::as_str)
-        .map(|kind| summarize_to_limit(kind, MAX_RAW_EVENT_KIND_CHARS))
+        .map(|kind| summarize_to_limit(&redactor.redact_text(kind), MAX_RAW_EVENT_KIND_CHARS))
         .unwrap_or_else(|| "unknown".into());
+    redactor.redact_value(&mut message);
     EngineEvent::RawEngineEvent {
         kind,
         payload_json: summarize_to_limit(
@@ -651,16 +756,75 @@ impl PiCommand {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunControl {
+    Running,
     Abort,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiRunState {
+    Starting,
+    Running,
+    Cancelling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PiRunOutcome {
+    Completed,
+    Failed,
+    Aborted,
+    ChannelClosed,
+}
+
+struct PiRunCompletion {
+    outcome: Mutex<Option<PiRunOutcome>>,
+    changed: Notify,
+}
+
+impl PiRunCompletion {
+    fn new() -> Self {
+        Self {
+            outcome: Mutex::new(None),
+            changed: Notify::new(),
+        }
+    }
+
+    fn complete(&self, outcome: PiRunOutcome) {
+        let mut current = self.outcome.lock().unwrap();
+        if current.is_none() {
+            *current = Some(outcome);
+            drop(current);
+            self.changed.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) -> PiRunOutcome {
+        loop {
+            let changed = self.changed.notified();
+            if let Some(outcome) = *self.outcome.lock().unwrap() {
+                return outcome;
+            }
+            changed.await;
+        }
+    }
+}
+
+struct PiActiveRun {
+    generation: uuid::Uuid,
+    state: PiRunState,
+    cancel: watch::Sender<RunControl>,
+    completion: Arc<PiRunCompletion>,
+}
+
+type PiActiveRuns = Mutex<HashMap<String, PiActiveRun>>;
 
 pub struct PiEngineAdapter {
     model_service: Arc<ModelService>,
     sessions_root: PathBuf,
     runtime_root: PathBuf,
     command: PiCommand,
-    active: Arc<Mutex<HashMap<String, mpsc::Sender<RunControl>>>>,
+    active: Arc<PiActiveRuns>,
 }
 
 impl PiEngineAdapter {
@@ -696,116 +860,52 @@ impl PiEngineAdapter {
         sink: mpsc::Sender<EngineEvent>,
         transition: Option<SessionTransition>,
     ) -> Result<EngineSessionRef, EngineError> {
-        if self.active.lock().await.contains_key(context.run_id()) {
-            return Err(EngineError::Start("run is already active".into()));
-        }
-        let configuration = self
-            .model_service
-            .runtime_configuration()
-            .await
-            .map_err(|_| EngineError::Start("model configuration is unavailable".into()))?;
-        let agent_directory = self.runtime_root.join(context.run_id()).join("agent");
-        let session_directory = self.sessions_root.join(context.work_id());
-        std::fs::create_dir_all(&agent_directory)
-            .and_then(|_| std::fs::create_dir_all(&session_directory))
-            .map_err(|_| {
-                EngineError::Start("Pi runtime directories could not be prepared".into())
-            })?;
-        let provider_config = PiProviderConfig::from_runtime(&configuration)
-            .to_json()
-            .map_err(|_| EngineError::Start("Pi provider configuration is invalid".into()))?;
-        std::fs::write(agent_directory.join("models.json"), provider_config).map_err(|_| {
-            EngineError::Start("Pi provider configuration could not be written".into())
-        })?;
-
-        let arguments = PiRunArguments::new(
-            context.root_path(),
-            &session_directory,
-            context.work_id(),
-            &configuration.model_id,
-            context.permission_mode(),
-        );
-        let mut command = self.command.process(&arguments);
-        command
-            .env("PI_CODING_AGENT_DIR", &agent_directory)
-            .env(API_KEY_ENVIRONMENT_VARIABLE, &configuration.api_key);
-        let mut child = command
-            .spawn()
-            .map_err(|_| EngineError::Start("Pi RPC process could not be started".into()))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| EngineError::Start("Pi RPC stdin is unavailable".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| EngineError::Start("Pi RPC stdout is unavailable".into()))?;
-        let startup_stderr = Arc::new(Mutex::new(Vec::new()));
-        if let Some(mut stderr) = child.stderr.take() {
-            let startup_stderr = Arc::clone(&startup_stderr);
-            tokio::spawn(async move {
-                let mut buffer = [0_u8; 1_024];
-                while let Ok(read) = stderr.read(&mut buffer).await {
-                    if read == 0 {
-                        break;
-                    }
-                    let mut captured = startup_stderr.lock().await;
-                    let remaining = 8_192_usize.saturating_sub(captured.len());
-                    captured.extend_from_slice(&buffer[..read.min(remaining)]);
-                }
-            });
-        }
-
-        let request_id = format!("run-{}", context.run_id());
-        write_rpc(&mut stdin, &prompt_command(&request_id, &input)).await?;
-        let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
-        let mut translator = RpcEventTranslator::default();
-        await_prompt_acceptance(
-            &mut child,
-            &mut stdout,
-            &request_id,
-            &mut translator,
-            &sink,
-            &startup_stderr,
-        )
-        .await?;
-        if let Some(transition) = transition {
-            sink.send(EngineEvent::SessionChanged {
-                transition,
-                reason: None,
-            })
-            .await
-            .map_err(|_| EngineError::ChannelClosed)?;
-        }
-        sink.send(EngineEvent::RunStarted {
-            model_label: configuration.model_id.clone(),
-        })
-        .await
-        .map_err(|_| EngineError::ChannelClosed)?;
-
-        let (control_sender, control_receiver) = mpsc::channel(1);
-        self.active
-            .lock()
-            .await
-            .insert(context.run_id().to_owned(), control_sender);
-        let active = Arc::clone(&self.active);
         let run_id = context.run_id().to_owned();
-        tokio::spawn(run_rpc_loop(
-            child,
-            stdin,
-            stdout,
-            translator,
+        let generation = uuid::Uuid::new_v4();
+        let completion = Arc::new(PiRunCompletion::new());
+        let (cancel, cancel_receiver) = watch::channel(RunControl::Running);
+        {
+            let mut active = self.active.lock().unwrap();
+            if active.contains_key(&run_id) {
+                return Err(EngineError::Start("run is already active".into()));
+            }
+            active.insert(
+                run_id.clone(),
+                PiActiveRun {
+                    generation,
+                    state: PiRunState::Starting,
+                    cancel,
+                    completion: Arc::clone(&completion),
+                },
+            );
+        }
+        let (startup_sender, startup_receiver) = oneshot::channel();
+        let (caller_acknowledgement, caller_acknowledgement_receiver) = oneshot::channel();
+        tokio::spawn(run_pi_lifecycle(PiLifecycleRequest {
+            model_service: Arc::clone(&self.model_service),
+            sessions_root: self.sessions_root.clone(),
+            runtime_root: self.runtime_root.clone(),
+            command: self.command.clone(),
+            context,
+            input,
             sink,
-            control_receiver,
-            active,
+            transition,
             run_id,
-            agent_directory,
-        ));
+            generation,
+            active: Arc::downgrade(&self.active),
+            cancel: cancel_receiver,
+            completion,
+            startup: startup_sender,
+            caller_acknowledgement: caller_acknowledgement_receiver,
+        }));
 
-        Ok(EngineSessionRef {
-            engine_kind: "pi_rpc".into(),
-            session_id: context.work_id().to_owned(),
-        })
+        let startup = startup_receiver
+            .await
+            .unwrap_or_else(|_| Err(EngineError::Start("Pi startup task stopped".into())));
+        if startup.is_ok() {
+            let _ = caller_acknowledgement.send(());
+        }
+        startup
     }
 }
 
@@ -858,15 +958,350 @@ impl EngineAdapter for PiEngineAdapter {
     }
 
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {
-        self.active
-            .lock()
-            .await
-            .remove(run_id)
-            .ok_or(EngineError::NotRunning)?
-            .send(RunControl::Abort)
-            .await
-            .map_err(|_| EngineError::NotRunning)
+        let completion = {
+            let mut active = self.active.lock().unwrap();
+            let run = active.get_mut(run_id).ok_or(EngineError::NotRunning)?;
+            if run.state == PiRunState::Cancelling {
+                return Err(EngineError::Aborted);
+            }
+            run.state = PiRunState::Cancelling;
+            let _ = run.cancel.send(RunControl::Abort);
+            Arc::clone(&run.completion)
+        };
+
+        match completion.wait().await {
+            PiRunOutcome::Aborted => Ok(()),
+            PiRunOutcome::Completed | PiRunOutcome::Failed | PiRunOutcome::ChannelClosed => {
+                Err(EngineError::NotRunning)
+            }
+        }
     }
+}
+
+struct PiLifecycleRequest {
+    model_service: Arc<ModelService>,
+    sessions_root: PathBuf,
+    runtime_root: PathBuf,
+    command: PiCommand,
+    context: EngineRunContext,
+    input: EngineInput,
+    sink: mpsc::Sender<EngineEvent>,
+    transition: Option<SessionTransition>,
+    run_id: String,
+    generation: uuid::Uuid,
+    active: Weak<PiActiveRuns>,
+    cancel: watch::Receiver<RunControl>,
+    completion: Arc<PiRunCompletion>,
+    startup: oneshot::Sender<Result<EngineSessionRef, EngineError>>,
+    caller_acknowledgement: oneshot::Receiver<()>,
+}
+
+struct StartedPiRun {
+    stdin: ChildStdin,
+    stdout: PiRpcRecordReader,
+    translator: RpcEventTranslator,
+    session: EngineSessionRef,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PiStreamResult {
+    outcome: PiRunOutcome,
+    terminal: bool,
+}
+
+async fn run_pi_lifecycle(request: PiLifecycleRequest) {
+    let PiLifecycleRequest {
+        model_service,
+        sessions_root,
+        runtime_root,
+        command,
+        context,
+        input,
+        sink,
+        transition,
+        run_id,
+        generation,
+        active,
+        mut cancel,
+        completion,
+        startup,
+        mut caller_acknowledgement,
+    } = request;
+    let mut startup = Some(startup);
+    let agent_directory = runtime_root.join(&run_id).join("agent");
+    let session_directory = sessions_root.join(context.work_id());
+    let mut child: Option<Child> = None;
+    let mut startup_stdin: Option<ChildStdin> = None;
+    let mut stderr_task = None;
+
+    let startup_result: Result<StartedPiRun, EngineError> = async {
+        let configuration = tokio::select! {
+            biased;
+            _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
+                return Err(EngineError::Aborted);
+            }
+            configuration = model_service.runtime_configuration() => {
+                configuration.map_err(|_| EngineError::Start("model configuration is unavailable".into()))?
+            }
+        };
+        std::fs::create_dir_all(&agent_directory)
+            .and_then(|_| std::fs::create_dir_all(&session_directory))
+            .map_err(|_| {
+                EngineError::Start("Pi runtime directories could not be prepared".into())
+            })?;
+        let provider_config = PiProviderConfig::from_runtime(&configuration)
+            .to_json()
+            .map_err(|_| EngineError::Start("Pi provider configuration is invalid".into()))?;
+        std::fs::write(agent_directory.join("models.json"), provider_config).map_err(|_| {
+            EngineError::Start("Pi provider configuration could not be written".into())
+        })?;
+
+        let arguments = PiRunArguments::new(
+            context.root_path(),
+            &session_directory,
+            context.work_id(),
+            &configuration.model_id,
+            context.effective_permission(),
+        );
+        let mut process = command.process(&arguments);
+        process
+            .env("PI_CODING_AGENT_DIR", &agent_directory)
+            .env(API_KEY_ENVIRONMENT_VARIABLE, &configuration.api_key);
+        child = Some(
+            process
+                .spawn()
+                .map_err(|_| EngineError::Start("Pi RPC process could not be started".into()))?,
+        );
+        let process = child.as_mut().unwrap();
+        startup_stdin = Some(
+            process
+                .stdin
+                .take()
+                .ok_or_else(|| EngineError::Start("Pi RPC stdin is unavailable".into()))?,
+        );
+        let stdout = process
+            .stdout
+            .take()
+            .ok_or_else(|| EngineError::Start("Pi RPC stdout is unavailable".into()))?;
+        if let Some(mut stderr) = process.stderr.take() {
+            stderr_task = Some(tokio::spawn(async move {
+                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+            }));
+        }
+
+        let request_id = format!("run-{run_id}");
+        let prompt = prompt_command(&request_id, &input);
+        tokio::select! {
+            biased;
+            _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
+                return Err(EngineError::Aborted);
+            }
+            result = write_rpc(startup_stdin.as_mut().unwrap(), &prompt) => result?,
+        }
+        let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
+        let mut translator = RpcEventTranslator::with_sensitive_values([
+            configuration.api_key.clone(),
+            context.work_id().to_owned(),
+            context.run_id().to_owned(),
+            context.agent_session_id().to_owned(),
+            context.root_path().to_string_lossy().into_owned(),
+            sessions_root.to_string_lossy().into_owned(),
+            session_directory.to_string_lossy().into_owned(),
+            runtime_root.to_string_lossy().into_owned(),
+            agent_directory.to_string_lossy().into_owned(),
+            configuration.model_id.clone(),
+        ]);
+        tokio::select! {
+            biased;
+            _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
+                return Err(EngineError::Aborted);
+            }
+            result = await_prompt_acceptance(
+                child.as_mut().unwrap(),
+                &mut stdout,
+                &request_id,
+                &mut translator,
+                &sink,
+            ) => result?,
+        }
+        if let Some(transition) = transition {
+            tokio::select! {
+                biased;
+                _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
+                    return Err(EngineError::Aborted);
+                }
+                result = sink.send(EngineEvent::SessionChanged { transition, reason: None }) => {
+                    result.map_err(|_| EngineError::ChannelClosed)?;
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
+                return Err(EngineError::Aborted);
+            }
+            result = sink.send(EngineEvent::RunStarted { model_label: configuration.model_id.clone() }) => {
+                result.map_err(|_| EngineError::ChannelClosed)?;
+            }
+        }
+        if !mark_pi_running(&active, &run_id, generation) {
+            return Err(EngineError::Aborted);
+        }
+
+        Ok(StartedPiRun {
+            stdin: startup_stdin.take().unwrap(),
+            stdout,
+            translator,
+            session: EngineSessionRef {
+                engine_kind: "pi_rpc".into(),
+                session_id: context.work_id().to_owned(),
+            },
+        })
+    }
+    .await;
+
+    let mut startup_error = None;
+    let stream = match startup_result {
+        Ok(mut started) => {
+            let acknowledged = if startup.take().unwrap().send(Ok(started.session)).is_err() {
+                false
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_abort(&mut cancel) => false,
+                    acknowledged = &mut caller_acknowledgement => acknowledged.is_ok(),
+                }
+            };
+            if acknowledged {
+                run_rpc_loop(
+                    &mut started.stdin,
+                    &mut started.stdout,
+                    &mut started.translator,
+                    &sink,
+                    &mut cancel,
+                )
+                .await
+            } else {
+                let _ = write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
+                PiStreamResult {
+                    outcome: PiRunOutcome::Aborted,
+                    terminal: false,
+                }
+            }
+        }
+        Err(error) => {
+            if let Some(stdin) = startup_stdin.as_mut() {
+                let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+            }
+            let outcome = match &error {
+                EngineError::Aborted => PiRunOutcome::Aborted,
+                EngineError::ChannelClosed => PiRunOutcome::ChannelClosed,
+                EngineError::NotRunning | EngineError::Start(_) | EngineError::Unsupported(_) => {
+                    PiRunOutcome::Failed
+                }
+            };
+            startup_error = Some(error);
+            PiStreamResult {
+                outcome,
+                terminal: false,
+            }
+        }
+    };
+
+    let allow_graceful_abort = stream.outcome == PiRunOutcome::Aborted || startup_error.is_some();
+    finish_pi_child(child.as_mut(), allow_graceful_abort).await;
+    if let Some(mut stderr_task) = stderr_task
+        && tokio::time::timeout(STDERR_DRAIN_TIMEOUT, &mut stderr_task)
+            .await
+            .is_err()
+    {
+        stderr_task.abort();
+        let _ = stderr_task.await;
+    }
+    let _ = std::fs::remove_file(agent_directory.join("models.json"));
+    let _ = std::fs::remove_dir(&agent_directory);
+    if !stream.terminal {
+        let message = if stream.outcome == PiRunOutcome::Aborted {
+            "Pi run was aborted"
+        } else {
+            "Pi stopped before completing this Run"
+        };
+        let _ = sink
+            .send(EngineEvent::RunFailed {
+                message: message.into(),
+            })
+            .await;
+    }
+    remove_pi_generation(&active, &run_id, generation);
+    completion.complete(stream.outcome);
+    if let Some(error) = startup_error {
+        let _ = startup.take().unwrap().send(Err(error));
+    }
+}
+
+async fn wait_for_startup_cancellation(
+    cancel: &mut watch::Receiver<RunControl>,
+    caller_acknowledgement: &mut oneshot::Receiver<()>,
+) {
+    tokio::select! {
+        _ = wait_for_abort(cancel) => {}
+        _ = caller_acknowledgement => {}
+    }
+}
+
+async fn wait_for_abort(cancel: &mut watch::Receiver<RunControl>) {
+    if *cancel.borrow() == RunControl::Abort {
+        return;
+    }
+    loop {
+        if cancel.changed().await.is_err() || *cancel.borrow() == RunControl::Abort {
+            return;
+        }
+    }
+}
+
+fn mark_pi_running(active: &Weak<PiActiveRuns>, run_id: &str, generation: uuid::Uuid) -> bool {
+    let Some(active) = active.upgrade() else {
+        return false;
+    };
+    let mut active = active.lock().unwrap();
+    let Some(run) = active.get_mut(run_id) else {
+        return false;
+    };
+    if run.generation != generation || run.state != PiRunState::Starting {
+        return false;
+    }
+    run.state = PiRunState::Running;
+    true
+}
+
+fn remove_pi_generation(active: &Weak<PiActiveRuns>, run_id: &str, generation: uuid::Uuid) {
+    let Some(active) = active.upgrade() else {
+        return;
+    };
+    let mut active = active.lock().unwrap();
+    if active
+        .get(run_id)
+        .is_some_and(|run| run.generation == generation)
+    {
+        active.remove(run_id);
+    }
+}
+
+async fn finish_pi_child(child: Option<&mut Child>, allow_graceful_abort: bool) {
+    let Some(child) = child else {
+        return;
+    };
+    if allow_graceful_abort
+        && matches!(
+            tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
+            Ok(Ok(_))
+        )
+    {
+        return;
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 async fn await_prompt_acceptance(
@@ -875,7 +1310,6 @@ async fn await_prompt_acceptance(
     request_id: &str,
     translator: &mut RpcEventTranslator,
     sink: &mpsc::Sender<EngineEvent>,
-    startup_stderr: &Arc<Mutex<Vec<u8>>>,
 ) -> Result<(), EngineError> {
     tokio::time::timeout(RPC_START_TIMEOUT, async {
         loop {
@@ -884,18 +1318,8 @@ async fn await_prompt_acceptance(
                 .await
                 .map_err(startup_rpc_record_error)?;
             let Some(record) = record else {
-                let status = child.wait().await.ok();
-                tokio::task::yield_now().await;
-                let stderr = summarize_startup_stderr(&startup_stderr.lock().await);
-                let exit = status
-                    .and_then(|status| status.code())
-                    .map_or_else(|| "unknown".into(), |code| code.to_string());
-                let diagnostic = if stderr.is_empty() {
-                    format!("Pi RPC exited before accepting the Run (exit code {exit})")
-                } else {
-                    format!("Pi RPC exited before accepting the Run (exit code {exit}): {stderr}")
-                };
-                return Err(EngineError::Start(diagnostic));
+                let _ = child.wait().await;
+                return Err(EngineError::Start(PI_STARTUP_EXITED_DIAGNOSTIC.into()));
             };
             let message: Value = serde_json::from_str(&record)
                 .map_err(|_| EngineError::Start("Pi RPC returned malformed JSON".into()))?;
@@ -905,8 +1329,7 @@ async fn await_prompt_acceptance(
                 if message.get("success").and_then(Value::as_bool) == Some(true) {
                     return Ok(());
                 }
-                let _ = child.kill().await;
-                return Err(EngineError::Start("Pi rejected the Run prompt".into()));
+                return Err(EngineError::Start(PI_STARTUP_REJECTED_DIAGNOSTIC.into()));
             }
             if let Some(event) = translator.translate(message) {
                 sink.send(event)
@@ -916,69 +1339,141 @@ async fn await_prompt_acceptance(
         }
     })
     .await
-    .map_err(|_| EngineError::Start("Pi RPC did not accept the Run in time".into()))?
+    .map_err(|_| EngineError::Start(PI_STARTUP_TIMEOUT_DIAGNOSTIC.into()))?
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_rpc_loop(
-    mut child: Child,
-    mut stdin: ChildStdin,
-    mut stdout: PiRpcRecordReader,
-    mut translator: RpcEventTranslator,
-    sink: mpsc::Sender<EngineEvent>,
-    mut control: mpsc::Receiver<RunControl>,
-    active: Arc<Mutex<HashMap<String, mpsc::Sender<RunControl>>>>,
-    run_id: String,
-    agent_directory: PathBuf,
-) {
-    let mut terminal = false;
+    stdin: &mut ChildStdin,
+    stdout: &mut PiRpcRecordReader,
+    translator: &mut RpcEventTranslator,
+    sink: &mpsc::Sender<EngineEvent>,
+    cancel: &mut watch::Receiver<RunControl>,
+) -> PiStreamResult {
     loop {
         tokio::select! {
             biased;
-            command = control.recv() => {
-                if matches!(command, Some(RunControl::Abort)) {
-                    let _ = write_rpc(&mut stdin, &json!({"type": "abort"})).await;
-                }
-                break;
+            _ = wait_for_abort(cancel) => {
+                let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+                return PiStreamResult {
+                    outcome: PiRunOutcome::Aborted,
+                    terminal: false,
+                };
             }
             record = stdout.next_record() => {
                 let record = match record {
                     Ok(Some(record)) => record,
-                    Ok(None) => break,
+                    Ok(None) => return PiStreamResult {
+                        outcome: PiRunOutcome::Failed,
+                        terminal: false,
+                    },
                     Err(error) => {
-                        let _ = sink.send(steady_rpc_record_error(error)).await;
-                        terminal = true;
-                        break;
+                        return match send_rpc_event(
+                            stdin,
+                            sink,
+                            cancel,
+                            steady_rpc_record_error(error),
+                        )
+                        .await
+                        {
+                            PiEventDelivery::Sent => PiStreamResult {
+                                outcome: PiRunOutcome::Failed,
+                                terminal: true,
+                            },
+                            PiEventDelivery::Aborted => PiStreamResult {
+                                outcome: PiRunOutcome::Aborted,
+                                terminal: false,
+                            },
+                            PiEventDelivery::ChannelClosed => PiStreamResult {
+                                outcome: PiRunOutcome::ChannelClosed,
+                                terminal: false,
+                            },
+                        };
                     }
                 };
                 let Ok(message) = serde_json::from_str::<Value>(&record) else {
-                    let _ = sink.send(EngineEvent::RunFailed {
-                        message: "Pi RPC returned malformed output".into(),
-                    }).await;
-                    terminal = true;
-                    break;
+                    return match send_rpc_event(
+                        stdin,
+                        sink,
+                        cancel,
+                        EngineEvent::RunFailed {
+                            message: "Pi RPC returned malformed output".into(),
+                        },
+                    )
+                    .await
+                    {
+                        PiEventDelivery::Sent => PiStreamResult {
+                            outcome: PiRunOutcome::Failed,
+                            terminal: true,
+                        },
+                        PiEventDelivery::Aborted => PiStreamResult {
+                            outcome: PiRunOutcome::Aborted,
+                            terminal: false,
+                        },
+                        PiEventDelivery::ChannelClosed => PiStreamResult {
+                            outcome: PiRunOutcome::ChannelClosed,
+                            terminal: false,
+                        },
+                    };
                 };
                 if let Some(event) = translator.translate(message) {
-                    terminal = event.is_terminal();
-                    if sink.send(event).await.is_err() || terminal {
-                        break;
+                    let terminal = event.is_terminal();
+                    let outcome = if matches!(event, EngineEvent::RunCompleted { .. }) {
+                        PiRunOutcome::Completed
+                    } else if terminal {
+                        PiRunOutcome::Failed
+                    } else {
+                        PiRunOutcome::Completed
+                    };
+                    match send_rpc_event(stdin, sink, cancel, event).await {
+                        PiEventDelivery::Sent => {}
+                        PiEventDelivery::Aborted => {
+                            return PiStreamResult {
+                                outcome: PiRunOutcome::Aborted,
+                                terminal: false,
+                            };
+                        }
+                        PiEventDelivery::ChannelClosed => {
+                            return PiStreamResult {
+                                outcome: PiRunOutcome::ChannelClosed,
+                                terminal: false,
+                            };
+                        }
+                    }
+                    if terminal {
+                        return PiStreamResult { outcome, terminal };
                     }
                 }
             }
         }
     }
-    if !terminal {
-        let _ = sink
-            .send(EngineEvent::RunFailed {
-                message: "Pi stopped before completing this Run".into(),
-            })
-            .await;
+}
+
+enum PiEventDelivery {
+    Sent,
+    Aborted,
+    ChannelClosed,
+}
+
+async fn send_rpc_event(
+    stdin: &mut ChildStdin,
+    sink: &mpsc::Sender<EngineEvent>,
+    cancel: &mut watch::Receiver<RunControl>,
+    event: EngineEvent,
+) -> PiEventDelivery {
+    tokio::select! {
+        biased;
+        _ = wait_for_abort(cancel) => {
+            let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+            PiEventDelivery::Aborted
+        }
+        result = sink.send(event) => {
+            if result.is_ok() {
+                PiEventDelivery::Sent
+            } else {
+                PiEventDelivery::ChannelClosed
+            }
+        }
     }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-    active.lock().await.remove(&run_id);
-    let _ = std::fs::remove_file(agent_directory.join("models.json"));
-    let _ = std::fs::remove_dir(agent_directory);
 }
 
 async fn write_rpc(stdin: &mut ChildStdin, value: &Value) -> Result<(), EngineError> {
@@ -995,27 +1490,43 @@ async fn write_rpc(stdin: &mut ChildStdin, value: &Value) -> Result<(), EngineEr
         .map_err(|_| EngineError::Start("Pi RPC command could not be sent".into()))
 }
 
-fn summarize_startup_stderr(bytes: &[u8]) -> String {
-    let rendered = String::from_utf8_lossy(bytes)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let mut chars = rendered.chars();
-    let summary = chars.by_ref().take(499).collect::<String>();
-    if chars.next().is_some() {
-        format!("{summary}…")
-    } else {
-        summary
-    }
-}
-
 #[cfg(windows)]
 use std::os::windows::process::CommandExt as _;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_pi_generation_cleanup_cannot_remove_a_new_generation() {
+        let active = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let old_generation = uuid::Uuid::new_v4();
+        let new_generation = uuid::Uuid::new_v4();
+        let (cancel, _cancel_receiver) = tokio::sync::watch::channel(super::RunControl::Running);
+        active.lock().unwrap().insert(
+            "shared-run".into(),
+            super::PiActiveRun {
+                generation: new_generation,
+                state: super::PiRunState::Running,
+                cancel,
+                completion: std::sync::Arc::new(super::PiRunCompletion::new()),
+            },
+        );
+
+        super::remove_pi_generation(
+            &std::sync::Arc::downgrade(&active),
+            "shared-run",
+            old_generation,
+        );
+
+        assert_eq!(
+            active
+                .lock()
+                .unwrap()
+                .get("shared-run")
+                .map(|run| run.generation),
+            Some(new_generation)
+        );
+    }
+
     #[tokio::test]
     async fn rpc_record_reader_accepts_a_large_pi_message_update() {
         let delta = "x".repeat(128 * 1_024);
@@ -1196,16 +1707,5 @@ mod tests {
         ));
 
         assert_eq!(argument, r"D:\PiWork\pi-sidecar\dist\piwork-pi.js");
-    }
-
-    #[test]
-    fn startup_stderr_is_bounded_and_rendered_as_one_safe_line() {
-        let noisy = format!("first line\r\n{}", "x".repeat(1_000));
-
-        let summary = super::summarize_startup_stderr(noisy.as_bytes());
-
-        assert!(!summary.contains('\n'));
-        assert!(summary.starts_with("first line | "));
-        assert!(summary.chars().count() <= 500);
     }
 }

@@ -1,19 +1,16 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, Semaphore, mpsc, oneshot};
 use uuid::Uuid;
-
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(test)]
-use tokio::sync::Notify;
 
 use super::{
     EngineAdapter, EngineCapabilities, EngineError, EngineEvent, EngineInput, EngineRunContext,
     EngineSessionRef,
 };
 use crate::domain::event::{LivenessState, PermissionOutcome, SessionTransition};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FakeRunBehavior {
@@ -126,7 +123,7 @@ struct ActiveRun {
     generation: Uuid,
     state: FakeRunState,
     cancel: Option<oneshot::Sender<()>>,
-    completion: Option<oneshot::Receiver<FakeTaskOutcome>>,
+    completion: Arc<FakeRunCompletion>,
 }
 
 struct FakeRunRequest {
@@ -148,6 +145,39 @@ enum FakeTaskOutcome {
     Completed,
     Aborted,
     ChannelClosed,
+}
+
+struct FakeRunCompletion {
+    outcome: std::sync::Mutex<Option<FakeTaskOutcome>>,
+    changed: Notify,
+}
+
+impl FakeRunCompletion {
+    fn new() -> Self {
+        Self {
+            outcome: std::sync::Mutex::new(None),
+            changed: Notify::new(),
+        }
+    }
+
+    fn complete(&self, outcome: FakeTaskOutcome) {
+        let mut current = self.outcome.lock().unwrap();
+        if current.is_none() {
+            *current = Some(outcome);
+            drop(current);
+            self.changed.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) -> FakeTaskOutcome {
+        loop {
+            let changed = self.changed.notified();
+            if let Some(outcome) = *self.outcome.lock().unwrap() {
+                return outcome;
+            }
+            changed.await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -266,7 +296,7 @@ impl FakeEngineAdapter {
         }
 
         let (abort_sender, abort_receiver) = oneshot::channel();
-        let (completion_sender, completion_receiver) = oneshot::channel();
+        let completion = Arc::new(FakeRunCompletion::new());
         let run_id = context.run_id().to_owned();
         let generation = Uuid::new_v4();
         let mut active = self.active.lock().await;
@@ -279,7 +309,7 @@ impl FakeEngineAdapter {
                 generation,
                 state: FakeRunState::Running,
                 cancel: Some(abort_sender),
-                completion: Some(completion_receiver),
+                completion: Arc::clone(&completion),
             },
         );
         drop(active);
@@ -332,13 +362,15 @@ impl FakeEngineAdapter {
             if let Some(completion_gate) = completion_gate {
                 completion_gate.pause_if_armed().await;
             }
-            let _ = completion_sender.send(outcome);
             let mut active = active.lock().await;
-            if active.get(&run_id).is_some_and(|entry| {
-                entry.generation == generation && entry.state == FakeRunState::Running
-            }) {
+            if active
+                .get(&run_id)
+                .is_some_and(|entry| entry.generation == generation)
+            {
                 active.remove(&run_id);
             }
+            drop(active);
+            completion.complete(outcome);
         });
 
         Ok(session)
@@ -419,7 +451,7 @@ impl EngineAdapter for FakeEngineAdapter {
         if !self.capabilities.cancel {
             return Err(EngineError::Unsupported("cancel"));
         }
-        let (generation, cancel, completion) = {
+        let (cancel, completion) = {
             let mut active_runs = self.active.lock().await;
             let active = active_runs.get_mut(run_id).ok_or(EngineError::NotRunning)?;
             if active.state == FakeRunState::Cancelling {
@@ -427,8 +459,7 @@ impl EngineAdapter for FakeEngineAdapter {
             }
             active.state = FakeRunState::Cancelling;
             let cancel = active.cancel.take().ok_or(EngineError::Aborted)?;
-            let completion = active.completion.take().ok_or(EngineError::Aborted)?;
-            (active.generation, cancel, completion)
+            (cancel, Arc::clone(&active.completion))
         };
         self.observations
             .lock()
@@ -437,17 +468,9 @@ impl EngineAdapter for FakeEngineAdapter {
             .push(run_id.to_owned());
 
         let _ = cancel.send(());
-        let outcome = completion.await;
-        let mut active_runs = self.active.lock().await;
-        if active_runs
-            .get(run_id)
-            .is_some_and(|active| active.generation == generation)
-        {
-            active_runs.remove(run_id);
-        }
-        drop(active_runs);
+        let outcome = completion.wait().await;
 
-        match outcome.map_err(|_| EngineError::Aborted)? {
+        match outcome {
             FakeTaskOutcome::Aborted => Ok(()),
             FakeTaskOutcome::Completed | FakeTaskOutcome::ChannelClosed => {
                 Err(EngineError::NotRunning)
@@ -634,8 +657,10 @@ mod tests {
 
     use tokio::sync::mpsc;
 
-    use super::FakeEngineAdapter;
-    use crate::engine::{EngineAdapter, EngineImage, EngineInput, EngineRunContext};
+    use super::{FakeEngineAdapter, FakeEngineConfig, FakeRunBehavior, FakeRunState};
+    use crate::engine::{
+        EngineAdapter, EngineCapabilities, EngineEvent, EngineImage, EngineInput, EngineRunContext,
+    };
 
     fn text_input(message: &str) -> EngineInput {
         EngineInput {
@@ -845,5 +870,81 @@ mod tests {
             engine.abort("unknown-run").await,
             Err(crate::engine::EngineError::NotRunning)
         ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_abort_caller_cannot_strand_a_blocked_fake_terminal() {
+        let engine = FakeEngineAdapter::configured(
+            FakeEngineConfig::new(EngineCapabilities {
+                cancel: true,
+                ..EngineCapabilities::default()
+            })
+            .with_run_behavior(FakeRunBehavior::HoldUntilAbort),
+        );
+        let context = EngineRunContext::test("work-1", "run-cancelled-abort");
+        let (sender, mut receiver) = mpsc::channel(1);
+        engine
+            .start(context.clone(), text_input("First"), sender)
+            .await
+            .unwrap();
+        while receiver.is_empty() {
+            tokio::task::yield_now().await;
+        }
+
+        let abort_engine = engine.clone();
+        let abort = tokio::spawn(async move { abort_engine.abort("run-cancelled-abort").await });
+        loop {
+            let cancelling = engine
+                .active
+                .lock()
+                .await
+                .get("run-cancelled-abort")
+                .is_some_and(|run| run.state == FakeRunState::Cancelling);
+            if cancelling {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!abort.is_finished());
+        abort.abort();
+        assert!(abort.await.unwrap_err().is_cancelled());
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(EngineEvent::RunStarted { .. })
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(EngineEvent::RunFailed { .. })
+        ));
+        assert!(receiver.recv().await.is_none());
+        tokio::time::timeout(Duration::from_millis(200), async {
+            while engine
+                .active
+                .lock()
+                .await
+                .contains_key("run-cancelled-abort")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled abort caller stranded the Fake active map");
+
+        let (restart_sender, mut restart_receiver) = mpsc::channel(2);
+        engine
+            .start(context, text_input("Second"), restart_sender)
+            .await
+            .unwrap();
+        assert!(matches!(
+            restart_receiver.recv().await,
+            Some(EngineEvent::RunStarted { .. })
+        ));
+        engine.abort("run-cancelled-abort").await.unwrap();
+        assert!(matches!(
+            restart_receiver.recv().await,
+            Some(EngineEvent::RunFailed { .. })
+        ));
+        assert!(restart_receiver.recv().await.is_none());
     }
 }

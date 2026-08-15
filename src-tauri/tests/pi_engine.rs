@@ -293,6 +293,121 @@ fn rpc_unknown_event_without_a_type_uses_the_unknown_kind() {
 }
 
 #[test]
+fn rpc_raw_events_redact_sensitive_keys_values_and_kind_before_bounding() {
+    let api_key = "raw-api-key-sentinel";
+    let work_id = "raw-work-id-sentinel";
+    let session_id = "raw-session-id-sentinel";
+    let workspace_path = r"D:\private\raw-workspace-sentinel";
+    let session_path = r"D:\private\raw-session-path-sentinel";
+    let runtime_path = r"D:\private\raw-runtime-path-sentinel";
+    let model_id = "raw-model-id-sentinel";
+    let sensitive_key_value = "raw-sensitive-key-value-sentinel";
+    let mut translator = RpcEventTranslator::with_sensitive_values([
+        api_key,
+        work_id,
+        session_id,
+        workspace_path,
+        session_path,
+        runtime_path,
+        model_id,
+    ]);
+
+    let event = translator
+        .translate(json!({
+            "type": format!("future-{model_id}"),
+            "token": sensitive_key_value,
+            "nested": {
+                "authorization": sensitive_key_value,
+                "workspacePath": workspace_path,
+                "note": format!("{api_key}|{work_id}|{session_id}|{session_path}|{runtime_path}")
+            }
+        }))
+        .unwrap();
+    let rendered = format!("{event:?}");
+
+    for sentinel in [
+        api_key,
+        work_id,
+        session_id,
+        workspace_path,
+        session_path,
+        runtime_path,
+        model_id,
+        sensitive_key_value,
+    ] {
+        assert!(!rendered.contains(sentinel), "raw event leaked {sentinel}");
+    }
+    assert!(rendered.contains("[REDACTED]"));
+}
+
+#[test]
+fn rpc_known_events_redact_sensitive_values_before_translation() {
+    let api_key = "known-api-key-sentinel";
+    let session_id = "known-session-id-sentinel";
+    let workspace_path = r"D:\private\known-workspace-sentinel";
+    let runtime_path = r"D:\private\known-runtime-sentinel";
+    let mut translator = RpcEventTranslator::with_sensitive_values([
+        api_key,
+        session_id,
+        workspace_path,
+        runtime_path,
+    ]);
+    let messages = [
+        json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": format!("text {api_key}")}
+        }),
+        json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "thinking_delta", "delta": format!("thought {session_id}")}
+        }),
+        json!({
+            "type": "tool_execution_start",
+            "toolCallId": "call-read",
+            "toolName": "read",
+            "args": {"path": workspace_path}
+        }),
+        json!({
+            "type": "tool_execution_update",
+            "toolCallId": "call-read",
+            "toolName": "read",
+            "partialResult": {"content": [{"type": "text", "text": runtime_path}]}
+        }),
+        json!({
+            "type": "tool_execution_end",
+            "toolCallId": "call-read",
+            "toolName": "read",
+            "result": {"content": [{"type": "text", "text": api_key}]},
+            "isError": false
+        }),
+        json!({
+            "type": "tool_execution_start",
+            "toolCallId": "call-edit",
+            "toolName": "edit",
+            "args": {"path": workspace_path}
+        }),
+        json!({
+            "type": "tool_execution_start",
+            "toolCallId": "call-bash",
+            "toolName": "bash",
+            "args": {"command": format!("check {session_id}")}
+        }),
+        json!({"type": "agent_end", "messages": []}),
+    ];
+
+    for message in messages {
+        let event = translator.translate(message).unwrap();
+        let rendered = format!("{event:?}");
+        for sentinel in [api_key, session_id, workspace_path, runtime_path] {
+            assert!(
+                !rendered.contains(sentinel) && !rendered.contains(&sentinel.replace('\\', "\\\\")),
+                "known event leaked {sentinel}: {rendered}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rpc_raw_event_unicode_is_truncated_to_the_character_limit() {
     let mut translator = RpcEventTranslator::default();
     let payload = "界".repeat(40_000);
