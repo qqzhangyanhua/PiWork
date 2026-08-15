@@ -1,5 +1,8 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -25,6 +28,33 @@ struct RecordingSink(Mutex<Vec<WorkEventEnvelope>>);
 impl AssignmentEventSink for RecordingSink {
     fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
         self.0.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+struct FailingSink {
+    call_count: AtomicUsize,
+    fail_on: Vec<usize>,
+    published: Mutex<Vec<WorkEventEnvelope>>,
+}
+
+impl FailingSink {
+    fn new(fail_on: Vec<usize>) -> Self {
+        Self {
+            call_count: AtomicUsize::new(0),
+            fail_on,
+            published: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl AssignmentEventSink for FailingSink {
+    fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
+        let call = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_on.contains(&call) {
+            return Err(AppError::event_publish(format!("forced failure at {call}")));
+        }
+        self.published.lock().unwrap().push(event);
         Ok(())
     }
 }
@@ -58,6 +88,25 @@ fn accept_input(work_id: &str, title: &str) -> AcceptAssignmentInput {
         priority: 10,
         max_attempts: 3,
         not_before: None,
+    }
+}
+
+fn json_object_with_serialized_bytes(bytes: usize) -> serde_json::Value {
+    let value = json!({"v": "x".repeat(bytes - 8)});
+    assert_eq!(serde_json::to_string(&value).unwrap().len(), bytes);
+    value
+}
+
+fn assert_too_large(error: AppError, expected_field: &str) {
+    match error {
+        AppError::InvalidInput { field, message } => {
+            assert_eq!(field, expected_field);
+            assert!(
+                message.contains("too large"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected bounded input error, got {other:?}"),
     }
 }
 
@@ -98,6 +147,422 @@ async fn repository_accept_commits_queued_assignment_and_journal_before_publish_
         WorkEventPayload::AssignmentQueued { .. }
     ));
     assert_eq!(sink.0.lock().unwrap().as_slice(), events.as_slice());
+}
+
+#[tokio::test]
+async fn repository_single_publish_failure_returns_committed_fact_and_can_replay_journal() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-publish-single").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+
+    let assignment = repository
+        .accept(accept_input("work-publish-single", "Publish failure"))
+        .await
+        .unwrap();
+
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assignments WHERE id = ?")
+            .bind(&assignment.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let replay_sink = Arc::new(RecordingSink::default());
+    let replay_repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
+    let report = replay_repository
+        .replay_committed_events_for_assignment(&assignment.id)
+        .await
+        .unwrap();
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.published, 1);
+    assert!(report.failed_event_ids.is_empty());
+    assert_eq!(replay_sink.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn repository_second_publish_failure_returns_retry_fact_and_replays_complete_journal() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-publish-double").await;
+    let failing = Arc::new(FailingSink::new(vec![5]));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    let assignment = repository
+        .accept(accept_input("work-publish-double", "Publish double"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&assignment.id, &run.id, "session", "owner", now)
+        .await
+        .unwrap();
+
+    let retried = repository
+        .fail_and_schedule_retry(
+            &assignment.id,
+            &run.id,
+            "session",
+            "owner",
+            "transient",
+            now,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retried.status, AssignmentStatus::Queued);
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 5);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE run_id = ?")
+            .bind(&run.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        3
+    );
+    let event_rowids = sqlx::query_scalar::<_, i64>(
+        "SELECT rowid FROM events WHERE assignment_id = ? ORDER BY rowid",
+    )
+    .bind(&assignment.id)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    let event_count = event_rowids.len();
+    for (index, rowid) in event_rowids.into_iter().enumerate() {
+        sqlx::query("UPDATE events SET id = ? WHERE rowid = ?")
+            .bind(format!("replay-order-{:03}", event_count - index))
+            .bind(rowid)
+            .execute(database.pool())
+            .await
+            .unwrap();
+    }
+    let replay_sink = Arc::new(RecordingSink::default());
+    let replay =
+        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
+    let report = replay
+        .replay_committed_events_for_assignment(&assignment.id)
+        .await
+        .unwrap();
+    assert_eq!(report.attempted, 5);
+    assert_eq!(report.published, 5);
+    assert!(report.failed_event_ids.is_empty());
+    let replayed = replay_sink.0.lock().unwrap();
+    assert!(matches!(
+        replayed[0].payload,
+        WorkEventPayload::AssignmentQueued { .. }
+    ));
+    assert!(matches!(
+        replayed[1].payload,
+        WorkEventPayload::AssignmentClaimed { .. }
+    ));
+    assert!(matches!(
+        replayed[2].payload,
+        WorkEventPayload::AssignmentStarted { .. }
+    ));
+    assert!(matches!(
+        replayed[3].payload,
+        WorkEventPayload::AssignmentFailed { .. }
+    ));
+    assert!(matches!(
+        replayed[4].payload,
+        WorkEventPayload::AssignmentRetryScheduled { .. }
+    ));
+}
+
+#[tokio::test]
+async fn repository_recovery_middle_publish_failure_returns_report_and_replays_committed_batch() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-recovery-publish-a").await;
+    seed_work(database.pool(), "work-recovery-publish-b").await;
+    let failing = Arc::new(FailingSink::new(vec![6]));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    let first = repository
+        .accept(accept_input(
+            "work-recovery-publish-a",
+            "Recovery publish A",
+        ))
+        .await
+        .unwrap();
+    repository
+        .claim(&first.id, "orphan-a", Utc::now())
+        .await
+        .unwrap();
+    let second = repository
+        .accept(accept_input(
+            "work-recovery-publish-b",
+            "Recovery publish B",
+        ))
+        .await
+        .unwrap();
+    repository
+        .claim(&second.id, "orphan-b", Utc::now())
+        .await
+        .unwrap();
+
+    let report = repository.recover_orphans(&[]).await.unwrap();
+
+    assert_eq!(report.requeued.len(), 2);
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 8);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assignments WHERE status = 'queued' AND id IN (?, ?)"
+        )
+        .bind(&first.id)
+        .bind(&second.id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE assignment_id IN (?, ?)")
+            .bind(&first.id)
+            .bind(&second.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        8
+    );
+    let replay_sink = Arc::new(RecordingSink::default());
+    let replay =
+        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
+    for assignment_id in [&first.id, &second.id] {
+        let replay_report = replay
+            .replay_committed_events_for_assignment(assignment_id)
+            .await
+            .unwrap();
+        assert_eq!(replay_report.attempted, 4);
+        assert_eq!(replay_report.published, 4);
+    }
+    assert_eq!(replay_sink.0.lock().unwrap().len(), 8);
+}
+
+#[tokio::test]
+async fn repository_state_mutations_return_committed_facts_when_every_publication_fails() {
+    let database = Database::open_in_memory().await.unwrap();
+    for work_id in [
+        "work-publish-waiting",
+        "work-publish-complete",
+        "work-publish-dead",
+        "work-publish-confirm",
+    ] {
+        seed_work(database.pool(), work_id).await;
+    }
+    let failing = Arc::new(FailingSink::new((1..=32).collect()));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+
+    let waiting = repository
+        .accept(accept_input("work-publish-waiting", "Waiting"))
+        .await
+        .unwrap();
+    let waiting_now = Utc::now();
+    repository
+        .claim(&waiting.id, "owner-w", waiting_now)
+        .await
+        .unwrap();
+    let waiting_run = repository
+        .begin_attempt(&waiting.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &waiting.id,
+            &waiting_run.id,
+            "session-w",
+            "owner-w",
+            waiting_now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .mark_waiting(
+                &waiting.id,
+                &waiting_run.id,
+                "session-w",
+                "owner-w",
+                "approval",
+                waiting_now,
+            )
+            .await
+            .unwrap()
+            .status,
+        AssignmentStatus::Waiting
+    );
+
+    let completed = repository
+        .accept(accept_input("work-publish-complete", "Complete"))
+        .await
+        .unwrap();
+    let completed_now = Utc::now();
+    repository
+        .claim(&completed.id, "owner-c", completed_now)
+        .await
+        .unwrap();
+    let completed_run = repository
+        .begin_attempt(&completed.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &completed.id,
+            &completed_run.id,
+            "session-c",
+            "owner-c",
+            completed_now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .complete(
+                &completed.id,
+                &completed_run.id,
+                "session-c",
+                "owner-c",
+                "done",
+                completed_now,
+            )
+            .await
+            .unwrap()
+            .status,
+        AssignmentStatus::Completed
+    );
+
+    let dead = repository
+        .accept(accept_input("work-publish-dead", "Dead letter"))
+        .await
+        .unwrap();
+    let dead_now = Utc::now();
+    repository
+        .claim(&dead.id, "owner-d", dead_now)
+        .await
+        .unwrap();
+    let dead_run = repository
+        .begin_attempt(&dead.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&dead.id, &dead_run.id, "session-d", "owner-d", dead_now)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .dead_letter(
+                &dead.id,
+                &dead_run.id,
+                "session-d",
+                "owner-d",
+                "terminal",
+                dead_now,
+            )
+            .await
+            .unwrap()
+            .status,
+        AssignmentStatus::DeadLetter
+    );
+
+    let mut confirmation_input = accept_input("work-publish-confirm", "Confirmation");
+    confirmation_input.side_effect = AssignmentSideEffect::NonIdempotentWrite;
+    let confirmation = repository.accept(confirmation_input).await.unwrap();
+    let confirmation_now = Utc::now();
+    repository
+        .claim(&confirmation.id, "owner-r", confirmation_now)
+        .await
+        .unwrap();
+    let confirmation_run = repository
+        .begin_attempt(&confirmation.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &confirmation.id,
+            &confirmation_run.id,
+            "session-r",
+            "owner-r",
+            confirmation_now,
+        )
+        .await
+        .unwrap();
+    repository.recover_orphans(&[]).await.unwrap();
+    assert_eq!(
+        repository
+            .confirm_recovery(&confirmation.id, false, Utc::now())
+            .await
+            .unwrap()
+            .status,
+        AssignmentStatus::Cancelled
+    );
+    assert!(failing.call_count.load(Ordering::SeqCst) >= 19);
+}
+
+#[tokio::test]
+async fn repository_assignment_events_use_v2_in_database_live_sink_and_replay() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-event-v2").await;
+    let live_sink = Arc::new(RecordingSink::default());
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), live_sink.clone());
+    let assignment = repository
+        .accept(accept_input("work-event-v2", "Event v2"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&assignment.id, &run.id, "session", "owner", now)
+        .await
+        .unwrap();
+
+    let stored_versions = sqlx::query_scalar::<_, i64>(
+        "SELECT version FROM events WHERE assignment_id = ? ORDER BY occurred_at, id",
+    )
+    .bind(&assignment.id)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored_versions, vec![2, 2, 2]);
+    assert!(
+        live_sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.version == 2)
+    );
+
+    let replay_sink = Arc::new(RecordingSink::default());
+    let replay =
+        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
+    replay
+        .replay_committed_events_for_assignment(&assignment.id)
+        .await
+        .unwrap();
+    let replayed = replay_sink.0.lock().unwrap();
+    assert_eq!(replayed.len(), 3);
+    assert!(replayed.iter().all(|event| event.version == 2));
 }
 
 #[tokio::test]
@@ -534,6 +999,117 @@ async fn repository_dependencies_require_same_work_and_terminal_predecessor() {
 }
 
 #[tokio::test]
+async fn repository_dependency_rejects_a_direct_cycle_without_partial_edge() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-direct-cycle").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let first = repository
+        .accept(accept_input("work-direct-cycle", "First"))
+        .await
+        .unwrap();
+    let second = repository
+        .accept(accept_input("work-direct-cycle", "Second"))
+        .await
+        .unwrap();
+    repository
+        .add_dependency(&first.id, &second.id)
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .add_dependency(&second.id, &first.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assignment_dependencies")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn repository_dependency_rejects_a_multi_hop_cycle_without_partial_edge() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-multi-cycle").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let first = repository
+        .accept(accept_input("work-multi-cycle", "First"))
+        .await
+        .unwrap();
+    let second = repository
+        .accept(accept_input("work-multi-cycle", "Second"))
+        .await
+        .unwrap();
+    let third = repository
+        .accept(accept_input("work-multi-cycle", "Third"))
+        .await
+        .unwrap();
+    repository
+        .add_dependency(&first.id, &second.id)
+        .await
+        .unwrap();
+    repository
+        .add_dependency(&second.id, &third.id)
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .add_dependency(&third.id, &first.id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assignment_dependencies")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn repository_dependency_concurrent_cycle_allows_exactly_one_edge() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("concurrent-cycle.db");
+    let first_database = Database::open(&path).await.unwrap();
+    let second_database = Database::open(&path).await.unwrap();
+    seed_work(first_database.pool(), "work-concurrent-cycle").await;
+    let setup = AssignmentRepository::new(first_database.pool().clone());
+    let first = setup
+        .accept(accept_input("work-concurrent-cycle", "First"))
+        .await
+        .unwrap();
+    let second = setup
+        .accept(accept_input("work-concurrent-cycle", "Second"))
+        .await
+        .unwrap();
+    let first_repository = AssignmentRepository::new(first_database.pool().clone());
+    let second_repository = AssignmentRepository::new(second_database.pool().clone());
+
+    let (forward, reverse) = tokio::join!(
+        first_repository.add_dependency(&first.id, &second.id),
+        second_repository.add_dependency(&second.id, &first.id),
+    );
+
+    assert_eq!(
+        usize::from(forward.is_ok()) + usize::from(reverse.is_ok()),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assignment_dependencies")
+            .fetch_one(first_database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn repository_owner_session_and_run_mismatches_fail_closed() {
     let temporary = tempfile::tempdir().unwrap();
     let database = Database::open(temporary.path().join("identity.db"))
@@ -659,6 +1235,336 @@ async fn repository_accept_rejects_invalid_or_unbounded_json_without_rows() {
             .len(),
         0
     );
+}
+
+#[tokio::test]
+async fn repository_string_byte_limits_accept_exact_boundaries() {
+    const SHORT: usize = 255;
+    const TEXT: usize = 64 * 1024;
+    const JSON: usize = 1024 * 1024;
+
+    let database = Database::open_in_memory().await.unwrap();
+    let work_id = "w".repeat(SHORT);
+    seed_work(database.pool(), &work_id).await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let mut input = accept_input(&work_id, &"t".repeat(TEXT));
+    input.id = Some("a".repeat(SHORT));
+    input.instruction = "i".repeat(TEXT);
+    input.context_manifest = json_object_with_serialized_bytes(JSON);
+
+    let assignment = repository.accept(input).await.unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, &"o".repeat(SHORT), now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, &"e".repeat(SHORT), &"m".repeat(SHORT))
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &assignment.id,
+            &run.id,
+            &"s".repeat(SHORT),
+            &"o".repeat(SHORT),
+            now,
+        )
+        .await
+        .unwrap();
+    let completed = repository
+        .complete(
+            &assignment.id,
+            &run.id,
+            &"s".repeat(SHORT),
+            &"o".repeat(SHORT),
+            &"r".repeat(TEXT),
+            now,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(completed.status, AssignmentStatus::Completed);
+    assert_eq!(completed.id.len(), SHORT);
+    assert_eq!(completed.title.len(), TEXT);
+    assert_eq!(completed.result_summary.unwrap().len(), TEXT);
+}
+
+#[tokio::test]
+async fn repository_accept_rejects_boundary_plus_one_and_unicode_bytes_without_writes() {
+    const SHORT: usize = 255;
+    const TEXT: usize = 64 * 1024;
+    const JSON: usize = 1024 * 1024;
+
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-string-limits").await;
+    let sink = Arc::new(RecordingSink::default());
+    let repository = AssignmentRepository::with_event_sink(database.pool().clone(), sink.clone());
+    let mut cases = Vec::new();
+
+    let mut assignment_id = accept_input("work-string-limits", "Assignment ID");
+    assignment_id.id = Some("a".repeat(SHORT + 1));
+    cases.push((assignment_id, "id"));
+
+    let unicode_work_id = accept_input(&"é".repeat(128), "Unicode Work ID");
+    cases.push((unicode_work_id, "workId"));
+
+    let mut parent_id = accept_input("work-string-limits", "Parent ID");
+    parent_id.parent_assignment_id = Some("p".repeat(SHORT + 1));
+    cases.push((parent_id, "parentAssignmentId"));
+
+    let mut creator_id = accept_input("work-string-limits", "Creator ID");
+    creator_id.created_by_agent_id = Some("c".repeat(SHORT + 1));
+    cases.push((creator_id, "createdByAgentId"));
+
+    let mut assigned_id = accept_input("work-string-limits", "Assigned ID");
+    assigned_id.assigned_agent_id = "g".repeat(SHORT + 1);
+    cases.push((assigned_id, "assignedAgentId"));
+
+    let mut capability_id = accept_input("work-string-limits", "Capability ID");
+    capability_id.capability_pack_id = Some("k".repeat(SHORT + 1));
+    cases.push((capability_id, "capabilityPackId"));
+
+    let title = accept_input("work-string-limits", &"t".repeat(TEXT + 1));
+    cases.push((title, "title"));
+
+    let mut unicode_instruction = accept_input("work-string-limits", "Instruction");
+    unicode_instruction.instruction = "é".repeat(TEXT / 2 + 1);
+    cases.push((unicode_instruction, "instruction"));
+
+    let mut context = accept_input("work-string-limits", "Context");
+    context.context_manifest = json_object_with_serialized_bytes(JSON + 1);
+    cases.push((context, "contextManifest"));
+
+    for (input, field) in cases {
+        assert_too_large(repository.accept(input).await.unwrap_err(), field);
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assignments")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(sink.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn repository_runtime_string_limits_reject_before_database_or_event_writes() {
+    const SHORT: usize = 255;
+    const TEXT: usize = 64 * 1024;
+
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-owner-limit").await;
+    seed_work(database.pool(), "work-runtime-limits").await;
+    let sink = Arc::new(RecordingSink::default());
+    let repository = AssignmentRepository::with_event_sink(database.pool().clone(), sink.clone());
+
+    let owner_assignment = repository
+        .accept(accept_input("work-owner-limit", "Owner limit"))
+        .await
+        .unwrap();
+    let owner_event_count = sink.0.lock().unwrap().len();
+    assert_too_large(
+        repository
+            .claim(&owner_assignment.id, &"o".repeat(SHORT + 1), Utc::now())
+            .await
+            .unwrap_err(),
+        "runtimeOwner",
+    );
+    assert_eq!(
+        repository.list_for_work("work-owner-limit").await.unwrap()[0].status,
+        AssignmentStatus::Queued
+    );
+    assert_eq!(sink.0.lock().unwrap().len(), owner_event_count);
+
+    let assignment = repository
+        .accept(accept_input("work-runtime-limits", "Runtime limits"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "owner", now)
+        .await
+        .unwrap();
+    assert_too_large(
+        repository
+            .begin_attempt(&assignment.id, &"e".repeat(SHORT + 1), "model")
+            .await
+            .unwrap_err(),
+        "engineKind",
+    );
+    assert_too_large(
+        repository
+            .begin_attempt(&assignment.id, "engine", &"é".repeat(128))
+            .await
+            .unwrap_err(),
+        "modelLabel",
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runs WHERE assignment_id = ?")
+            .bind(&assignment.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        0
+    );
+
+    let run = repository
+        .begin_attempt(&assignment.id, "engine", "model")
+        .await
+        .unwrap();
+    assert_too_large(
+        repository
+            .mark_running(&"a".repeat(SHORT + 1), &run.id, "session", "owner", now)
+            .await
+            .unwrap_err(),
+        "assignmentId",
+    );
+    assert_too_large(
+        repository
+            .mark_running(
+                &assignment.id,
+                &"r".repeat(SHORT + 1),
+                "session",
+                "owner",
+                now,
+            )
+            .await
+            .unwrap_err(),
+        "runId",
+    );
+    assert_too_large(
+        repository
+            .mark_running(
+                &assignment.id,
+                &run.id,
+                "session",
+                &"o".repeat(SHORT + 1),
+                now,
+            )
+            .await
+            .unwrap_err(),
+        "runtimeOwner",
+    );
+    assert_too_large(
+        repository
+            .mark_running(&assignment.id, &run.id, &"é".repeat(128), "owner", now)
+            .await
+            .unwrap_err(),
+        "sessionId",
+    );
+    repository
+        .mark_running(&assignment.id, &run.id, "session", "owner", now)
+        .await
+        .unwrap();
+    let event_count = sink.0.lock().unwrap().len();
+
+    assert_too_large(
+        repository
+            .mark_waiting(
+                &assignment.id,
+                &run.id,
+                "session",
+                "owner",
+                &"q".repeat(TEXT + 1),
+                now,
+            )
+            .await
+            .unwrap_err(),
+        "reason",
+    );
+    assert_too_large(
+        repository
+            .complete(
+                &assignment.id,
+                &run.id,
+                "session",
+                "owner",
+                &"r".repeat(TEXT + 1),
+                now,
+            )
+            .await
+            .unwrap_err(),
+        "resultSummary",
+    );
+    assert_too_large(
+        repository
+            .fail_and_schedule_retry(
+                &assignment.id,
+                &run.id,
+                "session",
+                "owner",
+                &"é".repeat(TEXT / 2 + 1),
+                now,
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap_err(),
+        "error",
+    );
+    assert_too_large(
+        repository
+            .dead_letter(
+                &assignment.id,
+                &run.id,
+                "session",
+                "owner",
+                &"d".repeat(TEXT + 1),
+                now,
+            )
+            .await
+            .unwrap_err(),
+        "error",
+    );
+    assert_eq!(sink.0.lock().unwrap().len(), event_count);
+    assert_eq!(
+        repository
+            .list_for_work("work-runtime-limits")
+            .await
+            .unwrap()[0]
+            .status,
+        AssignmentStatus::Running
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+            .bind(&run.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        "running"
+    );
+
+    assert_too_large(
+        repository
+            .recover_orphans(&["o".repeat(SHORT + 1)])
+            .await
+            .unwrap_err(),
+        "activeOwnerId",
+    );
+    assert_too_large(
+        repository
+            .replay_committed_events_for_assignment(&"a".repeat(SHORT + 1))
+            .await
+            .unwrap_err(),
+        "assignmentId",
+    );
+    assert_too_large(
+        repository
+            .list_for_work(&"w".repeat(SHORT + 1))
+            .await
+            .unwrap_err(),
+        "workId",
+    );
+    assert_eq!(sink.0.lock().unwrap().len(), event_count);
 }
 
 #[tokio::test]

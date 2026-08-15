@@ -15,8 +15,11 @@ use crate::{
     error::AppError,
 };
 
+const MAX_ID_BYTES: usize = 255;
+const MAX_LABEL_BYTES: usize = 255;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
+const ASSIGNMENT_EVENT_VERSION: u32 = 2;
 const RECOVERY_RETRY_BASE: Duration = Duration::from_secs(1);
 const RECOVERY_RETRY_MAX: Duration = Duration::from_secs(60);
 
@@ -53,6 +56,13 @@ pub struct RecoveryReport {
     pub untouched: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishReplayReport {
+    pub attempted: usize,
+    pub published: usize,
+    pub failed_event_ids: Vec<String>,
+}
+
 struct NoopEventSink;
 
 impl AssignmentEventSink for NoopEventSink {
@@ -80,20 +90,22 @@ impl AssignmentRepository {
         &self,
         input: AcceptAssignmentInput,
     ) -> Result<AssignmentSummary, AppError> {
+        let id = input
+            .id
+            .as_deref()
+            .map(|value| validate_id("id", value))
+            .transpose()?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let work_id = validate_id("workId", &input.work_id)?;
+        let parent_assignment_id =
+            validate_optional_id("parentAssignmentId", input.parent_assignment_id.as_deref())?;
+        let created_by_agent_id =
+            validate_optional_id("createdByAgentId", input.created_by_agent_id.as_deref())?;
+        let assigned_agent_id = validate_id("assignedAgentId", &input.assigned_agent_id)?;
+        let capability_pack_id =
+            validate_optional_id("capabilityPackId", input.capability_pack_id.as_deref())?;
         let title = validate_text("title", &input.title)?;
         let instruction = validate_text("instruction", &input.instruction)?;
-        if input.work_id.trim().is_empty() {
-            return Err(AppError::invalid_input(
-                "workId",
-                "workId must not be empty",
-            ));
-        }
-        if input.assigned_agent_id.trim().is_empty() {
-            return Err(AppError::invalid_input(
-                "assignedAgentId",
-                "assignedAgentId must not be empty",
-            ));
-        }
         if input.max_attempts == 0 {
             return Err(AppError::invalid_input(
                 "maxAttempts",
@@ -112,12 +124,12 @@ impl AssignmentRepository {
 
         let now = Utc::now();
         let assignment = AssignmentSummary {
-            id: input.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-            work_id: input.work_id,
-            parent_assignment_id: input.parent_assignment_id,
-            created_by_agent_id: input.created_by_agent_id,
-            assigned_agent_id: input.assigned_agent_id,
-            capability_pack_id: input.capability_pack_id,
+            id,
+            work_id,
+            parent_assignment_id,
+            created_by_agent_id,
+            assigned_agent_id,
+            capability_pack_id,
             kind: input.kind,
             side_effect: input.side_effect,
             title,
@@ -141,12 +153,8 @@ impl AssignmentRepository {
             completed_at: None,
             updated_at: now,
         };
-        if assignment.id.trim().is_empty() {
-            return Err(AppError::invalid_input("id", "id must not be empty"));
-        }
-
         let event = WorkEventEnvelope {
-            version: 1,
+            version: ASSIGNMENT_EVENT_VERSION,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: assignment.work_id.clone(),
             run_id: None,
@@ -193,11 +201,12 @@ impl AssignmentRepository {
         .await?;
         insert_event(&mut transaction, &event).await?;
         transaction.commit().await?;
-        self.event_sink.publish(event)?;
+        self.publish_committed_events(std::slice::from_ref(&event));
         Ok(assignment)
     }
 
     pub async fn list_for_work(&self, work_id: &str) -> Result<Vec<AssignmentSummary>, AppError> {
+        let work_id = validate_id("workId", work_id)?;
         load_assignments(
             sqlx::query_as::<_, AssignmentRow>(&format!(
                 "{} WHERE work_id = ? ORDER BY created_at, id",
@@ -243,19 +252,20 @@ impl AssignmentRepository {
         runtime_owner: &str,
         now: DateTime<Utc>,
     ) -> Result<AssignmentSummary, AppError> {
-        let runtime_owner = non_empty("runtimeOwner", runtime_owner)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
         if assignment.status != AssignmentStatus::Queued
             || assignment.attempt_count >= assignment.max_attempts
             || assignment.not_before.is_some_and(|due| due > now)
             || assignment.next_attempt_at.is_some_and(|due| due > now)
-            || !dependencies_terminal_in(&mut transaction, assignment_id).await?
+            || !dependencies_terminal_in(&mut transaction, &assignment_id).await?
         {
             return Err(invalid_assignment_state("assignment is not schedulable"));
         }
         sqlx::query("UPDATE assignments SET status = 'claimed', runtime_owner_id = ?, claimed_at = ?, updated_at = ? WHERE id = ? AND status = 'queued'")
-            .bind(&runtime_owner).bind(now).bind(now).bind(assignment_id)
+            .bind(&runtime_owner).bind(now).bind(now).bind(&assignment_id)
             .execute(&mut *transaction).await?;
         assignment.status = AssignmentStatus::Claimed;
         assignment.claimed_at = Some(now);
@@ -274,7 +284,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(event)?;
+        self.publish_committed_events(std::slice::from_ref(&event));
         Ok(assignment.summary)
     }
 
@@ -284,10 +294,11 @@ impl AssignmentRepository {
         engine_kind: &str,
         model_label: &str,
     ) -> Result<RunSummary, AppError> {
-        let engine_kind = non_empty("engineKind", engine_kind)?;
-        let model_label = non_empty("modelLabel", model_label)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let engine_kind = validate_label("engineKind", engine_kind)?;
+        let model_label = validate_label("modelLabel", model_label)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let assignment = load_assignment(&mut transaction, assignment_id).await?;
+        let assignment = load_assignment(&mut transaction, &assignment_id).await?;
         if assignment.status != AssignmentStatus::Claimed
             || assignment.attempt_count >= assignment.max_attempts
         {
@@ -298,7 +309,7 @@ impl AssignmentRepository {
         let active_attempts: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM runs WHERE assignment_id = ? AND status IN ('queued', 'running', 'waiting')",
         )
-        .bind(assignment_id)
+        .bind(&assignment_id)
         .fetch_one(&mut *transaction)
         .await?;
         if active_attempts != 0 {
@@ -322,11 +333,11 @@ impl AssignmentRepository {
             completed_at: None,
         };
         sqlx::query("UPDATE assignments SET attempt_count = ?, updated_at = ? WHERE id = ? AND status = 'claimed'")
-            .bind(i64::from(attempt_number)).bind(now).bind(assignment_id)
+            .bind(i64::from(attempt_number)).bind(now).bind(&assignment_id)
             .execute(&mut *transaction).await?;
         sqlx::query("INSERT INTO runs (id, work_id, engine_kind, model_label, status, created_at, updated_at, assignment_id, agent_instance_id, attempt_number) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)")
             .bind(&run.id).bind(&run.work_id).bind(&run.engine_kind).bind(&run.model_label)
-            .bind(now).bind(now).bind(assignment_id).bind(&assignment.assigned_agent_id)
+            .bind(now).bind(now).bind(&assignment_id).bind(&assignment.assigned_agent_id)
             .bind(i64::from(attempt_number)).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(run)
@@ -340,11 +351,13 @@ impl AssignmentRepository {
         runtime_owner: &str,
         now: DateTime<Utc>,
     ) -> Result<AssignmentSummary, AppError> {
-        let session_id = non_empty("sessionId", session_id)?;
-        let runtime_owner = non_empty("runtimeOwner", runtime_owner)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let session_id = validate_label("sessionId", session_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
-        let run = load_run(&mut transaction, run_id).await?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
         validate_active_identity(&assignment, &run, &runtime_owner, None)?;
         if assignment.status != AssignmentStatus::Claimed || run.status != RunStatus::Queued {
             return Err(invalid_assignment_state(
@@ -352,28 +365,28 @@ impl AssignmentRepository {
             ));
         }
         sqlx::query("UPDATE assignments SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?")
-            .bind(now).bind(now).bind(assignment_id).execute(&mut *transaction).await?;
+            .bind(now).bind(now).bind(&assignment_id).execute(&mut *transaction).await?;
         sqlx::query("UPDATE runs SET status = 'running', engine_session_id = ?, started_at = ?, updated_at = ? WHERE id = ?")
-            .bind(&session_id).bind(now).bind(now).bind(run_id).execute(&mut *transaction).await?;
+            .bind(&session_id).bind(now).bind(now).bind(&run_id).execute(&mut *transaction).await?;
         assignment.status = AssignmentStatus::Running;
         assignment.started_at = Some(now);
         assignment.updated_at = now;
         let event = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
+            Some(&run_id),
             Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentStarted {
                 assignment_id: assignment.id.clone(),
                 agent_instance_id: assignment.assigned_agent_id.clone(),
                 agent_session_id: session_id,
-                run_id: run_id.into(),
+                run_id: run_id.clone(),
             },
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(event)?;
+        self.publish_committed_events(std::slice::from_ref(&event));
         Ok(assignment.summary)
     }
 
@@ -386,22 +399,26 @@ impl AssignmentRepository {
         reason: &str,
         now: DateTime<Utc>,
     ) -> Result<AssignmentSummary, AppError> {
-        let reason = non_empty("reason", reason)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let session_id = validate_label("sessionId", session_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
+        let reason = validate_text("reason", reason)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
-        let run = load_run(&mut transaction, run_id).await?;
-        validate_active_identity(&assignment, &run, runtime_owner, Some(session_id))?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
+        validate_active_identity(&assignment, &run, &runtime_owner, Some(&session_id))?;
         if assignment.status != AssignmentStatus::Running || run.status != RunStatus::Running {
             return Err(invalid_assignment_state("assignment is not running"));
         }
         sqlx::query("UPDATE assignments SET status = 'waiting', updated_at = ? WHERE id = ?")
             .bind(now)
-            .bind(assignment_id)
+            .bind(&assignment_id)
             .execute(&mut *transaction)
             .await?;
         sqlx::query("UPDATE runs SET status = 'waiting', updated_at = ? WHERE id = ?")
             .bind(now)
-            .bind(run_id)
+            .bind(&run_id)
             .execute(&mut *transaction)
             .await?;
         assignment.status = AssignmentStatus::Waiting;
@@ -409,19 +426,19 @@ impl AssignmentRepository {
         let event = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
-            Some(session_id.into()),
+            Some(&run_id),
+            Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentWaiting {
                 assignment_id: assignment.id.clone(),
                 agent_instance_id: assignment.assigned_agent_id.clone(),
-                agent_session_id: session_id.into(),
+                agent_session_id: session_id,
                 reason,
             },
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(event)?;
+        self.publish_committed_events(std::slice::from_ref(&event));
         Ok(assignment.summary)
     }
 
@@ -434,11 +451,15 @@ impl AssignmentRepository {
         result_summary: &str,
         now: DateTime<Utc>,
     ) -> Result<AssignmentSummary, AppError> {
-        let result_summary = non_empty("resultSummary", result_summary)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let session_id = validate_label("sessionId", session_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
+        let result_summary = validate_text("resultSummary", result_summary)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
-        let run = load_run(&mut transaction, run_id).await?;
-        validate_active_identity(&assignment, &run, runtime_owner, Some(session_id))?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
+        validate_active_identity(&assignment, &run, &runtime_owner, Some(&session_id))?;
         if assignment.status == AssignmentStatus::Completed && run.status == RunStatus::Completed {
             if assignment.result_summary.as_deref() == Some(result_summary.as_str()) {
                 transaction.commit().await?;
@@ -452,13 +473,13 @@ impl AssignmentRepository {
             return Err(invalid_assignment_state("assignment is not running"));
         }
         sqlx::query("UPDATE assignments SET status = 'completed', result_summary = ?, completed_at = ?, updated_at = ? WHERE id = ?")
-            .bind(&result_summary).bind(now).bind(now).bind(assignment_id).execute(&mut *transaction).await?;
+            .bind(&result_summary).bind(now).bind(now).bind(&assignment_id).execute(&mut *transaction).await?;
         sqlx::query(
             "UPDATE runs SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?",
         )
         .bind(now)
         .bind(now)
-        .bind(run_id)
+        .bind(&run_id)
         .execute(&mut *transaction)
         .await?;
         assignment.status = AssignmentStatus::Completed;
@@ -468,19 +489,19 @@ impl AssignmentRepository {
         let event = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
-            Some(session_id.into()),
+            Some(&run_id),
+            Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentCompleted {
                 assignment_id: assignment.id.clone(),
                 agent_instance_id: assignment.assigned_agent_id.clone(),
-                agent_session_id: session_id.into(),
+                agent_session_id: session_id,
                 result_summary,
             },
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(event)?;
+        self.publish_committed_events(std::slice::from_ref(&event));
         Ok(assignment.summary)
     }
 
@@ -496,11 +517,15 @@ impl AssignmentRepository {
         base: Duration,
         max: Duration,
     ) -> Result<AssignmentSummary, AppError> {
-        let error = non_empty("error", error)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let session_id = validate_label("sessionId", session_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
+        let error = validate_text("error", error)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
-        let run = load_run(&mut transaction, run_id).await?;
-        validate_active_identity(&assignment, &run, runtime_owner, Some(session_id))?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
+        validate_active_identity(&assignment, &run, &runtime_owner, Some(&session_id))?;
         if assignment.status != AssignmentStatus::Running || run.status != RunStatus::Running {
             return Err(invalid_assignment_state("assignment is not running"));
         }
@@ -532,11 +557,11 @@ impl AssignmentRepository {
         )
         .bind(now)
         .bind(now)
-        .bind(run_id)
+        .bind(&run_id)
         .execute(&mut *transaction)
         .await?;
         sqlx::query("UPDATE assignments SET status = 'queued', runtime_owner_id = NULL, claimed_at = NULL, started_at = NULL, completed_at = NULL, last_error = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?")
-            .bind(&error).bind(next_attempt_at).bind(now).bind(assignment_id).execute(&mut *transaction).await?;
+            .bind(&error).bind(next_attempt_at).bind(now).bind(&assignment_id).execute(&mut *transaction).await?;
         assignment.status = AssignmentStatus::Queued;
         assignment.claimed_at = None;
         assignment.started_at = None;
@@ -546,13 +571,13 @@ impl AssignmentRepository {
         let failed = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
-            Some(session_id.into()),
+            Some(&run_id),
+            Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentFailed {
                 assignment_id: assignment.id.clone(),
                 agent_instance_id: assignment.assigned_agent_id.clone(),
-                agent_session_id: session_id.into(),
+                agent_session_id: session_id.clone(),
                 error: error.clone(),
             },
         )
@@ -560,8 +585,8 @@ impl AssignmentRepository {
         let retry = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
-            Some(session_id.into()),
+            Some(&run_id),
+            Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentRetryScheduled {
                 assignment_id: assignment.id.clone(),
@@ -573,8 +598,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(failed)?;
-        self.event_sink.publish(retry)?;
+        self.publish_committed_events(&[failed, retry]);
         Ok(assignment.summary)
     }
 
@@ -588,11 +612,15 @@ impl AssignmentRepository {
         error: &str,
         now: DateTime<Utc>,
     ) -> Result<AssignmentSummary, AppError> {
-        let error = non_empty("error", error)?;
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let session_id = validate_label("sessionId", session_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
+        let error = validate_text("error", error)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
-        let run = load_run(&mut transaction, run_id).await?;
-        validate_active_identity(&assignment, &run, runtime_owner, Some(session_id))?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
+        validate_active_identity(&assignment, &run, &runtime_owner, Some(&session_id))?;
         if assignment.status != AssignmentStatus::Running || run.status != RunStatus::Running {
             return Err(invalid_assignment_state("assignment is not running"));
         }
@@ -601,11 +629,11 @@ impl AssignmentRepository {
         )
         .bind(now)
         .bind(now)
-        .bind(run_id)
+        .bind(&run_id)
         .execute(&mut *transaction)
         .await?;
         sqlx::query("UPDATE assignments SET status = 'dead_letter', last_error = ?, completed_at = ?, updated_at = ? WHERE id = ?")
-            .bind(&error).bind(now).bind(now).bind(assignment_id).execute(&mut *transaction).await?;
+            .bind(&error).bind(now).bind(now).bind(&assignment_id).execute(&mut *transaction).await?;
         assignment.status = AssignmentStatus::DeadLetter;
         assignment.last_error = Some(error.clone());
         assignment.completed_at = Some(now);
@@ -613,13 +641,13 @@ impl AssignmentRepository {
         let failed = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
-            Some(session_id.into()),
+            Some(&run_id),
+            Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentFailed {
                 assignment_id: assignment.id.clone(),
                 agent_instance_id: assignment.assigned_agent_id.clone(),
-                agent_session_id: session_id.into(),
+                agent_session_id: session_id.clone(),
                 error: error.clone(),
             },
         )
@@ -627,8 +655,8 @@ impl AssignmentRepository {
         let dead = assignment_event(
             &mut transaction,
             &assignment,
-            Some(run_id),
-            Some(session_id.into()),
+            Some(&run_id),
+            Some(session_id.clone()),
             now,
             WorkEventPayload::AssignmentDeadLettered {
                 assignment_id: assignment.id.clone(),
@@ -639,8 +667,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(failed)?;
-        self.event_sink.publish(dead)?;
+        self.publish_committed_events(&[failed, dead]);
         Ok(assignment.summary)
     }
 
@@ -650,8 +677,8 @@ impl AssignmentRepository {
     ) -> Result<RecoveryReport, AppError> {
         let active = active_owner_ids
             .iter()
-            .map(String::as_str)
-            .collect::<std::collections::HashSet<_>>();
+            .map(|owner| validate_label("activeOwnerId", owner))
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
         let now = Utc::now();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let rows = sqlx::query_as::<_, AssignmentRow>(&format!(
@@ -864,9 +891,7 @@ impl AssignmentRepository {
             }
         }
         transaction.commit().await?;
-        for event in events {
-            self.event_sink.publish(event)?;
-        }
+        self.publish_committed_events(&events);
         Ok(report)
     }
 
@@ -876,8 +901,9 @@ impl AssignmentRepository {
         resume: bool,
         now: DateTime<Utc>,
     ) -> Result<AssignmentSummary, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut assignment = load_assignment(&mut transaction, assignment_id).await?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
         if assignment.status != AssignmentStatus::RecoveryConfirmationRequired {
             return Err(invalid_assignment_state(
                 "assignment does not require recovery confirmation",
@@ -899,7 +925,7 @@ impl AssignmentRepository {
             assignment.max_attempts
         };
         sqlx::query("UPDATE assignments SET status = ?, max_attempts = ?, next_attempt_at = NULL, recovery_reason = NULL, completed_at = ?, updated_at = ? WHERE id = ?")
-            .bind(status_value).bind(i64::from(max_attempts)).bind(if resume { None } else { Some(now) }).bind(now).bind(assignment_id)
+            .bind(status_value).bind(i64::from(max_attempts)).bind(if resume { None } else { Some(now) }).bind(now).bind(&assignment_id)
             .execute(&mut *transaction).await?;
         assignment.status = status;
         assignment.max_attempts = max_attempts;
@@ -920,7 +946,7 @@ impl AssignmentRepository {
             )
         } else {
             let run = sqlx::query_as::<_, RunRow>("SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status, attempt_number FROM runs WHERE assignment_id = ? ORDER BY attempt_number DESC LIMIT 1")
-                .bind(assignment_id)
+                .bind(&assignment_id)
                 .fetch_optional(&mut *transaction)
                 .await?
                 .ok_or_else(|| invalid_assignment_state("recovery confirmation has no audited Run"))?;
@@ -948,7 +974,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.event_sink.publish(event)?;
+        self.publish_committed_events(std::slice::from_ref(&event));
         Ok(assignment.summary)
     }
 
@@ -957,17 +983,21 @@ impl AssignmentRepository {
         assignment_id: &str,
         depends_on_assignment_id: &str,
     ) -> Result<(), AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let depends_on_assignment_id =
+            validate_id("dependsOnAssignmentId", depends_on_assignment_id)?;
         if assignment_id == depends_on_assignment_id {
             return Err(AppError::invalid_input(
                 "dependency",
                 "assignment cannot depend on itself",
             ));
         }
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let work_ids: Vec<String> =
             sqlx::query_scalar("SELECT work_id FROM assignments WHERE id IN (?, ?) ORDER BY id")
-                .bind(assignment_id)
-                .bind(depends_on_assignment_id)
-                .fetch_all(&self.pool)
+                .bind(&assignment_id)
+                .bind(&depends_on_assignment_id)
+                .fetch_all(&mut *transaction)
                 .await?;
         if work_ids.len() != 2 || work_ids[0] != work_ids[1] {
             return Err(AppError::invalid_input(
@@ -975,29 +1005,83 @@ impl AssignmentRepository {
                 "dependency must belong to the same Work",
             ));
         }
+        let creates_cycle: i64 = sqlx::query_scalar(
+            "WITH RECURSIVE reachable(id) AS (VALUES (?) UNION SELECT dependencies.depends_on_assignment_id FROM assignment_dependencies dependencies INNER JOIN reachable ON dependencies.assignment_id = reachable.id) SELECT EXISTS(SELECT 1 FROM reachable WHERE id = ?)",
+        )
+        .bind(&depends_on_assignment_id)
+        .bind(&assignment_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if creates_cycle != 0 {
+            return Err(AppError::invalid_input(
+                "dependency",
+                "dependency would create a cycle",
+            ));
+        }
         sqlx::query("INSERT INTO assignment_dependencies (assignment_id, depends_on_assignment_id) VALUES (?, ?)")
-            .bind(assignment_id).bind(depends_on_assignment_id).execute(&self.pool).await?;
+            .bind(&assignment_id).bind(&depends_on_assignment_id).execute(&mut *transaction).await?;
+        transaction.commit().await?;
         Ok(())
     }
 
     pub async fn dependencies_terminal(&self, assignment_id: &str) -> Result<bool, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
         let mut connection = self.pool.acquire().await?;
-        dependencies_terminal_in(&mut connection, assignment_id).await
+        dependencies_terminal_in(&mut connection, &assignment_id).await
     }
 
     pub async fn events_for_assignment(
         &self,
         assignment_id: &str,
     ) -> Result<Vec<WorkEventEnvelope>, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
         sqlx::query_as::<_, EventRow>(
             "SELECT id, work_id, run_id, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id, sequence, version, occurred_at, payload FROM events WHERE assignment_id = ? AND run_id IS NULL ORDER BY sequence",
         )
-        .bind(assignment_id)
+        .bind(&assignment_id)
         .fetch_all(&self.pool)
         .await?
         .into_iter()
         .map(WorkEventEnvelope::try_from)
         .collect()
+    }
+
+    pub async fn replay_committed_events_for_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<PublishReplayReport, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let events = sqlx::query_as::<_, EventRow>(
+            "SELECT id, work_id, run_id, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id, sequence, version, occurred_at, payload FROM events WHERE assignment_id = ? ORDER BY rowid",
+        )
+        .bind(&assignment_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(WorkEventEnvelope::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.publish_committed_events(&events))
+    }
+
+    fn publish_committed_events(&self, events: &[WorkEventEnvelope]) -> PublishReplayReport {
+        let mut report = PublishReplayReport {
+            attempted: events.len(),
+            published: 0,
+            failed_event_ids: Vec::new(),
+        };
+        for event in events {
+            if self.event_sink.publish(event.clone()).is_ok() {
+                report.published += 1;
+            } else {
+                report.failed_event_ids.push(
+                    event
+                        .event_id
+                        .clone()
+                        .unwrap_or_else(|| format!("{}:{}", event.work_id, event.sequence)),
+                );
+            }
+        }
+        report
     }
 }
 
@@ -1204,7 +1288,7 @@ async fn assignment_event(
         .filter(|value| *value <= i64::from(u32::MAX))
         .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
     let event = WorkEventEnvelope {
-        version: 1,
+        version: ASSIGNMENT_EVENT_VERSION,
         event_id: Some(Uuid::new_v4().to_string()),
         work_id: assignment.work_id.clone(),
         run_id: run_id.map(str::to_owned),
@@ -1227,16 +1311,33 @@ fn stable_seed(id: &str) -> u64 {
     u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 prefix"))
 }
 
-fn non_empty(field: &str, value: &str) -> Result<String, AppError> {
+fn bounded_non_empty(field: &str, value: &str, max_bytes: usize) -> Result<String, AppError> {
     let value = value.trim();
     if value.is_empty() {
-        Err(AppError::invalid_input(
+        return Err(AppError::invalid_input(
             field,
             format!("{field} must not be empty"),
-        ))
-    } else {
-        Ok(value.to_owned())
+        ));
     }
+    if value.len() > max_bytes {
+        return Err(AppError::invalid_input(
+            field,
+            format!("{field} is too large"),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_id(field: &str, value: &str) -> Result<String, AppError> {
+    bounded_non_empty(field, value, MAX_ID_BYTES)
+}
+
+fn validate_optional_id(field: &str, value: Option<&str>) -> Result<Option<String>, AppError> {
+    value.map(|value| validate_id(field, value)).transpose()
+}
+
+fn validate_label(field: &str, value: &str) -> Result<String, AppError> {
+    bounded_non_empty(field, value, MAX_LABEL_BYTES)
 }
 
 fn invalid_assignment_state(message: &str) -> AppError {
@@ -1244,20 +1345,7 @@ fn invalid_assignment_state(message: &str) -> AppError {
 }
 
 fn validate_text(field: &str, value: &str) -> Result<String, AppError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::invalid_input(
-            field,
-            format!("{field} must not be empty"),
-        ));
-    }
-    if trimmed.len() > MAX_TEXT_BYTES {
-        return Err(AppError::invalid_input(
-            field,
-            format!("{field} is too large"),
-        ));
-    }
-    Ok(trimmed.to_owned())
+    bounded_non_empty(field, value, MAX_TEXT_BYTES)
 }
 
 fn validate_json(field: &str, value: &Value, expected: &str) -> Result<String, AppError> {
