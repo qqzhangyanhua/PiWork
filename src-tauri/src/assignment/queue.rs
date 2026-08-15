@@ -4,15 +4,18 @@
 //! Commit: `5bf78671f45178f8de02ba18d3d321cbbf19cd1f`
 //! PiWork differences: each claim owns exactly one Work/Assignment; Buzz event
 //! batches become bounded, ordered input references within that Assignment.
-//! Global/per-Agent capacity, ownership-aware depth, observable expiry, and
-//! fail-closed validation are added. Relay, Nostr, ACP prompt formatting,
-//! drop-mode dedup, retry jitter, and native-steer transport are omitted.
+//! Total item/Work/global/per-Agent capacity, indexed scheduling,
+//! ownership-aware depth, observable expiry, and fail-closed validation are
+//! added. Attempt interruption is distinct from terminal Work cancellation.
+//! Relay, Nostr, ACP prompt formatting, drop-mode dedup, retry jitter, and
+//! native-steer transport are omitted.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use thiserror::Error;
+use uuid::Uuid;
 
 pub const MAX_IN_FLIGHT_TIMEOUT_SECONDS: i64 = 86_400;
 
@@ -36,6 +39,8 @@ pub struct QueueItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueLimits {
     pub max_pending_per_work: usize,
+    pub max_total_items: usize,
+    pub max_works: usize,
     pub max_batch_size: usize,
     pub global_parallelism: usize,
     pub default_agent_parallelism: usize,
@@ -61,7 +66,14 @@ pub enum QueueOutcome {
     Completed,
     RetryableFailure,
     PoolExhausted,
-    Cancelled,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequeueCause {
+    RetryableFailure,
+    PoolExhausted,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,13 +94,11 @@ pub enum QueueRelease {
         item: QueueItem,
         available_at: DateTime<Utc>,
         retry_count: u32,
+        cause: RequeueCause,
     },
     DeadLettered {
         item: QueueItem,
         retry_count: u32,
-    },
-    Cancelled {
-        item: QueueItem,
     },
     Expired {
         item: QueueItem,
@@ -109,6 +119,17 @@ pub enum CompletionRejection {
     TimeOverflow,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryPlan {
+    Requeue {
+        retry_count: u32,
+        available_at: DateTime<Utc>,
+    },
+    DeadLetter {
+        retry_count: u32,
+    },
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum QueueError {
     #[error("queue limits are invalid: {0}")]
@@ -119,6 +140,10 @@ pub enum QueueError {
     DuplicateId(String),
     #[error("owned queue depth for Work {work_id} reached its cap of {limit}")]
     DepthExceeded { work_id: String, limit: usize },
+    #[error("owned queue item count reached its cap of {limit}")]
+    TotalItemsExceeded { limit: usize },
+    #[error("owned Work count reached its cap of {limit}")]
+    WorksExceeded { limit: usize },
     #[error("assignment queue item not found: {0}")]
     UnknownAssignment(String),
     #[error("input batch for Assignment {assignment_id} reached its cap of {limit}")]
@@ -127,15 +152,32 @@ pub enum QueueError {
     InvalidInput { field: &'static str },
 }
 
+type ReadyHeadKey = (DateTime<Utc>, String, String);
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct QueueTestMetrics {
+    hydration_bucket_sorts: usize,
+    assignment_index_lookups: usize,
+    claim_index_lookups: usize,
+    ready_candidates_examined: usize,
+}
+
 /// Pure in-memory scheduling state derived from Buzz's per-Channel queue.
 pub struct WorkQueue {
     per_work: BTreeMap<String, VecDeque<QueueItem>>,
     inflight_by_work: BTreeMap<String, QueueClaim>,
     inflight_by_agent: BTreeMap<String, usize>,
+    ready_heads: BTreeSet<ReadyHeadKey>,
+    assignment_to_work: BTreeMap<String, String>,
+    claim_to_work: BTreeMap<String, String>,
+    owned_per_work: BTreeMap<String, usize>,
     limits: QueueLimits,
     withheld_inputs: BTreeMap<String, Vec<QueueInput>>,
-    known_ids: BTreeSet<String>,
+    claim_epoch: Uuid,
     next_claim_sequence: u64,
+    #[cfg(test)]
+    test_metrics: QueueTestMetrics,
 }
 
 impl WorkQueue {
@@ -144,42 +186,108 @@ impl WorkQueue {
         limits: QueueLimits,
     ) -> Result<Self, QueueError> {
         validate_limits(&limits)?;
-        let mut queue = Self {
-            per_work: BTreeMap::new(),
+        let mut buckets: BTreeMap<String, Vec<QueueItem>> = BTreeMap::new();
+        let mut assignment_to_work = BTreeMap::new();
+        for mut item in items {
+            if assignment_to_work.contains_key(&item.id) {
+                return Err(QueueError::DuplicateId(item.id));
+            }
+            if assignment_to_work.len() >= limits.max_total_items {
+                return Err(QueueError::TotalItemsExceeded {
+                    limit: limits.max_total_items,
+                });
+            }
+            let is_new_work = !buckets.contains_key(&item.work_id);
+            if is_new_work && buckets.len() >= limits.max_works {
+                return Err(QueueError::WorksExceeded {
+                    limit: limits.max_works,
+                });
+            }
+            let work_id = item.work_id.clone();
+            let bucket = buckets.entry(work_id.clone()).or_default();
+            if bucket.len() >= limits.max_pending_per_work {
+                return Err(QueueError::DepthExceeded {
+                    work_id,
+                    limit: limits.max_pending_per_work,
+                });
+            }
+            validate_item(&mut item, &limits)?;
+            assignment_to_work.insert(item.id.clone(), item.work_id.clone());
+            bucket.push(item);
+        }
+
+        let mut per_work = BTreeMap::new();
+        for (work_id, mut bucket) in buckets {
+            bucket.sort_by(compare_items);
+            per_work.insert(work_id, VecDeque::from(bucket));
+        }
+        let owned_per_work = per_work
+            .iter()
+            .map(|(work_id, bucket)| (work_id.clone(), bucket.len()))
+            .collect();
+        let ready_heads = per_work
+            .iter()
+            .filter_map(|(work_id, bucket)| {
+                bucket.front().map(|item| ready_head_key(work_id, item))
+            })
+            .collect();
+        #[cfg(test)]
+        let hydration_bucket_sorts = per_work.len();
+
+        Ok(Self {
+            per_work,
             inflight_by_work: BTreeMap::new(),
             inflight_by_agent: BTreeMap::new(),
+            ready_heads,
+            assignment_to_work,
+            claim_to_work: BTreeMap::new(),
+            owned_per_work,
             limits,
             withheld_inputs: BTreeMap::new(),
-            known_ids: BTreeSet::new(),
+            claim_epoch: Uuid::new_v4(),
             next_claim_sequence: 0,
-        };
-        for item in items {
-            queue.push(item)?;
-        }
-        Ok(queue)
+            #[cfg(test)]
+            test_metrics: QueueTestMetrics {
+                hydration_bucket_sorts,
+                ..QueueTestMetrics::default()
+            },
+        })
     }
 
     pub fn push(&mut self, mut item: QueueItem) -> Result<(), QueueError> {
-        validate_item(&mut item, &self.limits)?;
-        if self.known_ids.contains(&item.id) {
+        if self.assignment_to_work.contains_key(&item.id) {
             return Err(QueueError::DuplicateId(item.id));
         }
+        self.ensure_global_capacity(&item.work_id)?;
         self.ensure_ownership_capacity(&item.work_id, 1)?;
+        validate_item(&mut item, &self.limits)?;
 
-        self.known_ids.insert(item.id.clone());
-        insert_sorted(self.per_work.entry(item.work_id.clone()).or_default(), item);
+        let work_id = item.work_id.clone();
+        self.remove_ready_head(&work_id);
+        self.assignment_to_work
+            .insert(item.id.clone(), work_id.clone());
+        *self.owned_per_work.entry(work_id.clone()).or_default() += 1;
+        insert_sorted(self.per_work.entry(work_id.clone()).or_default(), item);
+        self.insert_ready_head(&work_id);
         Ok(())
     }
 
     pub fn push_input(&mut self, assignment_id: &str, input: QueueInput) -> Result<(), QueueError> {
         validate_input(&input)?;
-        let pending_location = self.per_work.iter().find_map(|(work_id, items)| {
-            items
-                .iter()
-                .position(|item| item.id == assignment_id)
-                .map(|position| (work_id.clone(), position))
-        });
-        if let Some((work_id, position)) = pending_location {
+        #[cfg(test)]
+        {
+            self.test_metrics.assignment_index_lookups += 1;
+        }
+        let work_id = self
+            .assignment_to_work
+            .get(assignment_id)
+            .cloned()
+            .ok_or_else(|| QueueError::UnknownAssignment(assignment_id.to_owned()))?;
+        let pending_position = self
+            .per_work
+            .get(&work_id)
+            .and_then(|items| items.iter().position(|item| item.id == assignment_id));
+        if let Some(position) = pending_position {
             let item = self
                 .per_work
                 .get_mut(&work_id)
@@ -198,9 +306,9 @@ impl WorkQueue {
 
         let claim = self
             .inflight_by_work
-            .values()
-            .find(|claim| claim.item.id == assignment_id)
-            .ok_or_else(|| QueueError::UnknownAssignment(assignment_id.to_owned()))?;
+            .get(&work_id)
+            .filter(|claim| claim.item.id == assignment_id)
+            .expect("Assignment index points to pending or in-flight ownership");
         let withheld = self
             .withheld_inputs
             .get(assignment_id)
@@ -245,24 +353,28 @@ impl WorkQueue {
             return None;
         }
 
-        let candidate = self
-            .per_work
-            .iter()
-            .filter(|(work_id, _)| !self.inflight_by_work.contains_key(*work_id))
-            .filter_map(|(work_id, items)| {
-                let head = items.front()?;
-                if head.not_before > now || !self.agent_has_capacity(&head.agent_id) {
-                    return None;
-                }
-                Some((work_id.clone(), head.clone()))
-            })
-            .min_by(|(_, left), (_, right)| compare_items(left, right));
-        let (work_id, head) = candidate?;
+        let mut examined = 0;
+        let candidate = self.ready_heads.iter().find_map(|(_, _, work_id)| {
+            examined += 1;
+            let head = self
+                .per_work
+                .get(work_id)
+                .and_then(VecDeque::front)
+                .expect("ready-head index points to a pending Assignment");
+            (head.not_before <= now && self.agent_has_capacity(&head.agent_id))
+                .then(|| work_id.clone())
+        });
+        #[cfg(test)]
+        {
+            self.test_metrics.ready_candidates_examined += examined;
+        }
+        let work_id = candidate?;
         let next_sequence = self.next_claim_sequence.checked_add(1)?;
         let deadline = now
             .checked_add_signed(self.limits.in_flight_timeout)
             .unwrap_or(DateTime::<Utc>::MAX_UTC);
 
+        self.remove_ready_head(&work_id);
         let item = self
             .per_work
             .get_mut(&work_id)
@@ -273,9 +385,9 @@ impl WorkQueue {
         }
 
         let claim = QueueClaim {
-            id: format!("claim:{next_sequence}:{}", head.id),
+            id: format!("claim:{}:{next_sequence}:{}", self.claim_epoch, item.id),
             work_id: work_id.clone(),
-            agent_id: head.agent_id.clone(),
+            agent_id: item.agent_id.clone(),
             item,
             claimed_at: now,
             deadline,
@@ -285,16 +397,17 @@ impl WorkQueue {
             .inflight_by_agent
             .entry(claim.agent_id.clone())
             .or_default() += 1;
+        self.claim_to_work.insert(claim.id.clone(), work_id.clone());
         self.inflight_by_work.insert(work_id, claim.clone());
         Some(claim)
     }
 
     pub fn release(&mut self, completion: QueueCompletion) -> QueueRelease {
-        let work_id = self
-            .inflight_by_work
-            .iter()
-            .find(|(_, claim)| claim.id == completion.claim_id)
-            .map(|(work_id, _)| work_id.clone());
+        #[cfg(test)]
+        {
+            self.test_metrics.claim_index_lookups += 1;
+        }
+        let work_id = self.claim_to_work.get(&completion.claim_id).cloned();
         let Some(work_id) = work_id else {
             return rejected(
                 completion.claim_id,
@@ -327,6 +440,15 @@ impl WorkQueue {
             return self.expired_release(claim);
         }
 
+        let retry_plan = if completion.outcome == QueueOutcome::RetryableFailure {
+            match plan_retry(&self.limits, &claim.item, completion.observed_at) {
+                Ok(plan) => Some(plan),
+                Err(reason) => return rejected(completion.claim_id, reason, None),
+            }
+        } else {
+            None
+        };
+
         let mut claim = self
             .take_claim(&work_id)
             .expect("claim still exists after validation");
@@ -338,7 +460,7 @@ impl WorkQueue {
         match completion.outcome {
             QueueOutcome::Completed => {
                 let completed = claim.item;
-                self.known_ids.remove(&completed.id);
+                self.forget_assignment(&completed);
                 QueueRelease::Completed {
                     item: completed,
                     continuation_inputs: withheld,
@@ -354,30 +476,41 @@ impl WorkQueue {
                     item,
                     available_at,
                     retry_count,
+                    cause: RequeueCause::PoolExhausted,
                 }
             }
             QueueOutcome::RetryableFailure => {
                 merge_inputs(&mut claim.item.inputs, withheld);
-                self.release_retry(claim.item, completion)
+                self.release_retry(
+                    claim.item,
+                    retry_plan.expect("retry outcome has a precomputed plan"),
+                )
             }
-            QueueOutcome::Cancelled => {
+            QueueOutcome::Interrupted => {
                 merge_inputs(&mut claim.item.inputs, withheld);
                 let item = claim.item;
+                let available_at = item.not_before;
+                let retry_count = item.retry_count;
                 self.requeue_existing(item.clone());
-                QueueRelease::Cancelled { item }
+                QueueRelease::Requeued {
+                    item,
+                    available_at,
+                    retry_count,
+                    cause: RequeueCause::Interrupted,
+                }
             }
         }
     }
 
     pub fn cancel_work(&mut self, work_id: &str) -> Vec<QueueItem> {
+        self.remove_ready_head(work_id);
         let mut cancelled: Vec<QueueItem> = self
             .per_work
             .remove(work_id)
             .unwrap_or_default()
             .into_iter()
             .collect();
-        if let Some(claim) = self.inflight_by_work.remove(work_id) {
-            self.decrement_agent(&claim.agent_id);
+        if let Some(claim) = self.take_claim(work_id) {
             let mut item = claim.item;
             let withheld = self.withheld_inputs.remove(&item.id).unwrap_or_default();
             merge_inputs(&mut item.inputs, withheld);
@@ -386,8 +519,9 @@ impl WorkQueue {
         cancelled.sort_by(compare_items);
         for item in &cancelled {
             self.withheld_inputs.remove(&item.id);
-            self.known_ids.remove(&item.id);
+            self.assignment_to_work.remove(&item.id);
         }
+        self.owned_per_work.remove(work_id);
         cancelled
     }
 
@@ -402,10 +536,7 @@ impl WorkQueue {
     }
 
     fn owned_count(&self, work_id: &str) -> usize {
-        self.per_work
-            .get(work_id)
-            .map_or(0, VecDeque::len)
-            .saturating_add(usize::from(self.inflight_by_work.contains_key(work_id)))
+        self.owned_per_work.get(work_id).copied().unwrap_or(0)
     }
 
     fn ensure_ownership_capacity(&self, work_id: &str, added: usize) -> Result<(), QueueError> {
@@ -422,44 +553,51 @@ impl WorkQueue {
         Ok(())
     }
 
-    fn release_retry(&mut self, mut item: QueueItem, completion: QueueCompletion) -> QueueRelease {
-        let retry_count = match item.retry_count.checked_add(1) {
-            Some(count) => count,
-            None => {
-                self.known_ids.remove(&item.id);
-                return rejected(
-                    completion.claim_id,
-                    CompletionRejection::TimeOverflow,
-                    Some(item),
-                );
-            }
-        };
-        if retry_count > self.limits.max_retries {
-            self.known_ids.remove(&item.id);
-            return QueueRelease::DeadLettered { item, retry_count };
+    fn ensure_global_capacity(&self, work_id: &str) -> Result<(), QueueError> {
+        if self.assignment_to_work.len() >= self.limits.max_total_items {
+            return Err(QueueError::TotalItemsExceeded {
+                limit: self.limits.max_total_items,
+            });
         }
+        let work_is_owned = self.owned_per_work.contains_key(work_id);
+        if !work_is_owned && self.owned_work_count() >= self.limits.max_works {
+            return Err(QueueError::WorksExceeded {
+                limit: self.limits.max_works,
+            });
+        }
+        Ok(())
+    }
 
-        let delay = retry_delay(&self.limits, retry_count);
-        let Some(available_at) = completion.observed_at.checked_add_signed(delay) else {
-            self.known_ids.remove(&item.id);
-            return rejected(
-                completion.claim_id,
-                CompletionRejection::TimeOverflow,
-                Some(item),
-            );
-        };
-        item.retry_count = retry_count;
-        item.not_before = available_at;
-        self.requeue_existing(item.clone());
-        QueueRelease::Requeued {
-            item,
-            available_at,
-            retry_count,
+    fn owned_work_count(&self) -> usize {
+        self.owned_per_work.len()
+    }
+
+    fn release_retry(&mut self, mut item: QueueItem, plan: RetryPlan) -> QueueRelease {
+        match plan {
+            RetryPlan::DeadLetter { retry_count } => {
+                self.forget_assignment(&item);
+                QueueRelease::DeadLettered { item, retry_count }
+            }
+            RetryPlan::Requeue {
+                retry_count,
+                available_at,
+            } => {
+                item.retry_count = retry_count;
+                item.not_before = available_at;
+                self.requeue_existing(item.clone());
+                QueueRelease::Requeued {
+                    item,
+                    available_at,
+                    retry_count,
+                    cause: RequeueCause::RetryableFailure,
+                }
+            }
         }
     }
 
     fn take_claim(&mut self, work_id: &str) -> Option<QueueClaim> {
         let claim = self.inflight_by_work.remove(work_id)?;
+        self.claim_to_work.remove(&claim.id);
         self.decrement_agent(&claim.agent_id);
         Some(claim)
     }
@@ -470,7 +608,7 @@ impl WorkQueue {
             .remove(&claim.item.id)
             .unwrap_or_default();
         merge_inputs(&mut claim.item.inputs, withheld);
-        self.known_ids.remove(&claim.item.id);
+        self.forget_assignment(&claim.item);
         QueueRelease::Expired {
             item: claim.item,
             deadline: claim.deadline,
@@ -478,7 +616,44 @@ impl WorkQueue {
     }
 
     fn requeue_existing(&mut self, item: QueueItem) {
-        insert_sorted(self.per_work.entry(item.work_id.clone()).or_default(), item);
+        let work_id = item.work_id.clone();
+        self.remove_ready_head(&work_id);
+        insert_sorted(self.per_work.entry(work_id.clone()).or_default(), item);
+        self.insert_ready_head(&work_id);
+    }
+
+    fn forget_assignment(&mut self, item: &QueueItem) {
+        self.assignment_to_work.remove(&item.id);
+        let remove_work = match self.owned_per_work.get_mut(&item.work_id) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if remove_work {
+            self.owned_per_work.remove(&item.work_id);
+        }
+        self.insert_ready_head(&item.work_id);
+    }
+
+    fn remove_ready_head(&mut self, work_id: &str) {
+        if self.inflight_by_work.contains_key(work_id) {
+            return;
+        }
+        if let Some(item) = self.per_work.get(work_id).and_then(VecDeque::front) {
+            self.ready_heads.remove(&ready_head_key(work_id, item));
+        }
+    }
+
+    fn insert_ready_head(&mut self, work_id: &str) {
+        if self.inflight_by_work.contains_key(work_id) {
+            return;
+        }
+        if let Some(item) = self.per_work.get(work_id).and_then(VecDeque::front) {
+            self.ready_heads.insert(ready_head_key(work_id, item));
+        }
     }
 
     fn decrement_agent(&mut self, agent_id: &str) {
@@ -500,6 +675,8 @@ fn validate_limits(limits: &QueueLimits) -> Result<(), QueueError> {
     const MAX_SAFE_LIMIT: usize = u32::MAX as usize;
     for (name, value) in [
         ("max_pending_per_work", limits.max_pending_per_work),
+        ("max_total_items", limits.max_total_items),
+        ("max_works", limits.max_works),
         ("max_batch_size", limits.max_batch_size),
         ("global_parallelism", limits.global_parallelism),
         (
@@ -519,16 +696,13 @@ fn validate_limits(limits: &QueueLimits) -> Result<(), QueueError> {
     if limits.max_retries > 63 {
         return Err(QueueError::InvalidLimits("max_retries"));
     }
-    if limits.retry_base <= TimeDelta::zero() {
-        return Err(QueueError::InvalidLimits("retry_base"));
-    }
-    if limits.retry_base.num_microseconds().is_none() {
+    if exact_positive_microseconds(limits.retry_base).is_none() {
         return Err(QueueError::InvalidLimits("retry_base"));
     }
     if limits.retry_max < limits.retry_base {
         return Err(QueueError::InvalidLimits("retry_max"));
     }
-    if limits.retry_max.num_microseconds().is_none() {
+    if exact_positive_microseconds(limits.retry_max).is_none() {
         return Err(QueueError::InvalidLimits("retry_max"));
     }
     for (agent_id, limit) in &limits.agent_parallelism {
@@ -620,6 +794,10 @@ fn compare_items(left: &QueueItem, right: &QueueItem) -> Ordering {
         .then_with(|| left.id.cmp(&right.id))
 }
 
+fn ready_head_key(work_id: &str, item: &QueueItem) -> ReadyHeadKey {
+    (item.created_at, item.id.clone(), work_id.to_owned())
+}
+
 fn insert_sorted(queue: &mut VecDeque<QueueItem>, item: QueueItem) {
     let position = queue
         .iter()
@@ -664,6 +842,35 @@ fn retry_delay(limits: &QueueLimits, retry_count: u32) -> TimeDelta {
         .unwrap_or(i64::MAX)
         .min(max_micros);
     TimeDelta::microseconds(delay_micros)
+}
+
+fn exact_positive_microseconds(duration: TimeDelta) -> Option<i64> {
+    if duration <= TimeDelta::zero() {
+        return None;
+    }
+    let microseconds = duration.num_microseconds()?;
+    (TimeDelta::microseconds(microseconds) == duration).then_some(microseconds)
+}
+
+fn plan_retry(
+    limits: &QueueLimits,
+    item: &QueueItem,
+    observed_at: DateTime<Utc>,
+) -> Result<RetryPlan, CompletionRejection> {
+    let retry_count = item
+        .retry_count
+        .checked_add(1)
+        .ok_or(CompletionRejection::TimeOverflow)?;
+    if retry_count > limits.max_retries {
+        return Ok(RetryPlan::DeadLetter { retry_count });
+    }
+    let available_at = observed_at
+        .checked_add_signed(retry_delay(limits, retry_count))
+        .ok_or(CompletionRejection::TimeOverflow)?;
+    Ok(RetryPlan::Requeue {
+        retry_count,
+        available_at,
+    })
 }
 
 fn rejected(
@@ -714,6 +921,8 @@ mod tests {
     fn limits() -> QueueLimits {
         QueueLimits {
             max_pending_per_work: 8,
+            max_total_items: 256,
+            max_works: 64,
             max_batch_size: 1,
             global_parallelism: 4,
             default_agent_parallelism: 4,
@@ -736,6 +945,41 @@ mod tests {
             observed_at: completed_at,
             outcome,
         }
+    }
+
+    fn assert_indexes_consistent(queue: &WorkQueue) {
+        let mut expected_assignments = BTreeMap::new();
+        let mut expected_owned_per_work = BTreeMap::new();
+        for (work_id, items) in &queue.per_work {
+            expected_owned_per_work.insert(work_id.clone(), items.len());
+            for item in items {
+                expected_assignments.insert(item.id.clone(), work_id.clone());
+            }
+        }
+        for (work_id, claim) in &queue.inflight_by_work {
+            *expected_owned_per_work.entry(work_id.clone()).or_default() += 1;
+            expected_assignments.insert(claim.item.id.clone(), work_id.clone());
+        }
+        let expected_claims: BTreeMap<String, String> = queue
+            .inflight_by_work
+            .iter()
+            .map(|(work_id, claim)| (claim.id.clone(), work_id.clone()))
+            .collect();
+        let expected_ready: BTreeSet<(DateTime<Utc>, String, String)> = queue
+            .per_work
+            .iter()
+            .filter(|(work_id, _)| !queue.inflight_by_work.contains_key(*work_id))
+            .filter_map(|(work_id, items)| {
+                items
+                    .front()
+                    .map(|item| (item.created_at, item.id.clone(), work_id.clone()))
+            })
+            .collect();
+
+        assert_eq!(queue.assignment_to_work, expected_assignments);
+        assert_eq!(queue.claim_to_work, expected_claims);
+        assert_eq!(queue.owned_per_work, expected_owned_per_work);
+        assert_eq!(queue.ready_heads, expected_ready);
     }
 
     #[test]
@@ -962,21 +1206,28 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_batch_merge_preserves_user_order() {
+    fn interrupted_attempt_merge_preserves_user_order() {
         let mut configured = limits();
         configured.max_pending_per_work = 8;
         configured.max_batch_size = 4;
         let mut assignment = item("assignment", "work-a", "agent-a", instant(0));
         assignment.inputs = vec![input("01-old", instant(0)), input("02-old", instant(1))];
         let mut queue = WorkQueue::hydrate([assignment], configured).expect("valid queue");
-        let cancelled = queue.next_claim(instant(2)).expect("original batch");
+        let interrupted = queue.next_claim(instant(2)).expect("original batch");
         queue
             .push_input("assignment", input("03-new", instant(2)))
             .expect("new user input");
 
         assert!(matches!(
-            queue.release(complete(&cancelled, instant(3), QueueOutcome::Cancelled)),
-            QueueRelease::Cancelled { .. }
+            queue.release(complete(
+                &interrupted,
+                instant(3),
+                QueueOutcome::Interrupted,
+            )),
+            QueueRelease::Requeued {
+                cause: RequeueCause::Interrupted,
+                ..
+            }
         ));
         let merged = queue.next_claim(instant(3)).expect("merged claim");
         assert_eq!(
@@ -1202,7 +1453,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_transition_at_full_depth_requeues_without_loss() {
+    fn interrupted_transition_at_full_depth_requeues_without_loss() {
         let mut configured = limits();
         configured.max_pending_per_work = 3;
         let mut queue = WorkQueue::hydrate(
@@ -1219,8 +1470,11 @@ mod tests {
             .expect("one free ownership slot");
 
         assert!(matches!(
-            queue.release(complete(&claim, instant(4), QueueOutcome::Cancelled)),
-            QueueRelease::Cancelled { .. }
+            queue.release(complete(&claim, instant(4), QueueOutcome::Interrupted)),
+            QueueRelease::Requeued {
+                cause: RequeueCause::Interrupted,
+                ..
+            }
         ));
         assert_eq!(
             queue
@@ -1333,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_input_fragments_are_bounded_before_cancel_merge() {
+    fn in_flight_input_fragments_are_bounded_before_interrupted_merge() {
         let mut configured = limits();
         configured.max_batch_size = 3;
         let mut assignment = item("assignment", "work-a", "agent-a", instant(0));
@@ -1349,8 +1603,11 @@ mod tests {
             Err(QueueError::BatchExceeded { .. })
         ));
         assert!(matches!(
-            queue.release(complete(&claim, instant(4), QueueOutcome::Cancelled)),
-            QueueRelease::Cancelled { .. }
+            queue.release(complete(&claim, instant(4), QueueOutcome::Interrupted)),
+            QueueRelease::Requeued {
+                cause: RequeueCause::Interrupted,
+                ..
+            }
         ));
     }
 
@@ -1394,7 +1651,7 @@ mod tests {
         );
         assert_eq!(queue.owned_count("work-a"), 0);
         assert!(!queue.inflight_by_work.contains_key("work-a"));
-        assert!(!queue.known_ids.contains("assignment"));
+        assert!(!queue.assignment_to_work.contains_key("assignment"));
 
         queue
             .push(item("replacement", "work-a", "agent-a", instant(5)))
@@ -1434,7 +1691,7 @@ mod tests {
         assert_eq!(item.id, "assignment");
         assert!(continuation_inputs.is_empty());
         assert_eq!(queue.owned_count("work-a"), 0);
-        assert!(!queue.known_ids.contains("assignment"));
+        assert!(!queue.assignment_to_work.contains_key("assignment"));
     }
 
     #[test]
@@ -1465,5 +1722,337 @@ mod tests {
         ));
         assert!(queue.next_claim(instant(3)).is_none());
         assert!(queue.inflight_by_work.contains_key("work-a"));
+    }
+
+    #[test]
+    fn stale_claim_token_from_an_earlier_hydration_cannot_release_a_new_claim() {
+        let mut earlier = WorkQueue::hydrate(
+            [item("assignment", "work-a", "agent-a", instant(0))],
+            limits(),
+        )
+        .expect("earlier queue");
+        let stale = earlier.next_claim(instant(1)).expect("earlier claim");
+
+        let mut current = WorkQueue::hydrate(
+            [item("assignment", "work-a", "agent-a", instant(0))],
+            limits(),
+        )
+        .expect("current queue");
+        let live = current.next_claim(instant(1)).expect("current claim");
+
+        assert!(matches!(
+            current.release(complete(&stale, instant(2), QueueOutcome::Completed)),
+            QueueRelease::Rejected {
+                reason: CompletionRejection::UnknownOrExpiredClaim,
+                item: None,
+                ..
+            }
+        ));
+        assert_ne!(stale.id, live.id);
+        assert_eq!(current.inflight_by_work.get("work-a"), Some(&live));
+        assert_eq!(current.inflight_by_agent.get("agent-a"), Some(&1));
+        assert!(matches!(
+            current.release(complete(&live, instant(2), QueueOutcome::Completed)),
+            QueueRelease::Completed { .. }
+        ));
+    }
+
+    #[test]
+    fn retry_time_overflow_rejection_preserves_claim_inputs_and_capacity() {
+        let claimed_at = DateTime::<Utc>::MAX_UTC - TimeDelta::seconds(10);
+        let observed_at = DateTime::<Utc>::MAX_UTC - TimeDelta::microseconds(1);
+        let mut configured = limits();
+        configured.global_parallelism = 1;
+        configured.max_batch_size = 2;
+        let mut queue = WorkQueue::hydrate(
+            [
+                item("assignment", "work-a", "agent-a", claimed_at),
+                item(
+                    "waiting",
+                    "work-b",
+                    "agent-b",
+                    claimed_at + TimeDelta::seconds(1),
+                ),
+            ],
+            configured,
+        )
+        .expect("valid queue");
+        let claim = queue.next_claim(claimed_at).expect("claim");
+        queue
+            .push_input(
+                "assignment",
+                input("input:new", claimed_at + TimeDelta::seconds(1)),
+            )
+            .expect("withheld input");
+        let withheld_before = queue
+            .withheld_inputs
+            .get("assignment")
+            .cloned()
+            .expect("withheld snapshot");
+
+        assert!(matches!(
+            queue.release(QueueCompletion {
+                claim_id: claim.id.clone(),
+                completed_at: observed_at,
+                observed_at,
+                outcome: QueueOutcome::RetryableFailure,
+            }),
+            QueueRelease::Rejected {
+                reason: CompletionRejection::TimeOverflow,
+                item: None,
+                ..
+            }
+        ));
+        assert_eq!(queue.inflight_by_work.get("work-a"), Some(&claim));
+        assert_eq!(
+            queue.withheld_inputs.get("assignment"),
+            Some(&withheld_before)
+        );
+        assert!(queue.assignment_to_work.contains_key("assignment"));
+        assert_eq!(queue.inflight_by_agent.get("agent-a"), Some(&1));
+        assert!(queue.next_claim(observed_at).is_none());
+
+        let QueueRelease::Completed {
+            item,
+            continuation_inputs,
+        } = queue.release(QueueCompletion {
+            claim_id: claim.id,
+            completed_at: claimed_at + TimeDelta::seconds(2),
+            observed_at: claimed_at + TimeDelta::seconds(2),
+            outcome: QueueOutcome::Completed,
+        })
+        else {
+            panic!("claim remains legally completable after rejection")
+        };
+        assert_eq!(item.id, "assignment");
+        assert_eq!(continuation_inputs, withheld_before);
+        assert_eq!(
+            queue
+                .next_claim(claimed_at + TimeDelta::seconds(3))
+                .expect("capacity released once")
+                .item
+                .id,
+            "waiting"
+        );
+    }
+
+    #[test]
+    fn retry_durations_require_exact_positive_microseconds() {
+        for invalid in [TimeDelta::nanoseconds(500), TimeDelta::nanoseconds(1_500)] {
+            let mut configured = limits();
+            configured.retry_base = invalid;
+            assert!(matches!(
+                WorkQueue::hydrate([], configured),
+                Err(QueueError::InvalidLimits("retry_base"))
+            ));
+        }
+
+        let mut configured = limits();
+        configured.retry_base = TimeDelta::microseconds(1);
+        configured.retry_max = TimeDelta::nanoseconds(1_500);
+        assert!(matches!(
+            WorkQueue::hydrate([], configured),
+            Err(QueueError::InvalidLimits("retry_max"))
+        ));
+
+        let mut configured = limits();
+        configured.retry_base = TimeDelta::microseconds(1);
+        configured.retry_max = TimeDelta::microseconds(1);
+        let mut queue = WorkQueue::hydrate(
+            [item("assignment", "work-a", "agent-a", instant(0))],
+            configured,
+        )
+        .expect("one-microsecond retry boundary is valid");
+        let claim = queue.next_claim(instant(1)).expect("claim");
+        let QueueRelease::Requeued {
+            available_at,
+            retry_count,
+            ..
+        } = queue.release(complete(&claim, instant(2), QueueOutcome::RetryableFailure))
+        else {
+            panic!("retry boundary should remain representable")
+        };
+        assert_eq!(retry_count, 1);
+        assert_eq!(available_at, instant(2) + TimeDelta::microseconds(1));
+        assert!(available_at > instant(2));
+    }
+
+    #[test]
+    fn global_item_and_work_caps_fail_closed_without_partial_insertion() {
+        let mut item_limited = limits();
+        item_limited.max_total_items = 2;
+        item_limited.max_works = 2;
+        let mut queue = WorkQueue::hydrate(
+            [
+                item("one", "work-a", "agent-a", instant(0)),
+                item("two", "work-b", "agent-b", instant(1)),
+            ],
+            item_limited.clone(),
+        )
+        .expect("queue at total cap");
+        assert_eq!(
+            queue.push(item("three", "work-c", "agent-c", instant(2))),
+            Err(QueueError::TotalItemsExceeded { limit: 2 })
+        );
+        assert_eq!(queue.assignment_to_work.len(), 2);
+        assert!(!queue.assignment_to_work.contains_key("three"));
+        assert!(!queue.per_work.contains_key("work-c"));
+        assert!(matches!(
+            WorkQueue::hydrate(
+                [
+                    item("one", "work-a", "agent-a", instant(0)),
+                    item("two", "work-b", "agent-b", instant(1)),
+                    item("three", "work-c", "agent-c", instant(2)),
+                ],
+                item_limited,
+            ),
+            Err(QueueError::TotalItemsExceeded { limit: 2 })
+        ));
+
+        let mut work_limited = limits();
+        work_limited.max_total_items = 3;
+        work_limited.max_works = 2;
+        let mut queue = WorkQueue::hydrate(
+            [
+                item("one", "work-a", "agent-a", instant(0)),
+                item("two", "work-b", "agent-b", instant(1)),
+            ],
+            work_limited.clone(),
+        )
+        .expect("queue at Work cap");
+        assert_eq!(
+            queue.push(item("three", "work-c", "agent-c", instant(2))),
+            Err(QueueError::WorksExceeded { limit: 2 })
+        );
+        assert_eq!(queue.assignment_to_work.len(), 2);
+        assert!(!queue.per_work.contains_key("work-c"));
+        assert!(matches!(
+            WorkQueue::hydrate(
+                [
+                    item("one", "work-a", "agent-a", instant(0)),
+                    item("two", "work-b", "agent-b", instant(1)),
+                    item("three", "work-c", "agent-c", instant(2)),
+                ],
+                work_limited,
+            ),
+            Err(QueueError::WorksExceeded { limit: 2 })
+        ));
+
+        let mut invalid = limits();
+        invalid.max_total_items = 0;
+        assert!(matches!(
+            WorkQueue::hydrate([], invalid),
+            Err(QueueError::InvalidLimits("max_total_items"))
+        ));
+        let mut invalid = limits();
+        invalid.max_works = 0;
+        assert!(matches!(
+            WorkQueue::hydrate([], invalid),
+            Err(QueueError::InvalidLimits("max_works"))
+        ));
+    }
+
+    #[test]
+    fn large_multi_work_queue_uses_consistent_direct_indexes() {
+        const WORKS: usize = 64;
+        const ITEMS_PER_WORK: usize = 4;
+        let base = instant(0);
+        let mut configured = limits();
+        configured.max_total_items = WORKS * ITEMS_PER_WORK;
+        configured.max_works = WORKS;
+        configured.max_batch_size = 2;
+        let mut items = Vec::with_capacity(WORKS * ITEMS_PER_WORK);
+        for work in 0..WORKS {
+            for slot in (0..ITEMS_PER_WORK).rev() {
+                items.push(item(
+                    &format!("assignment-{work:03}-{slot:03}"),
+                    &format!("work-{work:03}"),
+                    &format!("agent-{work:03}"),
+                    base + TimeDelta::seconds(slot as i64),
+                ));
+            }
+        }
+
+        let mut queue = WorkQueue::hydrate(items, configured).expect("bounded large queue");
+        assert_indexes_consistent(&queue);
+        assert_eq!(queue.test_metrics.hydration_bucket_sorts, WORKS);
+
+        queue.test_metrics.assignment_index_lookups = 0;
+        queue
+            .push_input(
+                "assignment-063-003",
+                input("input:new", base + TimeDelta::seconds(4)),
+            )
+            .expect("direct Assignment lookup");
+        assert_eq!(queue.test_metrics.assignment_index_lookups, 1);
+
+        queue.test_metrics.ready_candidates_examined = 0;
+        let claim = queue
+            .next_claim(base + TimeDelta::seconds(10))
+            .expect("indexed ready head");
+        assert_eq!(claim.item.id, "assignment-000-000");
+        assert_eq!(queue.test_metrics.ready_candidates_examined, 1);
+        assert_indexes_consistent(&queue);
+
+        queue.test_metrics.claim_index_lookups = 0;
+        assert!(matches!(
+            queue.release(complete(
+                &claim,
+                base + TimeDelta::seconds(11),
+                QueueOutcome::PoolExhausted,
+            )),
+            QueueRelease::Requeued { .. }
+        ));
+        assert_eq!(queue.test_metrics.claim_index_lookups, 1);
+        assert_indexes_consistent(&queue);
+
+        assert_eq!(queue.cancel_work("work-063").len(), ITEMS_PER_WORK);
+        assert_indexes_consistent(&queue);
+        assert_eq!(
+            queue.assignment_to_work.len(),
+            WORKS * ITEMS_PER_WORK - ITEMS_PER_WORK
+        );
+    }
+
+    #[test]
+    fn interrupted_attempt_requeues_while_cancel_work_is_terminal() {
+        let mut configured = limits();
+        configured.max_batch_size = 3;
+        let mut assignment = item("assignment", "work-a", "agent-a", instant(0));
+        assignment.inputs = vec![input("01-old", instant(0))];
+        let mut queue = WorkQueue::hydrate([assignment], configured).expect("valid queue");
+        let claim = queue.next_claim(instant(1)).expect("claim");
+        queue
+            .push_input("assignment", input("03-later-id", instant(2)))
+            .expect("first withheld input");
+        queue
+            .push_input("assignment", input("02-earlier-id", instant(2)))
+            .expect("second withheld input");
+
+        assert!(matches!(
+            queue.release(complete(&claim, instant(3), QueueOutcome::Interrupted)),
+            QueueRelease::Requeued {
+                cause: RequeueCause::Interrupted,
+                ..
+            }
+        ));
+        assert!(queue.assignment_to_work.contains_key("assignment"));
+        let reclaimed = queue.next_claim(instant(3)).expect("interrupted retry");
+        assert_eq!(
+            reclaimed
+                .item
+                .inputs
+                .iter()
+                .map(|input| input.id.as_str())
+                .collect::<Vec<_>>(),
+            ["01-old", "02-earlier-id", "03-later-id"]
+        );
+
+        let cancelled = queue.cancel_work("work-a");
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].id, "assignment");
+        assert!(!queue.assignment_to_work.contains_key("assignment"));
+        assert!(queue.cancel_work("work-a").is_empty());
+        assert_indexes_consistent(&queue);
     }
 }
