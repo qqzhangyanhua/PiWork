@@ -5,7 +5,12 @@ import { useTranslation } from "react-i18next";
 import remarkGfm from "remark-gfm";
 
 import { appErrorMessageKey, appErrorMessageValues } from "../../domain/appError";
-import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../../domain/work";
+import {
+  isWorkEventTimelineItem,
+  workEventSequenceKey,
+  type AppError,
+  type TimelineItem,
+} from "../../domain/work";
 import type { MessageSummary, ResourceSummary, WorkEventEnvelope, WorkSummary } from "../../bindings";
 import {
   ActivityFeed,
@@ -18,7 +23,6 @@ import { ExecutionProgressCard } from "./ExecutionProgressCard";
 
 type ConversationTurnGroup = {
   key: string;
-  runId: string;
   items: TimelineItem[];
 };
 
@@ -48,11 +52,14 @@ const groupByRun = (timeline: TimelineItem[]) => {
   const groups: ConversationTurnGroup[] = [];
   const byRun = new Map<string, ConversationTurnGroup>();
   for (const item of timeline) {
-    let group = byRun.get(item.runId);
+    const identity = isWorkEventTimelineItem(item)
+      ? workEventSequenceKey(item)
+      : item.runId;
+    let group = byRun.get(identity);
     if (!group) {
-      group = { key: `run:${item.runId}`, runId: item.runId, items: [] };
+      group = { key: `run:${identity}`, items: [] };
       groups.push(group);
-      byRun.set(item.runId, group);
+      byRun.set(identity, group);
     }
     group.items.push(item);
   }

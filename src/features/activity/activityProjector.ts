@@ -106,8 +106,14 @@ const putItem = (draft: ActivityDraft, item: ActivityItem): void => {
   replaceItem(draft, existing.index, item);
 };
 
+const eventIdentity = (event: WorkEventEnvelope): string =>
+  event.assignmentId ??
+  event.runId ??
+  event.eventId ??
+  `${event.workId}:${event.sequence}:${event.payload.type}`;
+
 const turnOrRun = (event: WorkEventEnvelope): string =>
-  event.turnId ?? event.runId;
+  event.turnId ?? eventIdentity(event);
 
 const toolDescriptor = (
   toolName: string,
@@ -134,7 +140,7 @@ const createToolItem = (
 ): ToolItem => {
   const descriptor = toolDescriptor(toolName, input, result);
   return {
-    ...baseFrom(event, `tool:${event.runId}:${toolCallId}`),
+    ...baseFrom(event, `tool:${eventIdentity(event)}:${toolCallId}`),
     type: "tool",
     renderClass: descriptor.renderClass,
     toolCallId,
@@ -215,7 +221,7 @@ const lifecycleItem = (
 ): ActivityItem => ({
   ...baseFrom(
     event,
-    `lifecycle:${event.runId}:${event.payload.type}:${event.sequence}`,
+    `lifecycle:${eventIdentity(event)}:${event.payload.type}:${event.sequence}`,
   ),
   type: "lifecycle",
   renderClass,
@@ -235,7 +241,7 @@ const processActivityEventIntoDraft = (
 
   switch (payload.type) {
     case "assistantDelta": {
-      const id = `message:${event.runId}:${turnOrRun(event)}`;
+      const id = `message:${eventIdentity(event)}:${turnOrRun(event)}`;
       const existing = itemAt(draft, id);
       if (existing?.item.type === "message") {
         replaceItem(draft, existing.index, {
@@ -254,7 +260,7 @@ const processActivityEventIntoDraft = (
     }
 
     case "thoughtDelta": {
-      const id = `thought:${event.runId}:${turnOrRun(event)}`;
+      const id = `thought:${eventIdentity(event)}:${turnOrRun(event)}`;
       const existing = itemAt(draft, id);
       if (existing?.item.type === "thought") {
         replaceItem(draft, existing.index, {
@@ -273,7 +279,7 @@ const processActivityEventIntoDraft = (
     }
 
     case "planChanged": {
-      const id = `plan:${event.runId}:${payload.planId}`;
+      const id = `plan:${eventIdentity(event)}:${payload.planId}`;
       const existing = itemAt(draft, id);
       if (
         existing?.item.type === "plan" &&
@@ -363,7 +369,7 @@ const processActivityEventIntoDraft = (
       return;
 
     case "permissionRequested": {
-      const id = `permission:${event.runId}:${payload.requestId}`;
+      const id = `permission:${eventIdentity(event)}:${payload.requestId}`;
       const existing = itemAt(draft, id);
       if (existing?.item.type === "permission") {
         replaceItem(draft, existing.index, {
@@ -389,7 +395,7 @@ const processActivityEventIntoDraft = (
     }
 
     case "permissionResolved": {
-      const id = `permission:${event.runId}:${payload.requestId}`;
+      const id = `permission:${eventIdentity(event)}:${payload.requestId}`;
       const existing = itemAt(draft, id);
       if (existing?.item.type === "permission") {
         replaceItem(draft, existing.index, {
@@ -440,7 +446,7 @@ const processActivityEventIntoDraft = (
       putItem(draft, {
         ...baseFrom(
           event,
-          `lifecycle:${event.runId}:${event.payload.type}:${event.sequence}`,
+          `lifecycle:${eventIdentity(event)}:${event.payload.type}:${event.sequence}`,
         ),
         type: "lifecycle",
         renderClass: "status",
@@ -481,7 +487,7 @@ const processActivityEventIntoDraft = (
       return;
 
     case "usageUpdated": {
-      const id = `usage:${event.runId}:${turnOrRun(event)}`;
+      const id = `usage:${eventIdentity(event)}:${turnOrRun(event)}`;
       const existing = itemAt(draft, id);
       const next: ActivityItem = {
         ...baseFrom(event, id),
@@ -512,7 +518,7 @@ const processActivityEventIntoDraft = (
       putItem(draft, {
         ...baseFrom(
           event,
-          `raw:${event.eventId ?? `${event.runId}:${event.sequence}`}`,
+          `raw:${event.eventId ?? `${eventIdentity(event)}:${event.sequence}`}`,
         ),
         type: "raw",
         renderClass: "raw-rail",

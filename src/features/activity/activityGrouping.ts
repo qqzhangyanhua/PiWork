@@ -38,7 +38,7 @@ const sessionIdentityPart = (sessionId: string | null): string => {
 };
 
 const identityBase = (item: ActivityItem): string =>
-  `session:${sessionIdentityPart(item.sessionId)}:turn:${escapeIdentityPart(item.turnId ?? item.runId)}`;
+  `session:${sessionIdentityPart(item.sessionId)}:turn:${escapeIdentityPart(item.turnId ?? item.assignmentId ?? item.runId ?? item.id)}`;
 
 const isBurstableTool = (item: ActivityItem): item is ToolItem =>
   item.type === "tool" &&

@@ -91,15 +91,15 @@ const now = (offset: number) =>
 export const runCompletedEvent = (
   overrides: Partial<WorkEventEnvelope> = {},
 ): WorkEventEnvelope => {
-  const runId = overrides.runId ?? "run-1";
+  const runId = overrides.runId === undefined ? "run-1" : overrides.runId;
   const sequence = overrides.sequence ?? 2;
   return {
     version: 2,
-    eventId: `event-${runId}-${sequence}`,
+    eventId: `event-${runId ?? "pre-run"}-${sequence}`,
     workId: "work-1",
     runId,
-    turnId: runId,
-    correlationId: runId,
+    turnId: runId ?? undefined,
+    correlationId: runId ?? undefined,
     sequence,
     occurredAt: now(20),
     payload: {

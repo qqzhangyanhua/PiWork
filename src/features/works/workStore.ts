@@ -16,6 +16,7 @@ import {
   normalizeAppError,
   isWorkEventTimelineItem,
   timelineItemKey,
+  workEventSequenceKey,
   type AppError,
   type TimelineItem,
 } from "../../domain/work";
@@ -264,15 +265,19 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
 
     if (mutation.type === "liveEvent") {
       const { event } = mutation;
-      if (event.sequence <= (state.lastSequenceByRun[event.runId] ?? 0)) {
+      const sequenceKey = workEventSequenceKey(event);
+      if (event.sequence <= (state.lastSequenceByRun[sequenceKey] ?? 0)) {
         return state;
       }
-      registerRun(event.workId, event.runId, event.occurredAt);
+      if (event.runId) {
+        registerRun(event.workId, event.runId, event.occurredAt);
+      }
       const previousCurrentRun = currentRunByWork.get(event.workId);
       if (
-        !previousCurrentRun ||
-        (event.payload.type === "runStarted" &&
-          compareRuns(event.workId, event.runId, previousCurrentRun) > 0)
+        event.runId &&
+        (!previousCurrentRun ||
+          (event.payload.type === "runStarted" &&
+            compareRuns(event.workId, event.runId, previousCurrentRun) > 0))
       ) {
         currentRunByWork.set(event.workId, event.runId);
       }
@@ -280,6 +285,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       const currentWork = state.works[event.workId];
       const canUpdateSummary =
         currentWork &&
+        event.runId !== null &&
         currentRun === event.runId &&
         event.occurredAt >= currentWork.updatedAt;
       const updatedWork = canUpdateSummary
@@ -303,7 +309,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         },
         lastSequenceByRun: {
           ...state.lastSequenceByRun,
-          [event.runId]: event.sequence,
+          [sequenceKey]: event.sequence,
         },
       };
     }
@@ -316,20 +322,24 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       registerRun(message.workId, message.runId, message.createdAt);
     }
     for (const persistedEvent of detail.events) {
-      registerRun(
-        persistedEvent.workId,
-        persistedEvent.runId,
-        persistedEvent.occurredAt,
-      );
+      if (persistedEvent.runId) {
+        registerRun(
+          persistedEvent.workId,
+          persistedEvent.runId,
+          persistedEvent.occurredAt,
+        );
+      }
     }
     for (const liveItem of state.timelines[detail.summary.id] ?? []) {
-      registerRun(
-        liveItem.workId,
-        liveItem.runId,
-        isWorkEventTimelineItem(liveItem)
-          ? liveItem.occurredAt
-          : liveItem.createdAt,
-      );
+      if (liveItem.runId) {
+        registerRun(
+          liveItem.workId,
+          liveItem.runId,
+          isWorkEventTimelineItem(liveItem)
+            ? liveItem.occurredAt
+            : liveItem.createdAt,
+        );
+      }
     }
     const mergedTimeline = mergeTimeline(
       detail.messages,
@@ -341,7 +351,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       detail.summary.id,
       new Set([
         ...detail.runs.map((run) => run.id),
-        ...mergedTimeline.map((item) => item.runId),
+        ...mergedTimeline.flatMap((item) => (item.runId ? [item.runId] : [])),
       ]),
     );
     const latestRun = detail.runs.reduce<RunSummary | undefined>(
@@ -376,11 +386,13 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
     const lastSequenceByRun = { ...state.lastSequenceByRun };
     const mergedMaximum = new Map<string, number>();
     for (const event of mergedEvents) {
+      const sequenceKey = workEventSequenceKey(event);
       mergedMaximum.set(
-        event.runId,
-        Math.max(mergedMaximum.get(event.runId) ?? 0, event.sequence),
+        sequenceKey,
+        Math.max(mergedMaximum.get(sequenceKey) ?? 0, event.sequence),
       );
       if (
+        event.runId !== null &&
         event.runId === currentRun &&
         event.occurredAt >= mergedSummary.updatedAt
       ) {

@@ -47,8 +47,8 @@ pub struct WorkEventEnvelope {
     pub event_id: Option<String>,
     // Canonical UUID string of the owning Work.
     pub work_id: String,
-    // Canonical UUID string of the owning Run.
-    pub run_id: String,
+    // Canonical UUID string of the owning Run, once one exists.
+    pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub turn_id: Option<String>,
@@ -84,7 +84,7 @@ impl<'de> Deserialize<'de> for WorkEventEnvelope {
             #[serde(default)]
             event_id: Option<String>,
             work_id: String,
-            run_id: String,
+            run_id: Option<String>,
             #[serde(default)]
             turn_id: Option<String>,
             #[serde(default)]
@@ -327,7 +327,7 @@ mod tests {
             version: 1,
             event_id: None,
             work_id: "10000000-0000-0000-0000-000000000000".into(),
-            run_id: "20000000-0000-0000-0000-000000000000".into(),
+            run_id: Some("20000000-0000-0000-0000-000000000000".into()),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -345,7 +345,7 @@ mod tests {
         let round_trip: WorkEventEnvelope = serde_json::from_str(&serialized).unwrap();
 
         assert_string(&round_trip.work_id);
-        assert_string(&round_trip.run_id);
+        assert_string(round_trip.run_id.as_ref().unwrap());
         assert_eq!(round_trip, envelope);
     }
 
@@ -355,7 +355,7 @@ mod tests {
             version: 2,
             event_id: Some("event-1".into()),
             work_id: "work-1".into(),
-            run_id: "run-1".into(),
+            run_id: Some("run-1".into()),
             turn_id: Some("turn-1".into()),
             session_id: Some("session-1".into()),
             agent_id: Some("agent-1".into()),
@@ -381,6 +381,33 @@ mod tests {
         assert_eq!(serialized["correlationId"], "correlation-1");
         assert_eq!(serialized["payload"]["type"], "thoughtDelta");
         assert_eq!(round_trip, envelope);
+    }
+
+    #[test]
+    fn assignment_event_round_trips_before_a_run_exists() {
+        let serialized = json!({
+            "version": 2,
+            "eventId": "event-1",
+            "workId": "work-1",
+            "runId": null,
+            "assignmentId": "assignment-1",
+            "sequence": 1,
+            "occurredAt": "2026-08-15T04:00:00Z",
+            "payload": {
+                "type": "assignmentQueued",
+                "assignmentId": "assignment-1",
+                "assignedAgentId": "agent-1",
+                "title": "Investigate",
+                "priority": 10
+            }
+        });
+
+        let envelope: WorkEventEnvelope = serde_json::from_value(serialized.clone()).unwrap();
+        let round_trip = serde_json::to_value(&envelope).unwrap();
+
+        assert_eq!(round_trip["runId"], serde_json::Value::Null);
+        assert_eq!(round_trip["assignmentId"], "assignment-1");
+        assert_eq!(round_trip, serialized);
     }
 
     #[test]

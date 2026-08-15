@@ -260,7 +260,7 @@ mod tests {
         let envelope = std::fs::read_to_string(output_dir.join("WorkEventEnvelope.ts")).unwrap();
         assert!(
             envelope.contains("workId: string")
-                && envelope.contains("runId: string")
+                && envelope.contains("runId: string | null")
                 && envelope.contains("sequence: number")
                 && envelope.contains("eventId?: string")
                 && envelope.contains("turnId?: string")

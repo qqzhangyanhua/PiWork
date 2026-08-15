@@ -270,6 +270,32 @@ describe("createWorkStore", () => {
     expect(store.getState().lastSequenceByRun.r1).toBe(2);
   });
 
+  it("keeps pre-Run events for distinct assignments without marking the Work running", () => {
+    const store = createWorkStore(unusedClient);
+    const assignmentEvent = (assignmentId: string): WorkEventEnvelope => ({
+      version: 2,
+      workId: "w1",
+      runId: null,
+      assignmentId,
+      sequence: 1,
+      occurredAt: "2026-08-15T04:00:00.000Z",
+      payload: {
+        type: "assignmentQueued",
+        assignmentId,
+        assignedAgentId: "agent-1",
+        title: "Investigate",
+        priority: 10,
+      },
+    });
+
+    store.getState().upsertWork({ ...work, status: "draft" });
+    store.getState().applyEvent(assignmentEvent("assignment-1"));
+    store.getState().applyEvent(assignmentEvent("assignment-2"));
+
+    expect(store.getState().timelines.w1).toHaveLength(2);
+    expect(store.getState().works.w1?.status).toBe("draft");
+  });
+
   it("keeps the live envelope when an older detail hydrates the same event", async () => {
     const detailResult = deferred<WorkDetail>();
     const client: PiWorkClient = {

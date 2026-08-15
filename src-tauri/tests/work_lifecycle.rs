@@ -565,7 +565,10 @@ impl EventPublisher for PersistAssertingPublisher {
         &self,
         envelope: WorkEventEnvelope,
     ) -> Result<(), piwork_lib::error::AppError> {
-        let persisted = self.repository.events_for_run(&envelope.run_id).await?;
+        let persisted = self
+            .repository
+            .events_for_run(envelope.run_id.as_deref().expect("published Run event"))
+            .await?;
         assert!(persisted.iter().any(|candidate| {
             candidate.run_id == envelope.run_id && candidate.sequence == envelope.sequence
         }));
@@ -996,7 +999,10 @@ async fn receiver_observes_exact_event_id_only_after_it_is_journaled() {
         .await
         .unwrap();
     let event = published.recv().await.unwrap();
-    assert_eq!(event.run_id, immediate_run(&run).id);
+    assert_eq!(
+        event.run_id.as_deref(),
+        Some(immediate_run(&run).id.as_str())
+    );
     let persisted = harness
         .repository
         .events_for_run(&immediate_run(&run).id)
@@ -1800,7 +1806,7 @@ async fn two_run_prompts_survive_database_reopen_in_stable_order() {
             version: 1,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
-            run_id: immediate_run(&first).id.clone(),
+            run_id: Some(immediate_run(&first).id.clone()),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -2040,7 +2046,7 @@ async fn append_failure_is_finalized_as_a_durable_run_failed_event() {
         version: 1,
         event_id: Some(Uuid::new_v4().to_string()),
         work_id: work.summary.id.clone(),
-        run_id: immediate_run(&run).id.clone(),
+        run_id: Some(immediate_run(&run).id.clone()),
         turn_id: None,
         session_id: None,
         agent_id: None,
@@ -2181,7 +2187,7 @@ async fn publisher_panic_aborts_the_engine_once_and_gets_a_durable_failure_fallb
 
     assert_eq!(detail.runs[0].status, RunStatus::Failed);
     assert!(detail.events.iter().any(|event| {
-        event.run_id == immediate_run(&run).id
+        event.run_id.as_deref() == Some(immediate_run(&run).id.as_str())
             && matches!(event.payload, WorkEventPayload::RunFailed { .. })
     }));
     assert_eq!(engine.abort_calls(), 1);
@@ -2201,7 +2207,7 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
         version: 1,
         event_id: Some(Uuid::new_v4().to_string()),
         work_id: work.summary.id.clone(),
-        run_id: immediate_run(&run).id.clone(),
+        run_id: Some(immediate_run(&run).id.clone()),
         turn_id: None,
         session_id: None,
         agent_id: None,
@@ -2235,7 +2241,7 @@ async fn repository_rejects_late_events_before_payload_kind_matters() {
             version: 1,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
-            run_id: immediate_run(&run).id.clone(),
+            run_id: Some(immediate_run(&run).id.clone()),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -2577,12 +2583,12 @@ async fn get_orders_and_decodes_events_by_run_then_sequence() {
         found
             .events
             .iter()
-            .map(|event| (event.run_id.as_str(), event.sequence))
+            .map(|event| (event.run_id.as_deref(), event.sequence))
             .collect::<Vec<_>>(),
         vec![
-            (first_run.id.as_str(), 1),
-            (first_run.id.as_str(), 2),
-            (second_run.id.as_str(), 1),
+            (Some(first_run.id.as_str()), 1),
+            (Some(first_run.id.as_str()), 2),
+            (Some(second_run.id.as_str()), 1),
         ]
     );
     assert_eq!(

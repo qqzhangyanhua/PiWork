@@ -36,6 +36,25 @@ describe("timelineItemKey", () => {
     expect(timelineItemKey(legacyEvent)).toBe("event:run-1:1");
   });
 
+  it("uses assignment identity when an event exists before its run", () => {
+    const { eventId: _eventId, ...assignmentEvent } = event({
+      eventId: undefined,
+      assignmentId: "assignment-1",
+      runId: null,
+      payload: {
+        type: "assignmentQueued",
+        assignmentId: "assignment-1",
+        assignedAgentId: "agent-1",
+        title: "Investigate",
+        priority: 10,
+      },
+    });
+
+    expect(timelineItemKey(assignmentEvent)).toBe(
+      "event:assignment:assignment-1:1",
+    );
+  });
+
   it("uses the persisted message ID for message timeline items", () => {
     const message: MessageSummary = {
       id: "message-1",

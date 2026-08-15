@@ -87,7 +87,7 @@ mod tests {
             version: 2,
             event_id: Some(event_id.into()),
             work_id: "work-1".into(),
-            run_id: "run-1".into(),
+            run_id: Some("run-1".into()),
             turn_id: None,
             session_id: None,
             agent_id: None,

@@ -18,7 +18,10 @@ const compareEvents = (
   right: WorkEventEnvelope,
 ): number =>
   compareText(left.occurredAt, right.occurredAt) ||
-  compareText(left.runId, right.runId) ||
+  compareText(
+    left.assignmentId ?? left.runId ?? left.eventId ?? "",
+    right.assignmentId ?? right.runId ?? right.eventId ?? "",
+  ) ||
   left.sequence - right.sequence ||
   compareText(left.eventId ?? "", right.eventId ?? "");
 
@@ -49,7 +52,7 @@ const metadata = (event: WorkEventEnvelope) => [
 const isLegacyEvent = (event: WorkEventEnvelope): boolean => event.version < 2;
 
 const eventKey = (event: WorkEventEnvelope): string =>
-  `${encodeURIComponent(event.workId)}:${encodeURIComponent(event.runId)}:${event.sequence}:${event.eventId ? `event:${encodeURIComponent(event.eventId)}` : "legacy"}`;
+  `${encodeURIComponent(event.workId)}:${encodeURIComponent(event.assignmentId ?? event.runId ?? event.eventId ?? `${event.sequence}:${event.payload.type}`)}:${event.sequence}:${event.eventId ? `event:${encodeURIComponent(event.eventId)}` : "legacy"}`;
 
 type RawActivityRowModel = {
   event: WorkEventEnvelope;

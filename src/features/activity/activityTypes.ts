@@ -35,7 +35,7 @@ export type ActivityLifecycleKind =
 
 export type ActivityIdentity = {
   workId: string;
-  runId: string;
+  runId: string | null;
   turnId: string | null;
   sessionId: string | null;
   agentId: string | null;

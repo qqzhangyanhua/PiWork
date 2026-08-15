@@ -550,15 +550,20 @@ impl WorkRepository {
                 "event sequence must be at least 1",
             ));
         }
+        // C1 exposes pre-Run Assignment events on the wire. Persisting them requires the C2
+        // events.run_id migration; this Run-scoped journal must not invent a Run identity.
+        let run_id = envelope.run_id.as_deref().ok_or_else(|| {
+            AppError::invalid_input("runId", "the current event journal requires a run id")
+        })?;
 
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
-            .bind(&envelope.run_id)
+            .bind(run_id)
             .fetch_optional(&mut *transaction)
             .await?
-            .ok_or_else(|| AppError::run_not_found(&envelope.run_id))?;
+            .ok_or_else(|| AppError::run_not_found(run_id))?;
         if run.work_id != envelope.work_id {
-            return Err(AppError::run_not_found(&envelope.run_id));
+            return Err(AppError::run_not_found(run_id));
         }
         let work_status =
             sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
@@ -568,7 +573,7 @@ impl WorkRepository {
                 .ok_or_else(|| AppError::work_not_found(&envelope.work_id))?;
         if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
             return Err(AppError::invalid_run_state(
-                &envelope.run_id,
+                run_id,
                 run.status,
                 RunStatus::Running,
             ));
@@ -583,7 +588,7 @@ impl WorkRepository {
         let current_sequence = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT MAX(sequence) FROM events WHERE run_id = ?",
         )
-        .bind(&envelope.run_id)
+        .bind(run_id)
         .fetch_one(&mut *transaction)
         .await?
         .unwrap_or(0);
@@ -615,7 +620,7 @@ impl WorkRepository {
         if let Some((run_action, work_action)) = terminal {
             let next_run = transition_run(run.status, run_action).map_err(|_| {
                 AppError::invalid_run_state(
-                    &envelope.run_id,
+                    run_id,
                     run.status,
                     match run_action {
                         RunAction::Complete => RunStatus::Completed,
@@ -643,12 +648,12 @@ impl WorkRepository {
             .bind(next_run)
             .bind(now)
             .bind(now)
-            .bind(&envelope.run_id)
+            .bind(run_id)
             .bind(run.status)
             .execute(&mut *transaction)
             .await?;
             if run_update.rows_affected() == 0 {
-                return Err(AppError::concurrent_run_modification(&envelope.run_id));
+                return Err(AppError::concurrent_run_modification(run_id));
             }
             let work_update = sqlx::query(
                 "UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
@@ -789,7 +794,7 @@ impl WorkRepository {
             version: 2,
             event_id: Some(event_id.clone()),
             work_id: work_id.to_owned(),
-            run_id: run_id.to_owned(),
+            run_id: Some(run_id.to_owned()),
             turn_id: Some(run_id.to_owned()),
             session_id: run.engine_session_id,
             agent_id: None,
@@ -1241,7 +1246,7 @@ impl TryFrom<EventRow> for WorkEventEnvelope {
             version,
             event_id: Some(row.id),
             work_id: row.work_id,
-            run_id: row.run_id,
+            run_id: Some(row.run_id),
             turn_id: row.turn_id,
             session_id: row.session_id,
             agent_id: row.agent_id,
@@ -1314,7 +1319,7 @@ mod tests {
             version: 1,
             event_id: Some(Uuid::new_v4().to_string()),
             work_id: work.summary.id.clone(),
-            run_id: started.run.as_ref().expect("immediate run").id.clone(),
+            run_id: Some(started.run.as_ref().expect("immediate run").id.clone()),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1372,7 +1377,7 @@ mod tests {
             version: 2,
             event_id: Some("event-1".into()),
             work_id: work.summary.id.clone(),
-            run_id: started.run.as_ref().expect("immediate run").id.clone(),
+            run_id: Some(started.run.as_ref().expect("immediate run").id.clone()),
             turn_id: Some("turn-1".into()),
             session_id: Some("session-1".into()),
             agent_id: Some("agent-1".into()),
@@ -1535,7 +1540,7 @@ mod tests {
             version: 1,
             event_id: Some(committed_id.clone()),
             work_id: work.summary.id.clone(),
-            run_id: started.run.as_ref().expect("immediate run").id.clone(),
+            run_id: Some(started.run.as_ref().expect("immediate run").id.clone()),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1611,7 +1616,7 @@ mod tests {
             version: 2,
             event_id: None,
             work_id: work.summary.id,
-            run_id: started.run.as_ref().expect("immediate run").id.clone(),
+            run_id: Some(started.run.as_ref().expect("immediate run").id.clone()),
             turn_id: None,
             session_id: None,
             agent_id: None,
@@ -1762,7 +1767,10 @@ mod tests {
         let refreshed = repository.get(&work.summary.id).await.unwrap().unwrap();
         assert_eq!(refreshed.runs, vec![inserted_run]);
         assert_eq!(refreshed.events.len(), 1);
-        assert_eq!(refreshed.events[0].run_id, refreshed.runs[0].id);
+        assert_eq!(
+            refreshed.events[0].run_id.as_deref(),
+            Some(refreshed.runs[0].id.as_str())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

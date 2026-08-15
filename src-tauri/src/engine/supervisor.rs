@@ -635,7 +635,7 @@ async fn consume_events(
             version: 2,
             event_id: Some(event_id.clone()),
             work_id: work_id.clone(),
-            run_id: run_id.clone(),
+            run_id: Some(run_id.clone()),
             turn_id: Some(run_id.clone()),
             session_id: Some(session_id.clone()),
             agent_id: None,
