@@ -261,6 +261,13 @@ pub enum WorkEventPayload {
         agent_session_id: String,
         result_summary: String,
     },
+    AssignmentCancelled {
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: Option<String>,
+        run_id: Option<String>,
+        reason: String,
+    },
     AssignmentFailed {
         assignment_id: String,
         agent_instance_id: String,
@@ -653,6 +660,13 @@ mod tests {
                 agent_session_id: "session-1".into(),
                 result_summary: "done".into(),
             },
+            WorkEventPayload::AssignmentCancelled {
+                assignment_id: "assignment-1".into(),
+                agent_instance_id: "agent-1".into(),
+                agent_session_id: None,
+                run_id: None,
+                reason: "cancelled".into(),
+            },
             WorkEventPayload::AssignmentFailed {
                 assignment_id: "assignment-1".into(),
                 agent_instance_id: "agent-1".into(),
@@ -690,6 +704,7 @@ mod tests {
             "assignmentWaiting",
             "assignmentRetryScheduled",
             "assignmentCompleted",
+            "assignmentCancelled",
             "assignmentFailed",
             "assignmentInterrupted",
             "assignmentDeadLettered",

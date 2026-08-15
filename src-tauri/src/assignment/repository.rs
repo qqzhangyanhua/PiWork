@@ -17,6 +17,8 @@ use crate::{
 
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
+const RECOVERY_RETRY_BASE: Duration = Duration::from_secs(1);
+const RECOVERY_RETRY_MAX: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct AcceptAssignmentInput {
@@ -47,6 +49,7 @@ pub trait AssignmentEventSink: Send + Sync {
 pub struct RecoveryReport {
     pub requeued: Vec<String>,
     pub confirmation_required: Vec<String>,
+    pub dead_lettered: Vec<String>,
     pub untouched: Vec<String>,
 }
 
@@ -290,6 +293,17 @@ impl AssignmentRepository {
         {
             return Err(invalid_assignment_state(
                 "assignment cannot begin an attempt",
+            ));
+        }
+        let active_attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runs WHERE assignment_id = ? AND status IN ('queued', 'running', 'waiting')",
+        )
+        .bind(assignment_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active_attempts != 0 {
+            return Err(invalid_assignment_state(
+                "assignment already has an active attempt",
             ));
         }
         let now = Utc::now();
@@ -649,6 +663,7 @@ impl AssignmentRepository {
         let mut report = RecoveryReport {
             requeued: Vec::new(),
             confirmation_required: Vec::new(),
+            dead_lettered: Vec::new(),
             untouched: Vec::new(),
         };
         let mut events = Vec::new();
@@ -669,7 +684,10 @@ impl AssignmentRepository {
             }
             .to_owned();
 
-            if assignment.status == AssignmentStatus::Claimed {
+            let active_run = sqlx::query_as::<_, RunRow>("SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status, attempt_number FROM runs WHERE assignment_id = ? AND status IN ('queued', 'running', 'waiting') ORDER BY attempt_number DESC LIMIT 1")
+                .bind(&assignment.id).fetch_optional(&mut *transaction).await?;
+
+            if assignment.status == AssignmentStatus::Claimed && active_run.is_none() {
                 sqlx::query("UPDATE assignments SET status = 'queued', runtime_owner_id = NULL, claimed_at = NULL, recovery_reason = ?, updated_at = ? WHERE id = ?")
                     .bind(&reason).bind(now).bind(&assignment.id).execute(&mut *transaction).await?;
                 assignment.status = AssignmentStatus::Queued;
@@ -712,8 +730,7 @@ impl AssignmentRepository {
                 continue;
             }
 
-            let run = sqlx::query_as::<_, RunRow>("SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status FROM runs WHERE assignment_id = ? AND status IN ('queued', 'running', 'waiting') ORDER BY attempt_number DESC LIMIT 1")
-                .bind(&assignment.id).fetch_optional(&mut *transaction).await?
+            let run = active_run
                 .ok_or_else(|| invalid_assignment_state("active assignment has no active Run"))?;
             sqlx::query("UPDATE runs SET status = 'interrupted', completed_at = ?, updated_at = ? WHERE id = ?")
                 .bind(now).bind(now).bind(&run.id).execute(&mut *transaction).await?;
@@ -722,6 +739,11 @@ impl AssignmentRepository {
                 assignment.started_at.is_some(),
             );
             let final_status = match decision {
+                super::state_machine::RecoveryDecision::Requeue
+                    if assignment.attempt_count >= assignment.max_attempts =>
+                {
+                    AssignmentStatus::DeadLetter
+                }
                 super::state_machine::RecoveryDecision::Requeue => AssignmentStatus::Queued,
                 super::state_machine::RecoveryDecision::RequireConfirmation => {
                     AssignmentStatus::RecoveryConfirmationRequired
@@ -730,13 +752,36 @@ impl AssignmentRepository {
             let status = match final_status {
                 AssignmentStatus::Queued => "queued",
                 AssignmentStatus::RecoveryConfirmationRequired => "recovery_confirmation_required",
+                AssignmentStatus::DeadLetter => "dead_letter",
                 _ => unreachable!(),
             };
-            sqlx::query("UPDATE assignments SET status = ?, runtime_owner_id = NULL, claimed_at = NULL, started_at = NULL, recovery_reason = ?, updated_at = ? WHERE id = ?")
-                .bind(status).bind(&reason).bind(now).bind(&assignment.id).execute(&mut *transaction).await?;
+            let terminal_at = (final_status == AssignmentStatus::DeadLetter).then_some(now);
+            let terminal_error =
+                (final_status == AssignmentStatus::DeadLetter).then_some(reason.clone());
+            let next_attempt_at = if final_status == AssignmentStatus::Queued {
+                let delay = super::state_machine::retry_delay(
+                    assignment.attempt_count,
+                    RECOVERY_RETRY_BASE,
+                    RECOVERY_RETRY_MAX,
+                    stable_seed(&assignment.id),
+                );
+                Some(
+                    now.checked_add_signed(
+                        chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::MAX),
+                    )
+                    .unwrap_or(DateTime::<Utc>::MAX_UTC),
+                )
+            } else {
+                None
+            };
+            sqlx::query("UPDATE assignments SET status = ?, runtime_owner_id = NULL, claimed_at = NULL, started_at = NULL, completed_at = ?, last_error = ?, next_attempt_at = ?, recovery_reason = ?, updated_at = ? WHERE id = ?")
+                .bind(status).bind(terminal_at).bind(&terminal_error).bind(next_attempt_at).bind(&reason).bind(now).bind(&assignment.id).execute(&mut *transaction).await?;
             assignment.status = final_status;
             assignment.claimed_at = None;
             assignment.started_at = None;
+            assignment.completed_at = terminal_at;
+            assignment.last_error = terminal_error;
+            assignment.next_attempt_at = next_attempt_at;
             assignment.recovery_reason = Some(reason.clone());
             assignment.updated_at = now;
             events.push(
@@ -756,19 +801,42 @@ impl AssignmentRepository {
                 .await?,
             );
             match decision {
+                super::state_machine::RecoveryDecision::Requeue
+                    if final_status == AssignmentStatus::DeadLetter =>
+                {
+                    events.push(
+                        assignment_event(
+                            &mut transaction,
+                            &assignment,
+                            Some(&run.id),
+                            run.engine_session_id.clone(),
+                            now,
+                            WorkEventPayload::AssignmentDeadLettered {
+                                assignment_id: assignment.id.clone(),
+                                agent_instance_id: assignment.assigned_agent_id.clone(),
+                                attempt_count: assignment.attempt_count,
+                                error: reason,
+                            },
+                        )
+                        .await?,
+                    );
+                    report.dead_lettered.push(assignment.id.clone());
+                }
                 super::state_machine::RecoveryDecision::Requeue => {
                     events.push(
                         assignment_event(
                             &mut transaction,
                             &assignment,
-                            None,
-                            None,
+                            Some(&run.id),
+                            run.engine_session_id.clone(),
                             now,
-                            WorkEventPayload::AssignmentQueued {
+                            WorkEventPayload::AssignmentRetryScheduled {
                                 assignment_id: assignment.id.clone(),
-                                assigned_agent_id: assignment.assigned_agent_id.clone(),
-                                title: assignment.title.clone(),
-                                priority: assignment.priority,
+                                agent_instance_id: assignment.assigned_agent_id.clone(),
+                                attempt_count: assignment.attempt_count,
+                                next_attempt_at: next_attempt_at
+                                    .expect("queued recovery has a next attempt"),
+                                reason: reason.clone(),
                             },
                         )
                         .await?,
@@ -820,30 +888,65 @@ impl AssignmentRepository {
         } else {
             (AssignmentStatus::Cancelled, "cancelled")
         };
-        sqlx::query("UPDATE assignments SET status = ?, recovery_reason = NULL, completed_at = ?, updated_at = ? WHERE id = ?")
-            .bind(status_value).bind(if resume { None } else { Some(now) }).bind(now).bind(assignment_id)
+        let max_attempts = if resume && assignment.attempt_count >= assignment.max_attempts {
+            assignment.attempt_count.checked_add(1).ok_or_else(|| {
+                AppError::invalid_input(
+                    "maxAttempts",
+                    "assignment attempt limit cannot be extended",
+                )
+            })?
+        } else {
+            assignment.max_attempts
+        };
+        sqlx::query("UPDATE assignments SET status = ?, max_attempts = ?, next_attempt_at = NULL, recovery_reason = NULL, completed_at = ?, updated_at = ? WHERE id = ?")
+            .bind(status_value).bind(i64::from(max_attempts)).bind(if resume { None } else { Some(now) }).bind(now).bind(assignment_id)
             .execute(&mut *transaction).await?;
         assignment.status = status;
+        assignment.max_attempts = max_attempts;
+        assignment.next_attempt_at = None;
         assignment.recovery_reason = None;
         assignment.completed_at = if resume { None } else { Some(now) };
         assignment.updated_at = now;
-        let payload = if resume {
-            WorkEventPayload::AssignmentQueued {
-                assignment_id: assignment.id.clone(),
-                assigned_agent_id: assignment.assigned_agent_id.clone(),
-                title: assignment.title.clone(),
-                priority: assignment.priority,
-            }
+        let (event_run_id, event_session_id, payload) = if resume {
+            (
+                None,
+                None,
+                WorkEventPayload::AssignmentQueued {
+                    assignment_id: assignment.id.clone(),
+                    assigned_agent_id: assignment.assigned_agent_id.clone(),
+                    title: assignment.title.clone(),
+                    priority: assignment.priority,
+                },
+            )
         } else {
-            WorkEventPayload::AssignmentInterrupted {
-                assignment_id: assignment.id.clone(),
-                agent_instance_id: assignment.assigned_agent_id.clone(),
-                agent_session_id: None,
-                reason: "recovery was cancelled by explicit confirmation".into(),
-            }
+            let run = sqlx::query_as::<_, RunRow>("SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status, attempt_number FROM runs WHERE assignment_id = ? ORDER BY attempt_number DESC LIMIT 1")
+                .bind(assignment_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| invalid_assignment_state("recovery confirmation has no audited Run"))?;
+            let session_id = run.engine_session_id.clone();
+            let run_id = run.id;
+            (
+                Some(run_id.clone()),
+                session_id.clone(),
+                WorkEventPayload::AssignmentCancelled {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    agent_session_id: session_id,
+                    run_id: Some(run_id),
+                    reason: "recovery was cancelled by explicit confirmation".into(),
+                },
+            )
         };
-        let event =
-            assignment_event(&mut transaction, &assignment, None, None, now, payload).await?;
+        let event = assignment_event(
+            &mut transaction,
+            &assignment,
+            event_run_id.as_deref(),
+            event_session_id,
+            now,
+            payload,
+        )
+        .await?;
         transaction.commit().await?;
         self.event_sink.publish(event)?;
         Ok(assignment.summary)
@@ -1032,13 +1135,14 @@ struct RunRow {
     agent_instance_id: Option<String>,
     engine_session_id: Option<String>,
     status: RunStatus,
+    attempt_number: Option<i64>,
 }
 
 async fn load_run(
     connection: &mut sqlx::SqliteConnection,
     run_id: &str,
 ) -> Result<RunRow, AppError> {
-    sqlx::query_as("SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status FROM runs WHERE id = ?")
+    sqlx::query_as("SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status, attempt_number FROM runs WHERE id = ?")
         .bind(run_id).fetch_optional(connection).await?
         .ok_or_else(|| AppError::run_not_found(run_id))
 }
@@ -1053,6 +1157,7 @@ fn validate_active_identity(
         || run.assignment_id.as_deref() != Some(assignment.id.as_str())
         || run.work_id != assignment.work_id
         || run.agent_instance_id.as_deref() != Some(assignment.assigned_agent_id.as_str())
+        || run.attempt_number != Some(i64::from(assignment.attempt_count))
         || session_id.is_some_and(|session| run.engine_session_id.as_deref() != Some(session))
     {
         return Err(invalid_assignment_state(

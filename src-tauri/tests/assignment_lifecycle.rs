@@ -236,6 +236,112 @@ async fn repository_attempt_running_and_complete_keep_real_identity_and_are_idem
 }
 
 #[tokio::test]
+async fn repository_begin_attempt_rejects_a_second_active_run_without_leaving_a_row() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-active-attempt").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let assignment = repository
+        .accept(accept_input("work-active-attempt", "Attempt guard"))
+        .await
+        .unwrap();
+    repository
+        .claim(&assignment.id, "owner", Utc::now())
+        .await
+        .unwrap();
+    repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .begin_attempt(&assignment.id, "pi", "model")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM runs WHERE assignment_id = ?")
+            .bind(&assignment.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn repository_mark_running_rejects_an_old_attempt_even_if_its_run_looks_queued() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-old-attempt").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let assignment = repository
+        .accept(accept_input("work-old-attempt", "Old attempt"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "owner", now)
+        .await
+        .unwrap();
+    let old_run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&assignment.id, &old_run.id, "old-session", "owner", now)
+        .await
+        .unwrap();
+    let queued = repository
+        .fail_and_schedule_retry(
+            &assignment.id,
+            &old_run.id,
+            "old-session",
+            "owner",
+            "retry",
+            now,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    let retry_at = queued.next_attempt_at.unwrap();
+    repository
+        .claim(&assignment.id, "owner", retry_at)
+        .await
+        .unwrap();
+    let current_run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runs SET status = 'queued', engine_session_id = NULL, completed_at = NULL WHERE id = ?")
+        .bind(&old_run.id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+    assert!(
+        repository
+            .mark_running(
+                &assignment.id,
+                &old_run.id,
+                "forged-session",
+                "owner",
+                retry_at,
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+            .bind(&current_run.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        "queued"
+    );
+}
+
+#[tokio::test]
 async fn repository_retry_backoff_and_dead_letter_respect_attempt_limit() {
     let temporary = tempfile::tempdir().unwrap();
     let database = Database::open(temporary.path().join("retry.db"))
@@ -672,6 +778,335 @@ async fn repository_recovery_requeues_safe_orphans_and_requires_confirmation_for
 }
 
 #[tokio::test]
+async fn repository_recovery_dead_letters_a_claimed_queued_run_when_budget_is_exhausted() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-crash-exhausted").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let mut input = accept_input("work-crash-exhausted", "Crash exhausted");
+    input.max_attempts = 1;
+    let assignment = repository.accept(input).await.unwrap();
+    repository
+        .claim(&assignment.id, "orphan-owner", Utc::now())
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+
+    let report = repository.recover_orphans(&[]).await.unwrap();
+
+    let stored = repository
+        .list_for_work("work-crash-exhausted")
+        .await
+        .unwrap();
+    assert_eq!(stored[0].status, AssignmentStatus::DeadLetter);
+    assert_eq!(report.dead_lettered, vec![assignment.id.clone()]);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+            .bind(&run.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        "interrupted"
+    );
+    let row: (Option<String>, Option<String>, String) = sqlx::query_as(
+        "SELECT run_id, session_id, payload FROM events WHERE run_id = ? ORDER BY sequence LIMIT 1",
+    )
+    .bind(&run.id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(row.0.as_deref(), Some(run.id.as_str()));
+    assert_eq!(row.1, None);
+    assert!(matches!(
+        serde_json::from_str::<WorkEventPayload>(&row.2).unwrap(),
+        WorkEventPayload::AssignmentInterrupted {
+            agent_session_id: None,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn repository_recovery_retries_a_claimed_queued_run_with_budget_and_audit() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-crash-retry").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let assignment = repository
+        .accept(accept_input("work-crash-retry", "Crash retry"))
+        .await
+        .unwrap();
+    repository
+        .claim(&assignment.id, "orphan-owner", Utc::now())
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+
+    repository.recover_orphans(&[]).await.unwrap();
+
+    let stored = &repository.list_for_work("work-crash-retry").await.unwrap()[0];
+    assert_eq!(stored.status, AssignmentStatus::Queued);
+    assert_eq!(stored.attempt_count, 1);
+    assert!(stored.next_attempt_at.is_some());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+            .bind(&run.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        "interrupted"
+    );
+    let events: Vec<(i64, Option<String>, String)> = sqlx::query_as(
+        "SELECT sequence, session_id, payload FROM events WHERE run_id = ? ORDER BY sequence",
+    )
+    .bind(&run.id)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        events.iter().map(|event| event.0).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(events[0].1, None);
+    assert!(matches!(
+        serde_json::from_str::<WorkEventPayload>(&events[0].2).unwrap(),
+        WorkEventPayload::AssignmentInterrupted {
+            agent_session_id: None,
+            ..
+        }
+    ));
+    assert!(matches!(
+        serde_json::from_str::<WorkEventPayload>(&events[1].2).unwrap(),
+        WorkEventPayload::AssignmentRetryScheduled {
+            attempt_count: 1,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn repository_confirmed_resume_restores_budget_and_becomes_schedulable() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-confirm-resume").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let mut input = accept_input("work-confirm-resume", "Confirm resume");
+    input.max_attempts = 1;
+    input.side_effect = AssignmentSideEffect::NonIdempotentWrite;
+    let assignment = repository.accept(input).await.unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "orphan-owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &assignment.id,
+            &run.id,
+            "uncertain-session",
+            "orphan-owner",
+            now,
+        )
+        .await
+        .unwrap();
+    repository.recover_orphans(&[]).await.unwrap();
+    let confirmed_at = Utc::now();
+
+    let resumed = repository
+        .confirm_recovery(&assignment.id, true, confirmed_at)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed.status, AssignmentStatus::Queued);
+    assert_eq!(resumed.attempt_count, 1);
+    assert_eq!(resumed.max_attempts, 2);
+    assert_eq!(
+        repository
+            .load_schedulable(confirmed_at, 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![assignment.id.as_str()]
+    );
+}
+
+#[tokio::test]
+async fn repository_confirmed_cancel_commits_typed_event_with_real_recovery_identity() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-confirm-cancel").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let mut input = accept_input("work-confirm-cancel", "Confirm cancel");
+    input.side_effect = AssignmentSideEffect::Unknown;
+    let assignment = repository.accept(input).await.unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "orphan-owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &assignment.id,
+            &run.id,
+            "uncertain-session",
+            "orphan-owner",
+            now,
+        )
+        .await
+        .unwrap();
+    repository.recover_orphans(&[]).await.unwrap();
+    let confirmed_at = Utc::now();
+
+    let cancelled = repository
+        .confirm_recovery(&assignment.id, false, confirmed_at)
+        .await
+        .unwrap();
+
+    assert_eq!(cancelled.status, AssignmentStatus::Cancelled);
+    assert_eq!(cancelled.completed_at, Some(confirmed_at));
+    let event: (String, Option<String>, Option<String>, Option<String>, String) = sqlx::query_as(
+        "SELECT run_id, session_id, agent_id, assignment_id, payload FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(&run.id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(event.0, run.id);
+    assert_eq!(event.1.as_deref(), Some("uncertain-session"));
+    assert_eq!(
+        event.2.as_deref(),
+        Some(assignment.assigned_agent_id.as_str())
+    );
+    assert_eq!(event.3.as_deref(), Some(assignment.id.as_str()));
+    assert!(matches!(
+        serde_json::from_str::<WorkEventPayload>(&event.4).unwrap(),
+        WorkEventPayload::AssignmentCancelled {
+            agent_session_id: Some(session),
+            run_id: Some(payload_run),
+            ..
+        } if session == "uncertain-session" && payload_run == run.id
+    ));
+}
+
+#[tokio::test]
+async fn repository_running_safe_orphan_dead_letters_on_the_last_attempt() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-running-last").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let mut input = accept_input("work-running-last", "Running last");
+    input.max_attempts = 1;
+    let assignment = repository.accept(input).await.unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "orphan-owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&assignment.id, &run.id, "safe-session", "orphan-owner", now)
+        .await
+        .unwrap();
+
+    repository.recover_orphans(&[]).await.unwrap();
+
+    let stored = &repository.list_for_work("work-running-last").await.unwrap()[0];
+    assert_eq!(stored.status, AssignmentStatus::DeadLetter);
+    assert_eq!(stored.attempt_count, stored.max_attempts);
+    assert!(
+        repository
+            .load_schedulable(Utc::now(), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+            .bind(&run.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        "interrupted"
+    );
+}
+
+#[tokio::test]
+async fn repository_running_safe_orphan_schedules_deterministic_retry_with_budget() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-running-retry").await;
+    let repository = AssignmentRepository::new(database.pool().clone());
+    let assignment = repository
+        .accept(accept_input("work-running-retry", "Running retry"))
+        .await
+        .unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&assignment.id, "orphan-owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "pi", "model")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&assignment.id, &run.id, "safe-session", "orphan-owner", now)
+        .await
+        .unwrap();
+
+    repository.recover_orphans(&[]).await.unwrap();
+
+    let stored = &repository
+        .list_for_work("work-running-retry")
+        .await
+        .unwrap()[0];
+    let retry_at = stored.next_attempt_at.unwrap();
+    assert_eq!(stored.status, AssignmentStatus::Queued);
+    assert!(
+        repository
+            .load_schedulable(retry_at - chrono::Duration::nanoseconds(1), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repository
+            .load_schedulable(retry_at, 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![assignment.id.as_str()]
+    );
+    let payload: String = sqlx::query_scalar(
+        "SELECT payload FROM events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(&run.id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        serde_json::from_str::<WorkEventPayload>(&payload).unwrap(),
+        WorkEventPayload::AssignmentRetryScheduled { next_attempt_at, .. }
+            if next_attempt_at == retry_at
+    ));
+}
+
+#[tokio::test]
 async fn repository_schedulable_ignores_legacy_interrupted_unknown_assignments() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-legacy").await;
@@ -881,4 +1316,19 @@ fn claimed_event_serializes_null_session_until_a_real_session_exists() {
         serde_json::to_value(payload).unwrap()["agentSessionId"],
         serde_json::Value::Null
     );
+}
+
+#[test]
+fn cancelled_event_has_a_typed_nullable_runtime_identity() {
+    let payload = WorkEventPayload::AssignmentCancelled {
+        assignment_id: "assignment".into(),
+        agent_instance_id: "agent".into(),
+        agent_session_id: None,
+        run_id: None,
+        reason: "recovery declined".into(),
+    };
+    let value = serde_json::to_value(payload).unwrap();
+    assert_eq!(value["type"], "assignmentCancelled");
+    assert_eq!(value["agentSessionId"], serde_json::Value::Null);
+    assert_eq!(value["runId"], serde_json::Value::Null);
 }

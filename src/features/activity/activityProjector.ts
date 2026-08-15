@@ -533,6 +533,7 @@ const processActivityEventIntoDraft = (
     case "assignmentWaiting":
     case "assignmentRetryScheduled":
     case "assignmentCompleted":
+    case "assignmentCancelled":
     case "assignmentFailed":
     case "assignmentInterrupted":
     case "assignmentDeadLettered":
