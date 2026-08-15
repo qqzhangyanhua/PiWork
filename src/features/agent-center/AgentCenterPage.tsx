@@ -74,7 +74,11 @@ function CapabilityLibrary({
 
   return (
     <div className="agent-center__catalog">
-      <div className="agent-center-library-switch" aria-label={t("agentCenter.libraryViews.label")}>
+      <div
+        aria-label={t("agentCenter.libraryViews.label")}
+        className="agent-center-library-switch"
+        role="group"
+      >
         {(["recommended", "all"] as const).map((view) => (
           <button
             aria-pressed={activeView === view}
@@ -133,7 +137,11 @@ function CapabilityLibrary({
             <div><span>{t("agentCenter.catalog.kicker")}</span><h2>{t("agentCenter.catalog.title")}</h2></div>
             <p>{t("agentCenter.catalog.description")}</p>
           </div>
-          <div className="capability-filters">
+          <div
+            aria-label={t("agentCenter.filters.label")}
+            className="capability-filters"
+            role="group"
+          >
             <label className="capability-search">
               <Search aria-hidden="true" size={16} />
               <span className="sr-only">{t("agentCenter.filters.search")}</span>
@@ -260,16 +268,25 @@ export function AgentCenterPage({
     setReturnFocusTo(trigger);
     setSelectedCapability(capability);
   };
-  const addMemberToWork = async (member: AgentInstanceSummary) => {
-    if (!currentWorkId) return;
+  const addMemberToWork = async (member: AgentInstanceSummary): Promise<AppError | null> => {
+    if (!currentWorkId) return null;
     const workId = currentWorkId;
     try {
-      await client.addWorkMember(workId, member.id);
-      if (currentWorkIdRef.current !== workId) return;
-      const nextTeam = await client.getWorkTeam(workId);
-      if (currentWorkIdRef.current === workId) setWorkTeam(nextTeam);
+      const mutationTeam = await client.addWorkMember(workId, member.id);
+      if (currentWorkIdRef.current !== workId) return null;
+      setWorkTeam(mutationTeam);
     } catch (error) {
       if (currentWorkIdRef.current === workId) throw error;
+      return null;
+    }
+
+    try {
+      const refreshedTeam = await client.getWorkTeam(workId);
+      if (currentWorkIdRef.current === workId) setWorkTeam(refreshedTeam);
+      return null;
+    } catch (error) {
+      if (currentWorkIdRef.current !== workId) return null;
+      return normalizeAppError(error);
     }
   };
   const savedMember = (member: AgentInstanceSummary) => {

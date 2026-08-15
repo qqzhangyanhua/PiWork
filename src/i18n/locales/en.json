@@ -140,6 +140,7 @@
     "recommended": { "kicker": "Path capabilities", "count": "{{count}} capabilities in this path" },
     "catalog": { "kicker": "Capability catalog", "title": "Explore all 96 capabilities", "description": "Combine keyword, domain, and delivery-priority filters." },
     "filters": {
+      "label": "Capability filters",
       "search": "Search capabilities", "searchPlaceholder": "Search capability, audience, or output…",
       "domain": "Capability domain", "allDomains": "All domains",
       "priority": "Priority", "allPriorities": "All priorities"
@@ -165,7 +166,8 @@
       "memoryPolicies": { "confirmed_only": "Confirmed memories only" },
       "tools": "Tools", "noTools": "No tools declared", "participatingWorks": "Participating Works",
       "noParticipatingWorks": "No participation records are available.", "adding": "Adding…",
-      "addToWork": "Add to current Work", "noCurrentWork": "Select a Work before adding this member."
+      "addToWork": "Add to current Work", "noCurrentWork": "Select a Work before adding this member.",
+      "refreshWarning": "The member was added, but the team refresh failed. The added state has been preserved."
     },
     "assembler": {
       "kicker": "Member assembly", "title": "Customize persistent member", "builtinSource": "Built-in source · read only",

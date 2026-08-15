@@ -270,6 +270,65 @@ describe("AgentCenterPage", () => {
     expect(within(dialog).getByRole("alert")).not.toHaveTextContent("[object Object]");
   });
 
+  it("keeps_a_successful_add_when_the_followup_team_refresh_fails", async () => {
+    const user = userEvent.setup();
+    const { client, instances } = await configureAgentCenterClient();
+    const lead = instances.find(({ definition }) => definition.roleKind === "lead")!;
+    const researcher = instances.find(({ definition }) => definition.roleKind === "researcher")!;
+    client.getWorkTeam
+      .mockResolvedValueOnce(workTeam("work-1", lead, []))
+      .mockRejectedValueOnce({ code: "database_error", message: "refresh failed" });
+    client.addWorkMember.mockResolvedValue(workTeam("work-1", lead, [researcher]));
+    renderAgentCenter(client, "work-1");
+
+    const opener = await screen.findByRole("button", { name: "查看研究员详情" });
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "研究员" });
+    await user.click(within(dialog).getByRole("button", { name: "加入当前 Work" }));
+
+    expect(await within(dialog).findByRole("status")).toHaveTextContent(
+      "成员已加入，但团队刷新失败。当前成员状态已保留。",
+    );
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "已加入当前 Work" })).toBeDisabled();
+    expect(within(opener).getByText("已加入当前 Work")).toBeInTheDocument();
+    expect(client.addWorkMember).toHaveBeenCalledOnce();
+    expect(client.getWorkTeam).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps_capability_drawer_focus_trapped_across_parent_rerenders", async () => {
+    const user = userEvent.setup();
+    const { client } = await configureAgentCenterClient();
+    const onStartCatalogCapability = vi.fn();
+    const view = renderAgentCenter(client, undefined, onStartCatalogCapability);
+
+    await user.click(await screen.findByRole("tab", { name: "能力库" }));
+    const opener = await screen.findByRole("button", { name: "查看需求澄清智能体详情" });
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "需求澄清智能体" });
+    const close = within(dialog).getByRole("button", { name: "关闭详情" });
+    const last = within(dialog).getByRole("button", { name: "创建任务草稿" });
+    expect(close).toHaveFocus();
+
+    view.rerender(
+      <AgentCenterPage
+        client={client}
+        onStartCatalogCapability={onStartCatalogCapability}
+      />,
+    );
+    await act(async () => Promise.resolve());
+    expect(close).toHaveFocus();
+    expect(opener).not.toHaveFocus();
+
+    await user.tab({ shift: true });
+    expect(last).toHaveFocus();
+    await user.tab();
+    expect(close).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "需求澄清智能体" })).not.toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
   it("preserves_tabs_drawer_focus_and_error_states", async () => {
     const user = userEvent.setup();
     const { client } = await configureAgentCenterClient();
@@ -314,7 +373,9 @@ describe("AgentCenterPage", () => {
     renderAgentCenter(client);
 
     await user.click(await screen.findByRole("tab", { name: "能力库" }));
+    expect(screen.getByRole("group", { name: "能力库浏览方式" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "全部能力" }));
+    expect(screen.getByRole("group", { name: "能力筛选" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /查看.*详情/u })).toHaveLength(96);
 
     await user.type(screen.getByRole("searchbox", { name: "搜索能力" }), "报价");

@@ -140,6 +140,7 @@
     "recommended": { "kicker": "路径能力", "count": "当前路径包含 {{count}} 项能力" },
     "catalog": { "kicker": "能力目录", "title": "探索全部 96 项能力", "description": "按关键词、能力域和建设优先级组合筛选。" },
     "filters": {
+      "label": "能力筛选",
       "search": "搜索能力", "searchPlaceholder": "搜索能力、使用对象或输出…",
       "domain": "能力域", "allDomains": "全部能力域",
       "priority": "优先级", "allPriorities": "全部优先级"
@@ -165,7 +166,8 @@
       "memoryPolicies": { "confirmed_only": "仅保留已确认记忆" },
       "tools": "工具", "noTools": "未声明工具", "participatingWorks": "已参与 Work",
       "noParticipatingWorks": "暂无可用的参与记录。", "adding": "正在加入…",
-      "addToWork": "加入当前 Work", "noCurrentWork": "先选择一个 Work，才能把成员加入其中。"
+      "addToWork": "加入当前 Work", "noCurrentWork": "先选择一个 Work，才能把成员加入其中。",
+      "refreshWarning": "成员已加入，但团队刷新失败。当前成员状态已保留。"
     },
     "assembler": {
       "kicker": "成员装配", "title": "自定义长期成员", "builtinSource": "内置来源 · 只读",

@@ -39,7 +39,7 @@ export function MemberDetailDrawer({
   currentWorkId?: string;
   isInCurrentWork: boolean;
   member: AgentInstanceSummary;
-  onAddToWork(member: AgentInstanceSummary): Promise<void>;
+  onAddToWork(member: AgentInstanceSummary): Promise<AppError | null>;
   onClose(): void;
   onSaved(member: AgentInstanceSummary): void;
   requestedCapabilityPackId?: string;
@@ -51,6 +51,7 @@ export function MemberDetailDrawer({
   const onCloseRef = useRef(onClose);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<AppError | null>(null);
+  const [addWarning, setAddWarning] = useState<AppError | null>(null);
   onCloseRef.current = onClose;
 
   useEffect(() => {
@@ -93,8 +94,9 @@ export function MemberDetailDrawer({
   const addToWork = async () => {
     setAdding(true);
     setAddError(null);
+    setAddWarning(null);
     try {
-      await onAddToWork(member);
+      setAddWarning(await onAddToWork(member));
     } catch (error) {
       setAddError(normalizeAppError(error));
     } finally {
@@ -198,6 +200,11 @@ export function MemberDetailDrawer({
           {addError && (
             <p role="alert">
               {t(appErrorMessageKey(addError), appErrorMessageValues(addError))}
+            </p>
+          )}
+          {addWarning && (
+            <p role="status">
+              {t("agentCenter.memberDrawer.refreshWarning")}
             </p>
           )}
           {currentWorkId ? (

@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, Copy, LockKeyhole, Save } from "lucide-react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PiWorkClient } from "../../app/tauriClient";
@@ -33,6 +33,10 @@ export function MemberAssembler({
 }) {
   const { t } = useTranslation();
   const validationId = useId();
+  const mountedRef = useRef(false);
+  const activeSourceIdRef = useRef(source.id);
+  const saveGenerationRef = useRef(0);
+  activeSourceIdRef.current = source.id;
   const [isEditing, setIsEditing] = useState(!source.builtin);
   const [displayName, setDisplayName] = useState(source.displayName);
   const [engineOverride, setEngineOverride] = useState(source.engineOverride ?? "");
@@ -64,6 +68,15 @@ export function MemberAssembler({
   const [saveError, setSaveError] = useState<AppError | null>(null);
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      saveGenerationRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    saveGenerationRef.current += 1;
     setIsEditing(!source.builtin);
     setDisplayName(source.displayName);
     setEngineOverride(source.engineOverride ?? "");
@@ -82,6 +95,7 @@ export function MemberAssembler({
     setSelectedPackIds(nextPackIds);
     setDiagnostics([]);
     setValidationError(null);
+    setSaving(false);
     setSaveError(null);
   }, [capabilityPacks, requestedCapabilityPackId, source]);
 
@@ -130,21 +144,24 @@ export function MemberAssembler({
     let current = true;
     setValidationPending(true);
     setValidationError(null);
-    void client.validateAgentAssembly(input)
-      .then((nextDiagnostics) => {
-        if (!current) return;
-        setDiagnostics(nextDiagnostics);
-      })
-      .catch((error: unknown) => {
-        if (!current) return;
-        setDiagnostics([]);
-        setValidationError(normalizeAppError(error));
-      })
-      .finally(() => {
-        if (current) setValidationPending(false);
-      });
+    const timer = window.setTimeout(() => {
+      void client.validateAgentAssembly(input)
+        .then((nextDiagnostics) => {
+          if (!current) return;
+          setDiagnostics(nextDiagnostics);
+        })
+        .catch((error: unknown) => {
+          if (!current) return;
+          setDiagnostics([]);
+          setValidationError(normalizeAppError(error));
+        })
+        .finally(() => {
+          if (current) setValidationPending(false);
+        });
+    }, 200);
     return () => {
       current = false;
+      window.clearTimeout(timer);
     };
   }, [client, displayName, input, isEditing]);
 
@@ -161,15 +178,32 @@ export function MemberAssembler({
     });
   };
   const save = async () => {
+    const generation = saveGenerationRef.current + 1;
+    const sourceId = source.id;
+    saveGenerationRef.current = generation;
     setSaving(true);
     setSaveError(null);
     try {
       const saved = await client.saveAgentCopy(input);
+      if (
+        !mountedRef.current
+        || activeSourceIdRef.current !== sourceId
+        || saveGenerationRef.current !== generation
+      ) return;
       onSaved(saved);
     } catch (error) {
+      if (
+        !mountedRef.current
+        || activeSourceIdRef.current !== sourceId
+        || saveGenerationRef.current !== generation
+      ) return;
       setSaveError(normalizeAppError(error));
     } finally {
-      setSaving(false);
+      if (
+        mountedRef.current
+        && activeSourceIdRef.current === sourceId
+        && saveGenerationRef.current === generation
+      ) setSaving(false);
     }
   };
   const saveDisabled = validationPending

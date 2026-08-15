@@ -24,13 +24,15 @@ export function CapabilityDetailDrawer({
   const { t } = useTranslation();
   const drawerRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     closeRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !drawerRef.current) return;
@@ -51,7 +53,7 @@ export function CapabilityDetailDrawer({
       document.removeEventListener("keydown", handleKeyDown);
       queueMicrotask(() => returnFocusTo?.focus());
     };
-  }, [onClose, returnFocusTo]);
+  }, [returnFocusTo]);
 
   return (
     <div className="capability-drawer-layer">

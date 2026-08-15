@@ -876,6 +876,38 @@
   .agent-center-library-switch { border-color: var(--pw-dashboard-border); background: rgb(17 24 39 / 70%); }
   .agent-center-library-switch button[aria-pressed="true"] { background: #243147; color: #91b7ff; box-shadow: inset 0 0 0 1px var(--pw-dashboard-border); }
   .agent-center-hero::before { opacity: .55; }
+  .agent-center-stat { border-color: var(--pw-dashboard-border); background: rgb(25 34 49 / 88%); box-shadow: inset 0 1px rgb(255 255 255 / 5%); }
+  .agent-center-stat__value { color: var(--pw-text-primary); }
+  .agent-center-stat small { color: var(--pw-text-secondary); }
+  .capability-path[aria-pressed="true"] { border-color: #5279b8; background: #22334d; box-shadow: 0 12px 30px rgb(0 0 0 / 18%); }
+  .capability-path[aria-pressed="true"] > strong { color: #9fc2ff; }
+  .capability-empty { border-color: var(--pw-dashboard-border); background: #192231; color: var(--pw-text-secondary); }
+  .capability-empty h2 { color: var(--pw-text-primary); }
+  .capability-empty button { border-color: #5279b8; background: #22334d; color: #9fc2ff; }
+  .capability-card__body > span { color: var(--pw-text-secondary); }
+  .team-member-card__description { color: var(--pw-text-secondary); }
+  .agent-center-hero__copy > p,
+  .agent-center-section__heading > p,
+  .capability-path > small,
+  .capability-card__body small,
+  .team-member-card__identity small,
+  .capability-results__header,
+  .capability-filters label > span,
+  .capability-drawer__meta,
+  .capability-drawer__content p,
+  .capability-drawer__content ul,
+  .member-drawer__header p,
+  .member-drawer__pack-list small,
+  .member-drawer__facts small,
+  .member-assembler__readonly-note p,
+  .member-assembler__fields label > span,
+  .member-assembler__section-title > span,
+  .member-pack-option small { color: var(--pw-text-secondary); }
+  .capability-search input,
+  .capability-drawer__content h3,
+  .member-drawer__facts strong,
+  .member-pack-option strong { color: var(--pw-text-primary); }
+  .capability-card__action { color: #9fc2ff; }
   .team-member-card__identity strong,
   .member-assembler__heading h3,
   .member-drawer__pack-list strong,
@@ -885,17 +917,32 @@
   .member-drawer__facts > div,
   .member-assembler__readonly-note,
   .member-pack-option { border-color: var(--pw-dashboard-border); background: #1d293a; }
+  .team-member-card__packs > span { color: #9fc2ff; }
+  .member-pack-option.is-fixed { background: #202b3b; color: var(--pw-text-secondary); }
   .member-assembler__fields input,
   .member-assembler__fields select { border-color: var(--pw-dashboard-border); background: #172234; color: var(--pw-text-primary); }
   .member-assembler__fields input:disabled,
   .member-assembler__fields select:disabled { background: #202b3b; color: #8490a0; }
   .member-assembler__catalog-note { border-color: #5e513c; background: #30291e; }
-  .member-assembler__diagnostics li { border-color: #633e46; background: #35242a; }
+  .member-assembler__catalog-note strong { color: #ffd58a; }
+  .member-assembler__catalog-note small { color: #e4c99a; }
+  .member-assembler__validation > p { color: #ffd58a; }
+  .member-assembler__validation > p.is-valid { color: #82d9b1; }
+  .member-assembler__save-error { color: #ffb4bd !important; }
+  .member-assembler__diagnostics li { border-color: #80515c; background: #35242a; }
+  .member-assembler__diagnostics code { background: #4b2d36; color: #ffb4bd; }
+  .member-assembler__diagnostics p { color: #ffc7cb; }
+  .member-assembler__diagnostics span { color: #e6aeb4; }
+  .member-assembler__diagnostics span strong { color: #ffb4bd; }
   .capability-drawer { background: var(--pw-dashboard-panel-solid); }
   .capability-drawer__content section,
-  .capability-drawer__meta,
-  .capability-drawer__footer { border-color: var(--pw-dashboard-border); }
+  .capability-drawer__meta { border-color: var(--pw-dashboard-border); }
+  .capability-drawer__footer { border-color: var(--pw-dashboard-border); background: var(--pw-dashboard-panel-solid); }
+  .capability-drawer__footer p { color: var(--pw-text-secondary); }
+  .member-drawer__footer p[role="alert"] { color: #ffb4bd; }
   .capability-drawer__preparation { border-color: var(--pw-dashboard-border) !important; background: #1d2a3d; }
+  .capability-drawer__availability { border-color: var(--pw-dashboard-border) !important; background: #1d293a; }
+  .capability-drawer__availability.is-deprecated { border-color: #80515c !important; background: #35242a; }
 }
 
 @media (prefers-reduced-motion: reduce) {
