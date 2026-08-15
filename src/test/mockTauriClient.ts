@@ -106,8 +106,11 @@ export const createMockTauriClient = (): MockTauriClient => {
     outputSchema: {},
     procedure: {},
     validationRubric: {},
-    requiredTools: ["read"],
-    defaultPermissionScope: roleKind === "engineer" ? "inherit_work" : "read_only",
+    requiredTools: roleKind === "engineer"
+      ? ["read", "grep", "find", "ls", "edit", "write", "bash"]
+      : ["read", "grep", "find", "ls"],
+    defaultPermissionScope:
+      roleKind === "lead" || roleKind === "engineer" ? "inherit_work" : "read_only",
     compatibleRoleTemplateIds: [`role-template:${roleKind}:v1`],
     requiredEngineCapabilities: [],
     conflictsWithCapabilityPackIds: [],
@@ -177,6 +180,98 @@ export const createMockTauriClient = (): MockTauriClient => {
       updatedAt: now(0),
     };
   });
+  const capabilityPacks = [...executablePacks, ...catalogPacks];
+  const permissionRank = (
+    permission: AgentInstanceSummary["definition"]["defaultPermissionPolicy"],
+  ) => {
+    switch (permission) {
+      case "read_only":
+        return 0;
+      case "inherit_work":
+        return 1;
+      case "work_write":
+        return 2;
+    }
+  };
+  const leastPermission = (
+    left: AgentInstanceSummary["definition"]["defaultPermissionPolicy"],
+    right: AgentInstanceSummary["definition"]["defaultPermissionPolicy"],
+  ) => permissionRank(left) <= permissionRank(right) ? left : right;
+  const validateAssemblyInput = (input: SaveAgentAssemblyInput): AssemblyDiagnostic[] => {
+    if (input.displayName.trim().length === 0) {
+      throw new Error("Display name must not be empty");
+    }
+    if (
+      input.parallelismOverride !== null
+      && (!Number.isInteger(input.parallelismOverride)
+        || input.parallelismOverride < 1
+        || input.parallelismOverride > 8)
+    ) {
+      throw new Error("Parallelism must be between 1 and 8");
+    }
+
+    const source = agentInstances.find(({ id }) => id === input.sourceInstanceId);
+    if (!source) throw new Error("Agent instance does not exist");
+
+    const seenPackIds = new Set<string>();
+    const packs = input.capabilityPackIds.map((packId) => {
+      if (seenPackIds.has(packId)) {
+        throw new Error("Capability pack ids must be unique");
+      }
+      seenPackIds.add(packId);
+      const pack = capabilityPacks.find(({ id }) => id === packId);
+      if (!pack) throw new Error("Capability pack does not exist");
+      return pack;
+    });
+    const diagnostics: AssemblyDiagnostic[] = [];
+    const addDiagnostic = (
+      code: AssemblyDiagnostic["code"],
+      capabilityPackId: string | null,
+      message: string,
+    ) => diagnostics.push({ code, capabilityPackId, message });
+
+    for (const pack of packs) {
+      if (pack.status !== "executable") {
+        addDiagnostic(
+          "not_executable",
+          pack.id,
+          `Capability pack '${pack.name}' is not executable`,
+        );
+      }
+      if (!pack.compatibleRoleTemplateIds.includes(source.definition.roleTemplateId)) {
+        addDiagnostic(
+          "incompatible_role",
+          pack.id,
+          `Capability pack '${pack.name}' is incompatible with role '${source.definition.roleKind}'`,
+        );
+      }
+    }
+
+    const definitionPermission = source.definition.defaultPermissionPolicy;
+    const sourcePermission = source.permissionPolicyOverride === null
+      ? definitionPermission
+      : leastPermission(definitionPermission, source.permissionPolicyOverride);
+    const requestedPermission = input.permissionPolicyOverride ?? sourcePermission;
+    const effectivePermission = leastPermission(sourcePermission, requestedPermission);
+    if (permissionRank(requestedPermission) > permissionRank(sourcePermission)) {
+      addDiagnostic(
+        "permission_escalation",
+        null,
+        "Requested permission would expand the source Agent's authority",
+      );
+    }
+    for (const pack of packs) {
+      if (permissionRank(pack.defaultPermissionScope) > permissionRank(effectivePermission)) {
+        addDiagnostic(
+          "permission_escalation",
+          pack.id,
+          `Capability pack '${pack.name}' requires a broader permission`,
+        );
+      }
+    }
+
+    return diagnostics;
+  };
   const teamMembersByWork = new Map<string, AgentInstanceSummary[]>();
   const workTeam = (workId: string): WorkTeamSummary => {
     const instances = [agentInstances[0]!, ...(teamMembersByWork.get(workId) ?? [])]
@@ -196,17 +291,27 @@ export const createMockTauriClient = (): MockTauriClient => {
     async () => cloneDto(agentInstances),
   );
   const listCapabilityPacks: Mock<PiWorkClient["listCapabilityPacks"]> = vi.fn(
-    async () => cloneDto([...executablePacks, ...catalogPacks]),
+    async () => cloneDto(capabilityPacks),
   );
   const getWorkTeam: Mock<PiWorkClient["getWorkTeam"]> = vi.fn(
-    async (workId) => cloneDto(workTeam(workId)),
+    async (workId) => {
+      if (!details.has(workId)) throw new Error(`Work not found: ${workId}`);
+      return cloneDto(workTeam(workId));
+    },
   );
   const validateAgentAssembly: Mock<PiWorkClient["validateAgentAssembly"]> = vi.fn(
-    async (_input: SaveAgentAssemblyInput): Promise<AssemblyDiagnostic[]> => [],
+    async (input: SaveAgentAssemblyInput) => cloneDto(validateAssemblyInput(input)),
   );
   const saveAgentCopy: Mock<PiWorkClient["saveAgentCopy"]> = vi.fn(async (input) => {
+    const diagnostics = validateAssemblyInput(input);
+    if (diagnostics.length > 0) {
+      throw new Error(diagnostics.map(({ message }) => message).join("; "));
+    }
     const source = agentInstances.find(({ id }) => id === input.sourceInstanceId);
-    if (!source) throw new Error(`Agent instance not found: ${input.sourceInstanceId}`);
+    if (!source) throw new Error("Agent instance does not exist");
+    const selectedPacks = input.capabilityPackIds.map((packId) =>
+      capabilityPacks.find(({ id }) => id === packId)!,
+    );
     const copy: AgentInstanceSummary = {
       ...source,
       id: `agent-instance:local:${agentInstances.length + 1}`,
@@ -214,8 +319,7 @@ export const createMockTauriClient = (): MockTauriClient => {
         ...source.definition,
         id: `agent-definition:local:${agentInstances.length + 1}:v1`,
         name: input.displayName,
-        capabilityPacks: [...executablePacks, ...catalogPacks].filter(({ id }) =>
-          input.capabilityPackIds.includes(id)),
+        capabilityPacks: selectedPacks,
         builtin: false,
       },
       displayName: input.displayName,
@@ -230,9 +334,13 @@ export const createMockTauriClient = (): MockTauriClient => {
   });
   const addWorkMember: Mock<PiWorkClient["addWorkMember"]> = vi.fn(
     async (workId, agentInstanceId) => {
+      if (!details.has(workId)) throw new Error(`Work not found: ${workId}`);
       const instance = agentInstances.find(({ id }) => id === agentInstanceId);
       if (!instance) throw new Error(`Agent instance not found: ${agentInstanceId}`);
-      teamMembersByWork.set(workId, [...(teamMembersByWork.get(workId) ?? []), instance]);
+      const members = teamMembersByWork.get(workId) ?? [];
+      if (instance.id !== agentInstances[0]!.id && !members.some(({ id }) => id === instance.id)) {
+        teamMembersByWork.set(workId, [...members, instance]);
+      }
       return cloneDto(workTeam(workId));
     },
   );

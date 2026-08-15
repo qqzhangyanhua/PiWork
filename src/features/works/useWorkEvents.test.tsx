@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PiWorkClient } from "../../app/tauriClient";
 import type { WorkEventEnvelope } from "../../bindings";
-import { createMockTauriClient } from "../../test/mockTauriClient";
 import { WorkStoreProvider, useWorkStore } from "./WorkStoreProvider";
 import { useWorkEvents } from "./useWorkEvents";
 
@@ -33,7 +32,6 @@ const deferred = <T,>() => {
 const makeClient = (
   listenToWorkEvents: PiWorkClient["listenToWorkEvents"],
 ): PiWorkClient => ({
-  ...createMockTauriClient(),
   getModelConfigurationStatus: async () => ({ configured: true, configuration: { id: "openai-default", provider: "openai", baseUrl: "https://api.openai.com/v1", modelId: "gpt-5.2", active: true, credentialConfigured: true } }),
   listModelConfigurations: async () => [],
   testModelConnection: async () => ({ models: [] }),
@@ -48,6 +46,12 @@ const makeClient = (
   getWork: async () => {
     throw new Error("unused");
   },
+  listAgentInstances: vi.fn(async () => { throw new Error("unused"); }),
+  listCapabilityPacks: vi.fn(async () => { throw new Error("unused"); }),
+  getWorkTeam: vi.fn(async () => { throw new Error("unused"); }),
+  validateAgentAssembly: vi.fn(async () => { throw new Error("unused"); }),
+  saveAgentCopy: vi.fn(async () => { throw new Error("unused"); }),
+  addWorkMember: vi.fn(async () => { throw new Error("unused"); }),
   listProjectFiles: async () => [],
   importResources: async () => [],
   listWorkResources: async () => [],

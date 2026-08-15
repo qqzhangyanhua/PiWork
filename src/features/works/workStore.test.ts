@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { PiWorkClient } from "../../app/tauriClient";
 import type {
@@ -69,7 +69,6 @@ const legacyEvent = (
 };
 
 const unusedClient: PiWorkClient = {
-  ...createMockTauriClient(),
   getModelConfigurationStatus: async () => ({ configured: true, configuration: { id: "openai-default", provider: "openai", baseUrl: "https://api.openai.com/v1", modelId: "gpt-5.2", active: true, credentialConfigured: true } }),
   listModelConfigurations: async () => [],
   testModelConnection: async () => ({ models: [] }),
@@ -84,6 +83,12 @@ const unusedClient: PiWorkClient = {
   getWork: async () => {
     throw new Error("unused");
   },
+  listAgentInstances: vi.fn(async () => { throw new Error("unused"); }),
+  listCapabilityPacks: vi.fn(async () => { throw new Error("unused"); }),
+  getWorkTeam: vi.fn(async () => { throw new Error("unused"); }),
+  validateAgentAssembly: vi.fn(async () => { throw new Error("unused"); }),
+  saveAgentCopy: vi.fn(async () => { throw new Error("unused"); }),
+  addWorkMember: vi.fn(async () => { throw new Error("unused"); }),
   listProjectFiles: async () => [],
   importResources: async () => [],
   listWorkResources: async () => [],

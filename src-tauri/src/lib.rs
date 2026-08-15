@@ -106,8 +106,9 @@ fn focus_visible_main_window<W: SecondInstanceWindow>(window: &W) -> Result<(), 
 }
 
 fn production_agent_tools() -> BTreeSet<String> {
-    ["read", "grep", "find", "ls", "edit", "write", "bash"]
-        .into_iter()
+    engine::pi::production_pi_tool_ids()
+        .iter()
+        .copied()
         .map(String::from)
         .collect()
 }
@@ -389,10 +390,45 @@ mod tests {
             );
         }
 
-        assert_eq!(super::production_agent_tools(), tools,);
+        let arguments = crate::engine::pi::PiRunArguments::new(
+            std::path::Path::new("."),
+            std::path::Path::new("."),
+            "allowlist-test",
+            "allowlist-test-model",
+            crate::domain::work::PermissionMode::Balanced,
+        );
+        let runtime_tools = arguments
+            .values()
+            .windows(2)
+            .find(|pair| pair[0] == "--tools")
+            .expect("Pi runtime arguments must include --tools")[1]
+            .split(',')
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>();
+        let production_source_tools: std::collections::BTreeSet<String> =
+            crate::engine::pi::production_pi_tool_ids()
+                .iter()
+                .map(|tool| String::from(*tool))
+                .collect();
+
+        assert_eq!(runtime_tools, tools);
+        assert_eq!(production_source_tools, tools);
+        assert_eq!(super::production_agent_tools(), tools);
         assert_eq!(
             super::production_agent_engine_capabilities(),
             engine_capabilities,
+        );
+    }
+
+    #[test]
+    fn production_agent_allowlist_delegates_to_pi_runtime_tool_source() {
+        let source = include_str!("lib.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(production.contains("engine::pi::production_pi_tool_ids()"));
+        assert!(
+            !production
+                .contains("[\"read\", \"grep\", \"find\", \"ls\", \"edit\", \"write\", \"bash\"]")
         );
     }
 

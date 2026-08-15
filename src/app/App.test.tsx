@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SaveAgentAssemblyInput } from "../bindings";
 import { i18n } from "../i18n";
 import { createMockTauriClient } from "../test/mockTauriClient";
 import { App } from "./App";
@@ -12,20 +13,47 @@ beforeEach(async () => {
 describe("App", () => {
   it("provides the complete agent command contract in the desktop mock", async () => {
     const client = createMockTauriClient();
+    const work = await client.createWork({
+      title: "Agent contract",
+      goal: "Exercise the desktop mock",
+      rootPath: "D:/workspace",
+      permissionMode: "balanced",
+      resourceDraftId: null,
+    });
 
     const instances = await client.listAgentInstances();
     const packs = await client.listCapabilityPacks();
-    const team = await client.getWorkTeam("work-1");
+    const team = await client.getWorkTeam(work.summary.id);
 
     expect(instances).toHaveLength(4);
     expect(packs.filter(({ status }) => status === "catalog_only")).toHaveLength(96);
-    expect(packs.filter(({ status }) => status === "executable").map(({ id }) => id)).toEqual([
-      "capability-pack:lead-coordination:v1",
-      "capability-pack:source-research:v1",
-      "capability-pack:engineering-execution:v1",
-      "capability-pack:independent-review:v1",
+    expect(packs.filter(({ status }) => status === "executable")).toMatchObject([
+      {
+        id: "capability-pack:lead-coordination:v1",
+        requiredTools: ["read", "grep", "find", "ls"],
+        defaultPermissionScope: "inherit_work",
+        compatibleRoleTemplateIds: ["role-template:lead:v1"],
+      },
+      {
+        id: "capability-pack:source-research:v1",
+        requiredTools: ["read", "grep", "find", "ls"],
+        defaultPermissionScope: "read_only",
+        compatibleRoleTemplateIds: ["role-template:researcher:v1"],
+      },
+      {
+        id: "capability-pack:engineering-execution:v1",
+        requiredTools: ["read", "grep", "find", "ls", "edit", "write", "bash"],
+        defaultPermissionScope: "inherit_work",
+        compatibleRoleTemplateIds: ["role-template:engineer:v1"],
+      },
+      {
+        id: "capability-pack:independent-review:v1",
+        requiredTools: ["read", "grep", "find", "ls"],
+        defaultPermissionScope: "read_only",
+        compatibleRoleTemplateIds: ["role-template:reviewer:v1"],
+      },
     ]);
-    expect(team.workId).toBe("work-1");
+    expect(team.workId).toBe(work.summary.id);
     expect(team.lead.roleKind).toBe("lead");
     expect(client.validateAgentAssembly).toBeTypeOf("function");
     expect(client.saveAgentCopy).toBeTypeOf("function");
@@ -34,9 +62,16 @@ describe("App", () => {
 
   it("returns isolated agent DTOs like the Tauri serialization boundary", async () => {
     const client = createMockTauriClient();
+    const work = await client.createWork({
+      title: "DTO isolation",
+      goal: "Exercise cloning",
+      rootPath: "D:/workspace",
+      permissionMode: "balanced",
+      resourceDraftId: null,
+    });
     const firstInstances = await client.listAgentInstances();
     const firstPacks = await client.listCapabilityPacks();
-    const firstTeam = await client.getWorkTeam("work-1");
+    const firstTeam = await client.getWorkTeam(work.summary.id);
     firstInstances[0]!.displayName = "mutated builtin";
     firstInstances[0]!.definition.capabilityPacks[0]!.name = "mutated nested pack";
     firstPacks[0]!.name = "mutated catalog";
@@ -44,7 +79,7 @@ describe("App", () => {
 
     expect((await client.listAgentInstances())[0]!.displayName).not.toContain("mutated");
     expect((await client.listCapabilityPacks())[0]!.name).not.toContain("mutated");
-    expect((await client.getWorkTeam("work-1")).lead.instance.displayName).not.toContain("mutated");
+    expect((await client.getWorkTeam(work.summary.id)).lead.instance.displayName).not.toContain("mutated");
 
     const copy = await client.saveAgentCopy({
       sourceInstanceId: "agent-instance:piwork-engineer",
@@ -60,10 +95,105 @@ describe("App", () => {
     expect((await client.listAgentInstances()).find(({ id }) => id === copyId)?.displayName)
       .toBe("Local engineer");
 
-    const added = await client.addWorkMember("work-1", copyId);
+    const added = await client.addWorkMember(work.summary.id, copyId);
     added.members.find(({ instance }) => instance.id === copyId)!.instance.displayName = "mutated team";
-    expect((await client.getWorkTeam("work-1")).members
+    expect((await client.getWorkTeam(work.summary.id)).members
       .find(({ instance }) => instance.id === copyId)?.instance.displayName).toBe("Local engineer");
+  });
+
+  it("fails closed when validating or saving invalid agent assemblies", async () => {
+    const client = createMockTauriClient();
+    const base: SaveAgentAssemblyInput = {
+      sourceInstanceId: "agent-instance:piwork-lead",
+      displayName: "Local lead",
+      capabilityPackIds: ["capability-pack:lead-coordination:v1"],
+      engineOverride: null,
+      modelConfigurationOverride: null,
+      permissionPolicyOverride: null,
+      parallelismOverride: null,
+    };
+
+    await expect(client.validateAgentAssembly({
+      ...base,
+      capabilityPackIds: ["catalog-capability:001"],
+    })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "not_executable",
+        capabilityPackId: "catalog-capability:001",
+      }),
+    ]));
+    await expect(client.validateAgentAssembly({
+      ...base,
+      capabilityPackIds: ["capability-pack:source-research:v1"],
+    })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "incompatible_role",
+        capabilityPackId: "capability-pack:source-research:v1",
+      }),
+    ]));
+    await expect(client.validateAgentAssembly({
+      ...base,
+      sourceInstanceId: "agent-instance:piwork-researcher",
+      capabilityPackIds: ["capability-pack:source-research:v1"],
+      permissionPolicyOverride: "work_write",
+    })).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "permission_escalation" }),
+    ]));
+    await expect(client.validateAgentAssembly({
+      ...base,
+      capabilityPackIds: ["unknown-pack"],
+    })).rejects.toThrow("Capability pack does not exist");
+    await expect(client.validateAgentAssembly({ ...base, displayName: "  " }))
+      .rejects.toThrow("Display name must not be empty");
+    await expect(client.validateAgentAssembly({ ...base, parallelismOverride: 0 }))
+      .rejects.toThrow("Parallelism must be between 1 and 8");
+    await expect(client.validateAgentAssembly({
+      ...base,
+      capabilityPackIds: [
+        "capability-pack:lead-coordination:v1",
+        "capability-pack:lead-coordination:v1",
+      ],
+    })).rejects.toThrow("Capability pack ids must be unique");
+
+    await expect(client.saveAgentCopy({
+      ...base,
+      capabilityPackIds: ["catalog-capability:001"],
+    })).rejects.toThrow("is not executable");
+    await expect(client.saveAgentCopy({
+      ...base,
+      capabilityPackIds: ["unknown-pack"],
+    })).rejects.toThrow("Capability pack does not exist");
+    expect(await client.listAgentInstances()).toHaveLength(4);
+  });
+
+  it("rejects missing Works and keeps Work membership unique", async () => {
+    const client = createMockTauriClient();
+
+    await expect(client.getWorkTeam("missing-work")).rejects.toThrow(
+      "Work not found: missing-work",
+    );
+    await expect(client.addWorkMember(
+      "missing-work",
+      "agent-instance:piwork-reviewer",
+    )).rejects.toThrow("Work not found: missing-work");
+
+    const work = await client.createWork({
+      title: "Team contract",
+      goal: "Exercise fail-closed membership",
+      rootPath: "D:/workspace",
+      permissionMode: "balanced",
+      resourceDraftId: null,
+    });
+    await expect(client.addWorkMember(work.summary.id, "unknown-agent"))
+      .rejects.toThrow("Agent instance not found: unknown-agent");
+    await client.addWorkMember(work.summary.id, "agent-instance:piwork-reviewer");
+    const team = await client.addWorkMember(
+      work.summary.id,
+      "agent-instance:piwork-reviewer",
+    );
+
+    expect(team.members.filter(({ instance }) =>
+      instance.id === "agent-instance:piwork-reviewer")).toHaveLength(1);
   });
 
   it("explains that the Vite URL cannot access the desktop backend", () => {

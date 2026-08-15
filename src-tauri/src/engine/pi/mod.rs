@@ -26,6 +26,11 @@ use super::{
 
 const PROVIDER_NAME: &str = "piwork";
 const API_KEY_ENVIRONMENT_VARIABLE: &str = "PIWORK_MODEL_API_KEY";
+const PRODUCTION_PI_TOOL_IDS: &[&str] = &["read", "grep", "find", "ls", "edit", "write", "bash"];
+
+pub(crate) fn production_pi_tool_ids() -> &'static [&'static str] {
+    PRODUCTION_PI_TOOL_IDS
+}
 
 pub fn prompt_command(request_id: &str, input: &EngineInput) -> Value {
     let images = input
@@ -249,12 +254,13 @@ impl PiRunArguments {
         model_id: &str,
         permission_mode: PermissionMode,
     ) -> Self {
-        let tools = match permission_mode {
-            PermissionMode::AskEveryStep => "read,grep,find,ls",
+        let tool_count = match permission_mode {
+            PermissionMode::AskEveryStep => 4,
             PermissionMode::Balanced | PermissionMode::AutoExecute => {
-                "read,grep,find,ls,edit,write,bash"
+                production_pi_tool_ids().len()
             }
         };
+        let tools = production_pi_tool_ids()[..tool_count].join(",");
         Self {
             working_directory: working_directory.to_path_buf(),
             values: vec![
@@ -269,7 +275,7 @@ impl PiRunArguments {
                 "--session-id".into(),
                 session_id.into(),
                 "--tools".into(),
-                tools.into(),
+                tools,
                 "--no-extensions".into(),
                 "--no-skills".into(),
                 "--no-prompt-templates".into(),
