@@ -49,6 +49,55 @@ fn assignment_session_migration_uses_stable_lf_line_endings() {
     assert!(!migration.contains('\r'));
 }
 
+#[test]
+fn assignment_outbox_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0007_assignment_event_outbox.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[tokio::test]
+async fn assignment_outbox_has_explicit_global_ordinal_and_delivery_metadata() {
+    let database = Database::open_in_memory().await.unwrap();
+    let table_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'assignment_event_outbox'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert!(table_sql.contains("ordinal INTEGER PRIMARY KEY AUTOINCREMENT"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM pragma_table_info('assignment_event_outbox') ORDER BY cid"
+        )
+        .fetch_all(database.pool())
+        .await
+        .unwrap(),
+        vec![
+            "ordinal",
+            "event_id",
+            "assignment_id",
+            "status",
+            "attempt_count",
+            "last_attempt_at",
+            "last_error",
+            "lease_token",
+            "lease_expires_at",
+            "delivered_at",
+            "created_at",
+            "updated_at",
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'assignment_event_outbox' AND sql IS NOT NULL ORDER BY name"
+        )
+        .fetch_all(database.pool())
+        .await
+        .unwrap(),
+        vec!["idx_assignment_event_outbox_pending"]
+    );
+}
+
 #[tokio::test]
 async fn agent_domain_migration_seeds_builtin_team_and_capabilities() {
     let database = Database::open_in_memory().await.unwrap();

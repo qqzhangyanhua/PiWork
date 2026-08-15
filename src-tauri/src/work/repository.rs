@@ -230,9 +230,9 @@ impl WorkRepository {
                     events.causation_id, events.correlation_id, events.sequence, \
                     events.version, events.occurred_at, events.payload \
              FROM events \
-             INNER JOIN runs ON runs.id = events.run_id AND runs.work_id = events.work_id \
-             WHERE events.work_id = ? \
-             ORDER BY runs.created_at ASC, runs.id ASC, events.sequence ASC, events.id ASC",
+             LEFT JOIN runs ON runs.id = events.run_id AND runs.work_id = events.work_id \
+             WHERE events.work_id = ? AND (events.run_id IS NULL OR runs.id IS NOT NULL) \
+             ORDER BY events.occurred_at ASC, events.id ASC",
         )
         .bind(id)
         .fetch_all(&mut *connection)
@@ -1218,7 +1218,7 @@ impl From<RunRow> for RunSummary {
 struct EventRow {
     id: String,
     work_id: String,
-    run_id: String,
+    run_id: Option<String>,
     turn_id: Option<String>,
     session_id: Option<String>,
     agent_id: Option<String>,
@@ -1246,7 +1246,7 @@ impl TryFrom<EventRow> for WorkEventEnvelope {
             version,
             event_id: Some(row.id),
             work_id: row.work_id,
-            run_id: Some(row.run_id),
+            run_id: row.run_id,
             turn_id: row.turn_id,
             session_id: row.session_id,
             agent_id: row.agent_id,

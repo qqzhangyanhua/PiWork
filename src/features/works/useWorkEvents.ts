@@ -21,7 +21,11 @@ export const useWorkEvents = () => {
           stopListening();
         } else {
           unlisten = stopListening;
-          store.getState().setSubscriptionError(null);
+          return client.drainAssignmentEventOutbox().then(() => {
+            if (!disposed) {
+              store.getState().setSubscriptionError(null);
+            }
+          });
         }
       })
       .catch((error: unknown) => {

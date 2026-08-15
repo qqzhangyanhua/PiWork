@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -17,6 +17,7 @@ use piwork_lib::{
         assignment::AssignmentKind,
         event::{WorkEventEnvelope, WorkEventPayload},
     },
+    engine::activity_observer::ActivityObserverHandle,
     error::AppError,
     storage::sqlite::Database,
 };
@@ -35,6 +36,7 @@ impl AssignmentEventSink for RecordingSink {
 struct FailingSink {
     call_count: AtomicUsize,
     fail_on: Vec<usize>,
+    failure_message: String,
     published: Mutex<Vec<WorkEventEnvelope>>,
 }
 
@@ -43,6 +45,16 @@ impl FailingSink {
         Self {
             call_count: AtomicUsize::new(0),
             fail_on,
+            failure_message: "forced publication failure".into(),
+            published: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_failure_message(fail_on: Vec<usize>, failure_message: &str) -> Self {
+        Self {
+            call_count: AtomicUsize::new(0),
+            fail_on,
+            failure_message: failure_message.into(),
             published: Mutex::new(Vec::new()),
         }
     }
@@ -52,10 +64,64 @@ impl AssignmentEventSink for FailingSink {
     fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
         let call = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_on.contains(&call) {
-            return Err(AppError::event_publish(format!("forced failure at {call}")));
+            return Err(AppError::event_publish(format!(
+                "{} at {call}",
+                self.failure_message
+            )));
         }
         self.published.lock().unwrap().push(event);
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct BlockingSink {
+    call_count: AtomicUsize,
+    first_started: (Mutex<bool>, Condvar),
+    release_first: (Mutex<bool>, Condvar),
+    published: Mutex<Vec<WorkEventEnvelope>>,
+}
+
+impl BlockingSink {
+    fn wait_until_first_publish_starts(&self) {
+        let (started, ready) = &self.first_started;
+        let mut started = started.lock().unwrap();
+        while !*started {
+            started = ready.wait(started).unwrap();
+        }
+    }
+
+    fn release_first_publish(&self) {
+        let (released, ready) = &self.release_first;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
+impl AssignmentEventSink for BlockingSink {
+    fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
+        let call = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == 1 {
+            let (started, ready) = &self.first_started;
+            *started.lock().unwrap() = true;
+            ready.notify_all();
+
+            let (released, ready) = &self.release_first;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = ready.wait(released).unwrap();
+            }
+        }
+        self.published.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+struct PanickingSink;
+
+impl AssignmentEventSink for PanickingSink {
+    fn publish(&self, _event: WorkEventEnvelope) -> Result<(), AppError> {
+        panic!("forced sink panic");
     }
 }
 
@@ -150,10 +216,13 @@ async fn repository_accept_commits_queued_assignment_and_journal_before_publish_
 }
 
 #[tokio::test]
-async fn repository_single_publish_failure_returns_committed_fact_and_can_replay_journal() {
+async fn repository_single_publish_failure_is_discoverable_with_redacted_attempt_metadata() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-publish-single").await;
-    let failing = Arc::new(FailingSink::new(vec![1]));
+    let failing = Arc::new(FailingSink::with_failure_message(
+        vec![1],
+        "secret-token=do-not-persist",
+    ));
     let repository =
         AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
 
@@ -171,21 +240,28 @@ async fn repository_single_publish_failure_returns_committed_fact_and_can_replay
             .unwrap(),
         1
     );
-    let replay_sink = Arc::new(RecordingSink::default());
-    let replay_repository =
-        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
-    let report = replay_repository
-        .replay_committed_events_for_assignment(&assignment.id)
+    let pending = repository.pending_event_deliveries().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].assignment_id, assignment.id);
+    assert_eq!(pending[0].attempt_count, 1);
+    assert!(pending[0].last_attempt_at.is_some());
+    let last_error = pending[0].last_error.as_deref().unwrap();
+    assert!(!last_error.contains("secret-token"));
+    assert!(last_error.len() <= 512);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status = 'pending'"
+        )
+        .fetch_one(database.pool())
         .await
-        .unwrap();
-    assert_eq!(report.attempted, 1);
-    assert_eq!(report.published, 1);
-    assert!(report.failed_event_ids.is_empty());
-    assert_eq!(replay_sink.0.lock().unwrap().len(), 1);
+        .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
-async fn repository_second_publish_failure_returns_retry_fact_and_replays_complete_journal() {
+async fn repository_second_publish_failure_retries_only_pending_with_exactly_once_observer_effect()
+{
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-publish-double").await;
     let failing = Arc::new(FailingSink::new(vec![5]));
@@ -233,57 +309,51 @@ async fn repository_second_publish_failure_returns_retry_fact_and_replays_comple
             .unwrap(),
         3
     );
-    let event_rowids = sqlx::query_scalar::<_, i64>(
-        "SELECT rowid FROM events WHERE assignment_id = ? ORDER BY rowid",
-    )
-    .bind(&assignment.id)
-    .fetch_all(database.pool())
-    .await
-    .unwrap();
-    let event_count = event_rowids.len();
-    for (index, rowid) in event_rowids.into_iter().enumerate() {
-        sqlx::query("UPDATE events SET id = ? WHERE rowid = ?")
-            .bind(format!("replay-order-{:03}", event_count - index))
-            .bind(rowid)
-            .execute(database.pool())
-            .await
-            .unwrap();
-    }
-    let replay_sink = Arc::new(RecordingSink::default());
-    let replay =
-        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
-    let report = replay
-        .replay_committed_events_for_assignment(&assignment.id)
-        .await
-        .unwrap();
-    assert_eq!(report.attempted, 5);
-    assert_eq!(report.published, 5);
+    let pending = repository.pending_event_deliveries().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let pending_event_id = pending[0].event_id.clone();
+
+    let report = repository.drain_pending_events().await.unwrap();
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.published, 1);
     assert!(report.failed_event_ids.is_empty());
-    let replayed = replay_sink.0.lock().unwrap();
-    assert!(matches!(
-        replayed[0].payload,
-        WorkEventPayload::AssignmentQueued { .. }
-    ));
-    assert!(matches!(
-        replayed[1].payload,
-        WorkEventPayload::AssignmentClaimed { .. }
-    ));
-    assert!(matches!(
-        replayed[2].payload,
-        WorkEventPayload::AssignmentStarted { .. }
-    ));
-    assert!(matches!(
-        replayed[3].payload,
-        WorkEventPayload::AssignmentFailed { .. }
-    ));
-    assert!(matches!(
-        replayed[4].payload,
-        WorkEventPayload::AssignmentRetryScheduled { .. }
-    ));
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 6);
+    assert!(
+        repository
+            .pending_event_deliveries()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repository.drain_pending_events().await.unwrap().attempted,
+        0
+    );
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 6);
+
+    let event_ids = {
+        let published = failing.published.lock().unwrap();
+        assert_eq!(published.len(), 5);
+        published
+            .iter()
+            .map(|event| event.event_id.as_ref().unwrap().clone())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    assert_eq!(event_ids.len(), 5);
+    assert!(event_ids.contains(&pending_event_id));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status = 'delivered'"
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        5
+    );
 }
 
 #[tokio::test]
-async fn repository_recovery_middle_publish_failure_returns_report_and_replays_committed_batch() {
+async fn repository_recovery_middle_publish_failure_retries_only_the_pending_batch_member() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-recovery-publish-a").await;
     seed_work(database.pool(), "work-recovery-publish-b").await;
@@ -337,18 +407,456 @@ async fn repository_recovery_middle_publish_failure_returns_report_and_replays_c
             .unwrap(),
         8
     );
-    let replay_sink = Arc::new(RecordingSink::default());
-    let replay =
-        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
-    for assignment_id in [&first.id, &second.id] {
-        let replay_report = replay
-            .replay_committed_events_for_assignment(assignment_id)
+    let pending = repository.pending_event_deliveries().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let report = repository.drain_pending_events().await.unwrap();
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.published, 1);
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 9);
+    let published = failing.published.lock().unwrap();
+    assert_eq!(published.len(), 8);
+    assert_eq!(
+        published
+            .iter()
+            .map(|event| event.event_id.as_deref().unwrap())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        8
+    );
+}
+
+#[tokio::test]
+async fn repository_initialization_recovers_claim_but_waits_for_listener_ready_drain() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("assignment-outbox-restart.db");
+    let database = Database::open(&path).await.unwrap();
+    seed_work(database.pool(), "work-outbox-restart").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    let assignment = repository
+        .accept(accept_input("work-outbox-restart", "Restart drain"))
+        .await
+        .unwrap();
+    let pending_event_id = repository.pending_event_deliveries().await.unwrap()[0]
+        .event_id
+        .clone();
+    sqlx::query("UPDATE assignment_event_outbox SET status = 'delivering', lease_token = 'crashed-process', lease_expires_at = ?, updated_at = ? WHERE event_id = ?")
+        .bind(Utc::now() + chrono::Duration::hours(1))
+        .bind(Utc::now())
+        .bind(&pending_event_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    drop(repository);
+    drop(database);
+
+    let reopened = Database::open(&path).await.unwrap();
+    let recovered_sink = Arc::new(RecordingSink::default());
+    let recovered = AssignmentRepository::initialize_with_event_sink(
+        reopened.pool().clone(),
+        recovered_sink.clone(),
+    )
+    .await
+    .unwrap();
+
+    let recovered_pending = recovered.pending_event_deliveries().await.unwrap();
+    assert_eq!(recovered_pending.len(), 1);
+    assert_eq!(recovered_pending[0].status, "pending");
+    assert!(recovered_sink.0.lock().unwrap().is_empty());
+
+    let report = recovered.drain_pending_events().await.unwrap();
+    assert_eq!(report.published, 1);
+    let delivered = recovered_sink.0.lock().unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        delivered[0].event_id.as_deref(),
+        Some(pending_event_id.as_str())
+    );
+    assert_eq!(
+        delivered[0].assignment_id.as_deref(),
+        Some(assignment.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn work_detail_hydration_includes_durable_runless_assignment_events() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-assignment-hydration").await;
+    let sink = Arc::new(RecordingSink::default());
+    let assignments = AssignmentRepository::with_event_sink(database.pool().clone(), sink.clone());
+    let assignment = assignments
+        .accept(accept_input(
+            "work-assignment-hydration",
+            "Hydrated assignment",
+        ))
+        .await
+        .unwrap();
+
+    let works = piwork_lib::work::repository::WorkRepository::new(database.pool().clone());
+    let detail = works
+        .get("work-assignment-hydration")
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(detail.events.len(), 1);
+    assert_eq!(
+        detail.events[0].assignment_id.as_deref(),
+        Some(assignment.id.as_str())
+    );
+    assert!(detail.events[0].run_id.is_none());
+}
+
+#[tokio::test]
+async fn repository_pending_outbox_uses_global_persistent_ordinals_across_vacuum() {
+    let temporary = tempfile::tempdir().unwrap();
+    let database = Database::open(temporary.path().join("assignment-outbox-order.db"))
+        .await
+        .unwrap();
+    seed_work(database.pool(), "work-outbox-order").await;
+    let failing = Arc::new(FailingSink::new((1..=8).collect()));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    let first = repository
+        .accept(accept_input("work-outbox-order", "First"))
+        .await
+        .unwrap();
+    let second = repository
+        .accept(accept_input("work-outbox-order", "Second"))
+        .await
+        .unwrap();
+
+    let before = repository.pending_event_deliveries().await.unwrap();
+    assert_eq!(before.len(), 2);
+    assert!(before[0].ordinal < before[1].ordinal);
+    assert_eq!(before[0].assignment_id, first.id);
+    assert_eq!(before[1].assignment_id, second.id);
+    sqlx::query("VACUUM")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let after = repository.pending_event_deliveries().await.unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .map(|delivery| (delivery.ordinal, delivery.event_id.as_str()))
+            .collect::<Vec<_>>(),
+        before
+            .iter()
+            .map(|delivery| (delivery.ordinal, delivery.event_id.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn repository_concurrent_drains_claim_each_pending_event_once() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("assignment-outbox-concurrent.db");
+    let first_database = Database::open(&path).await.unwrap();
+    let second_database = Database::open(&path).await.unwrap();
+    seed_work(first_database.pool(), "work-outbox-concurrent").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let setup =
+        AssignmentRepository::with_event_sink(first_database.pool().clone(), failing.clone());
+    setup
+        .accept(accept_input("work-outbox-concurrent", "Concurrent drain"))
+        .await
+        .unwrap();
+    assert_eq!(setup.pending_event_deliveries().await.unwrap().len(), 1);
+    let sink = Arc::new(RecordingSink::default());
+    let first = AssignmentRepository::with_event_sink(first_database.pool().clone(), sink.clone());
+    let second =
+        AssignmentRepository::with_event_sink(second_database.pool().clone(), sink.clone());
+
+    let (first_report, second_report) =
+        tokio::join!(first.drain_pending_events(), second.drain_pending_events());
+    let first_report = first_report.unwrap();
+    let second_report = second_report.unwrap();
+
+    assert_eq!(first_report.attempted + second_report.attempted, 1);
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+    assert!(first.pending_event_deliveries().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_commit_during_active_drain_is_published_without_an_external_trigger() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("assignment-outbox-active-drain.db");
+    let first_database = Database::open(&path).await.unwrap();
+    let second_database = Database::open(&path).await.unwrap();
+    seed_work(first_database.pool(), "work-outbox-active-drain").await;
+    let sink = Arc::new(BlockingSink::default());
+    let first = AssignmentRepository::with_event_sink(first_database.pool().clone(), sink.clone());
+    let second =
+        AssignmentRepository::with_event_sink(second_database.pool().clone(), sink.clone());
+
+    let first_accept = tokio::spawn(async move {
+        first
+            .accept(accept_input("work-outbox-active-drain", "First"))
+            .await
+            .unwrap()
+    });
+    let started_sink = sink.clone();
+    tokio::task::spawn_blocking(move || started_sink.wait_until_first_publish_starts())
+        .await
+        .unwrap();
+
+    let mut second_accept = tokio::spawn(async move {
+        second
+            .accept(accept_input("work-outbox-active-drain", "Second"))
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let row_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assignment_event_outbox")
+                .fetch_one(first_database.pool())
+                .await
+                .unwrap();
+            if row_count == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second mutation did not commit while the first sink was blocked");
+
+    let returned_while_first_publish_was_blocked =
+        tokio::time::timeout(Duration::from_millis(250), &mut second_accept).await;
+    sink.release_first_publish();
+    first_accept.await.unwrap();
+    match returned_while_first_publish_was_blocked {
+        Ok(result) => {
+            result.unwrap();
+            panic!("the second mutation returned without draining its newly committed event");
+        }
+        Err(_) => {
+            second_accept.await.unwrap();
+        }
+    }
+
+    assert_eq!(sink.published.lock().unwrap().len(), 2);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status <> 'delivered'"
+        )
+        .fetch_one(first_database.pool())
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_concurrent_drain_does_not_steal_an_inflight_publish_after_wall_clock_expiry() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("assignment-outbox-lease-expiry.db");
+    let first_database = Database::open(&path).await.unwrap();
+    let second_database = Database::open(&path).await.unwrap();
+    seed_work(first_database.pool(), "work-outbox-lease-expiry").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let setup =
+        AssignmentRepository::with_event_sink(first_database.pool().clone(), failing.clone());
+    setup
+        .accept(accept_input("work-outbox-lease-expiry", "Lease expiry"))
+        .await
+        .unwrap();
+    let sink = Arc::new(BlockingSink::default());
+    let first = AssignmentRepository::with_event_sink(first_database.pool().clone(), sink.clone());
+    let second =
+        AssignmentRepository::with_event_sink(second_database.pool().clone(), sink.clone());
+
+    let first_drain = tokio::spawn(async move { first.drain_pending_events().await });
+    let started_sink = sink.clone();
+    tokio::task::spawn_blocking(move || started_sink.wait_until_first_publish_starts())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE assignment_event_outbox SET lease_expires_at = ? WHERE status = 'delivering'",
+    )
+    .bind(Utc::now() - chrono::Duration::seconds(1))
+    .execute(first_database.pool())
+    .await
+    .unwrap();
+
+    let mut second_drain = tokio::spawn(async move { second.drain_pending_events().await });
+    let returned_while_first_publish_was_blocked =
+        tokio::time::timeout(Duration::from_millis(250), &mut second_drain).await;
+    let returned_early = returned_while_first_publish_was_blocked.is_ok();
+    sink.release_first_publish();
+    let first_result = first_drain.await.unwrap();
+    let second_result = match returned_while_first_publish_was_blocked {
+        Ok(result) => result.unwrap(),
+        Err(_) => second_drain.await.unwrap(),
+    };
+
+    assert!(
+        !returned_early,
+        "a concurrent drain reclaimed an event whose sink invocation was still in flight"
+    );
+    first_result.unwrap();
+    assert_eq!(second_result.unwrap().attempted, 0);
+    assert_eq!(sink.call_count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn repository_abandoned_claim_is_released_when_the_drain_task_unwinds() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-outbox-unwind").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let setup = AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    setup
+        .accept(accept_input("work-outbox-unwind", "Unwind cleanup"))
+        .await
+        .unwrap();
+    let panicking =
+        AssignmentRepository::with_event_sink(database.pool().clone(), Arc::new(PanickingSink));
+
+    let drain = tokio::spawn(async move { panicking.drain_pending_events().await });
+    assert!(drain.await.unwrap_err().is_panic());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM assignment_event_outbox ORDER BY ordinal LIMIT 1",
+            )
+            .fetch_one(database.pool())
             .await
             .unwrap();
-        assert_eq!(replay_report.attempted, 4);
-        assert_eq!(replay_report.published, 4);
-    }
-    assert_eq!(replay_sink.0.lock().unwrap().len(), 8);
+            if status == "pending" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the abandoned process claim was not released");
+
+    let recovered_sink = Arc::new(RecordingSink::default());
+    let recovered =
+        AssignmentRepository::with_event_sink(database.pool().clone(), recovered_sink.clone());
+    assert_eq!(recovered.drain_pending_events().await.unwrap().published, 1);
+    assert_eq!(recovered_sink.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn repository_malformed_claim_rolls_back_without_stranding_a_delivery() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-outbox-malformed-claim").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    repository
+        .accept(accept_input(
+            "work-outbox-malformed-claim",
+            "Malformed claim",
+        ))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE events SET payload = '{}' WHERE assignment_id IS NOT NULL")
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+    repository.drain_pending_events().await.unwrap_err();
+
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM assignment_event_outbox ORDER BY ordinal LIMIT 1"
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        "pending"
+    );
+}
+
+#[tokio::test]
+async fn repository_publish_ack_crash_replays_at_least_once_but_observer_deduplicates_event_id() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-outbox-ack-crash").await;
+    sqlx::query(
+        "CREATE TRIGGER fail_outbox_ack BEFORE UPDATE OF status ON assignment_event_outbox WHEN NEW.status = 'delivered' BEGIN SELECT RAISE(ABORT, 'forced ack failure'); END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let observer = ActivityObserverHandle::in_process();
+    let repository =
+        AssignmentRepository::with_event_sink(database.pool().clone(), Arc::new(observer.clone()));
+
+    let assignment = repository
+        .accept(accept_input("work-outbox-ack-crash", "Ack crash"))
+        .await
+        .unwrap();
+
+    assert_eq!(observer.snapshot().len(), 1);
+    assert_eq!(
+        repository.pending_event_deliveries().await.unwrap().len(),
+        1
+    );
+    sqlx::query("DROP TRIGGER fail_outbox_ack")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let report = repository.drain_pending_events().await.unwrap();
+    assert_eq!(report.attempted, 1);
+    assert_eq!(report.published, 1);
+    assert!(
+        repository
+            .pending_event_deliveries()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let visible = observer.snapshot();
+    assert_eq!(visible.len(), 1);
+    assert_eq!(
+        visible[0].assignment_id.as_deref(),
+        Some(assignment.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn repository_attempt_metadata_counts_only_events_whose_sink_was_invoked() {
+    let database = Database::open_in_memory().await.unwrap();
+    seed_work(database.pool(), "work-outbox-attempt-metadata").await;
+    let setup_sink = Arc::new(RecordingSink::default());
+    let setup = AssignmentRepository::with_event_sink(database.pool().clone(), setup_sink.clone());
+    setup
+        .accept(accept_input("work-outbox-attempt-metadata", "First"))
+        .await
+        .unwrap();
+    setup
+        .accept(accept_input("work-outbox-attempt-metadata", "Second"))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', attempt_count = 0, last_attempt_at = NULL, last_error = NULL, lease_token = NULL, lease_expires_at = NULL, delivered_at = NULL, updated_at = created_at")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_first_outbox_ack BEFORE UPDATE OF status ON assignment_event_outbox WHEN NEW.status = 'delivered' BEGIN SELECT RAISE(ABORT, 'forced ack failure'); END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let sink = Arc::new(RecordingSink::default());
+    let repository = AssignmentRepository::with_event_sink(database.pool().clone(), sink.clone());
+
+    repository.drain_pending_events().await.unwrap_err();
+
+    assert_eq!(sink.0.lock().unwrap().len(), 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT attempt_count FROM assignment_event_outbox ORDER BY ordinal"
+        )
+        .fetch_all(database.pool())
+        .await
+        .unwrap(),
+        vec![1, 0]
+    );
 }
 
 #[tokio::test]
@@ -512,7 +1020,7 @@ async fn repository_state_mutations_return_committed_facts_when_every_publicatio
 }
 
 #[tokio::test]
-async fn repository_assignment_events_use_v2_in_database_live_sink_and_replay() {
+async fn repository_assignment_events_use_v2_in_database_live_sink_and_outbox() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-event-v2").await;
     let live_sink = Arc::new(RecordingSink::default());
@@ -553,16 +1061,27 @@ async fn repository_assignment_events_use_v2_in_database_live_sink_and_replay() 
             .all(|event| event.version == 2)
     );
 
-    let replay_sink = Arc::new(RecordingSink::default());
-    let replay =
-        AssignmentRepository::with_event_sink(database.pool().clone(), replay_sink.clone());
-    replay
-        .replay_committed_events_for_assignment(&assignment.id)
+    assert!(
+        repository
+            .pending_event_deliveries()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        repository.drain_pending_events().await.unwrap().attempted,
+        0
+    );
+    assert_eq!(live_sink.0.lock().unwrap().len(), 3);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status = 'delivered'"
+        )
+        .fetch_one(database.pool())
         .await
-        .unwrap();
-    let replayed = replay_sink.0.lock().unwrap();
-    assert_eq!(replayed.len(), 3);
-    assert!(replayed.iter().all(|event| event.version == 2));
+        .unwrap(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -1549,13 +2068,6 @@ async fn repository_runtime_string_limits_reject_before_database_or_event_writes
             .await
             .unwrap_err(),
         "activeOwnerId",
-    );
-    assert_too_large(
-        repository
-            .replay_committed_events_for_assignment(&"a".repeat(SHORT + 1))
-            .await
-            .unwrap_err(),
-        "assignmentId",
     );
     assert_too_large(
         repository

@@ -64,6 +64,7 @@ const makeClient = (
   stopWork: async () => {
     throw new Error("unused");
   },
+  drainAssignmentEventOutbox: async () => undefined,
   listenToWorkEvents,
 });
 
@@ -161,6 +162,30 @@ describe("useWorkEvents", () => {
 
     view.unmount();
     expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers the live listener before requesting the durable outbox drain", async () => {
+    const listenResult = deferred<() => void>();
+    const drainAssignmentEventOutbox = vi.fn(async () => undefined);
+    const client = {
+      ...makeClient(() => listenResult.promise),
+      drainAssignmentEventOutbox,
+    } as PiWorkClient & {
+      drainAssignmentEventOutbox(): Promise<void>;
+    };
+
+    render(
+      <WorkStoreProvider client={client}>
+        <Listener />
+      </WorkStoreProvider>,
+    );
+    expect(drainAssignmentEventOutbox).not.toHaveBeenCalled();
+
+    await act(async () => listenResult.resolve(() => undefined));
+
+    await waitFor(() =>
+      expect(drainAssignmentEventOutbox).toHaveBeenCalledTimes(1),
+    );
   });
 
   it("unsubscribes once when listen resolves after unmount", async () => {

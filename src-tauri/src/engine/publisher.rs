@@ -3,8 +3,8 @@ use tauri::Emitter;
 use tokio::sync::mpsc;
 
 use crate::{
-    domain::event::WorkEventEnvelope, engine::activity_observer::ActivityObserverHandle,
-    error::AppError,
+    assignment::repository::AssignmentEventSink, domain::event::WorkEventEnvelope,
+    engine::activity_observer::ActivityObserverHandle, error::AppError,
 };
 
 #[async_trait]
@@ -28,15 +28,25 @@ impl TauriEventPublisher {
             observer,
         }
     }
+
+    fn publish_now(&self, envelope: WorkEventEnvelope) -> Result<(), AppError> {
+        self.observer.emit_committed(envelope.clone());
+        self.app_handle
+            .emit("piwork://work-event", envelope)
+            .map_err(|error| AppError::event_publish(error.to_string()))
+    }
 }
 
 #[async_trait]
 impl EventPublisher for TauriEventPublisher {
     async fn publish(&self, envelope: WorkEventEnvelope) -> Result<(), AppError> {
-        self.observer.emit_committed(envelope.clone());
-        self.app_handle
-            .emit("piwork://work-event", envelope)
-            .map_err(|error| AppError::event_publish(error.to_string()))
+        self.publish_now(envelope)
+    }
+}
+
+impl AssignmentEventSink for TauriEventPublisher {
+    fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
+        self.publish_now(event)
     }
 }
 

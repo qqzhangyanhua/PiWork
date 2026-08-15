@@ -103,6 +103,7 @@ const unusedClient: PiWorkClient = {
   stopWork: async () => {
     throw new Error("unused");
   },
+  drainAssignmentEventOutbox: async () => undefined,
   listenToWorkEvents: async () => () => undefined,
 };
 

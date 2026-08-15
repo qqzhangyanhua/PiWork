@@ -4,13 +4,15 @@
 // Relay, Channel, ACP session and agent-slot transport concerns.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
 use tokio::sync::broadcast;
 
-use crate::domain::event::WorkEventEnvelope;
+use crate::{
+    assignment::repository::AssignmentEventSink, domain::event::WorkEventEnvelope, error::AppError,
+};
 
 const ACTIVITY_BUFFER_CAP: usize = 1000;
 
@@ -22,6 +24,7 @@ pub struct ActivityObserverHandle {
 struct ActivityObserverInner {
     tx: broadcast::Sender<WorkEventEnvelope>,
     buffer: Mutex<VecDeque<WorkEventEnvelope>>,
+    seen_event_ids: Mutex<HashSet<String>>,
     capacity: usize,
 }
 
@@ -41,6 +44,7 @@ impl ActivityObserverHandle {
             inner: Arc::new(ActivityObserverInner {
                 tx,
                 buffer: Mutex::new(VecDeque::with_capacity(capacity)),
+                seen_event_ids: Mutex::new(HashSet::new()),
                 capacity,
             }),
         }
@@ -59,7 +63,18 @@ impl ActivityObserverHandle {
         buffer.iter().cloned().collect()
     }
 
-    pub fn emit_committed(&self, envelope: WorkEventEnvelope) {
+    /// Returns `false` when this exact stable event id was already observed.
+    pub fn emit_committed(&self, envelope: WorkEventEnvelope) -> bool {
+        if let Some(event_id) = envelope.event_id.as_ref() {
+            let mut seen = self
+                .inner
+                .seen_event_ids
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !seen.insert(event_id.clone()) {
+                return false;
+            }
+        }
         let mut buffer = self
             .inner
             .buffer
@@ -71,6 +86,14 @@ impl ActivityObserverHandle {
         buffer.push_back(envelope.clone());
         let _ = self.inner.tx.send(envelope);
         drop(buffer);
+        true
+    }
+}
+
+impl AssignmentEventSink for ActivityObserverHandle {
+    fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError> {
+        self.emit_committed(event);
+        Ok(())
     }
 }
 
@@ -131,6 +154,23 @@ mod tests {
 
         assert_eq!(observer_clone.snapshot(), vec![event.clone()]);
         assert_eq!(live.recv().await.unwrap(), event);
+    }
+
+    #[tokio::test]
+    async fn observer_uses_event_id_as_an_idempotency_key() {
+        let observer = ActivityObserverHandle::in_process_with_capacity(2);
+        let mut live = observer.subscribe();
+        let event = committed_event("event-once", 1);
+
+        observer.emit_committed(event.clone());
+        assert_eq!(live.recv().await.unwrap(), event);
+        observer.emit_committed(event.clone());
+
+        assert_eq!(observer.snapshot(), vec![event]);
+        assert!(matches!(
+            live.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

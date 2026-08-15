@@ -161,6 +161,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             // complete startup sequence once. The configured main window remains hidden until
             // migrations, recovery, and managed state assembly all succeed.
             let database_path = paths.database_path().to_path_buf();
+            let app_handle = app.handle().clone();
             let engine_sessions_dir = paths.engine_sessions_dir();
             let runtime_dir = paths.runtime_dir();
             let resources_dir = paths.resources_dir();
@@ -169,9 +170,12 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 .path()
                 .resolve("pi-sidecar/dist/piwork-pi.js", BaseDirectory::Resource)
                 .ok();
+            let observer = engine::activity_observer::ActivityObserverHandle::in_process();
             tauri::async_runtime::block_on(orchestrate_startup(
                 || {
                     let database_path = database_path.clone();
+                    let app_handle = app_handle.clone();
+                    let observer = observer.clone();
                     let resources_dir = resources_dir.clone();
                     let resource_cache_dir = resource_cache_dir.clone();
                     async move {
@@ -180,6 +184,19 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             work::repository::WorkRepository::new(database.pool().clone());
                         let agent_repository =
                             agent::repository::AgentRepository::new(database.pool().clone());
+                        let publisher = Arc::new(
+                            engine::publisher::TauriEventPublisher::with_observer(
+                                app_handle,
+                                observer.clone(),
+                            ),
+                        );
+                        let assignment_sink: Arc<dyn assignment::repository::AssignmentEventSink> =
+                            publisher.clone();
+                        let assignment_repository = assignment::repository::AssignmentRepository::initialize_with_event_sink(
+                            database.pool().clone(),
+                            assignment_sink,
+                        )
+                        .await?;
                         work::service::WorkService::new(repository.clone())
                             .recover_interrupted_runs()
                             .await?;
@@ -201,10 +218,19 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             model_repository,
                             resource_service,
                             agent_repository,
+                            publisher,
+                            assignment_repository,
                         ))
                     }
                 },
-                |(repository, model_repository, resource_service, agent_repository)| -> StartupResult<()> {
+                |(
+                    repository,
+                    model_repository,
+                    resource_service,
+                    agent_repository,
+                    publisher,
+                    assignment_repository,
+                )| -> StartupResult<()> {
                     let model_service =
                         Arc::new(model::ModelService::production(model_repository)?);
                     let engine = Arc::new(engine::pi::PiEngineAdapter::production_with_executable(
@@ -213,16 +239,17 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         runtime_dir.clone(),
                         bundled_pi.clone(),
                     )?);
-                    let observer = engine::activity_observer::ActivityObserverHandle::in_process();
-                    let publisher =
-                        Arc::new(engine::publisher::TauriEventPublisher::with_observer(
-                            app.handle().clone(),
-                            observer.clone(),
-                        ));
                     if !app.manage(observer.clone()) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             "PiWork activity observer is already managed",
+                        )
+                        .into());
+                    }
+                    if !app.manage(assignment_repository) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "PiWork assignment repository is already managed",
                         )
                         .into());
                     }
@@ -274,6 +301,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             work::commands::list_project_files,
             work::commands::start_work,
             work::commands::stop_work,
+            assignment::commands::drain_assignment_event_outbox,
             model::commands::get_model_configuration_status,
             model::commands::list_model_configurations,
             model::commands::test_model_connection,
@@ -475,6 +503,36 @@ mod tests {
         let management = &assembly[manage..erase];
         assert!(management.contains("std::io::ErrorKind::AlreadyExists"));
         assert!(management.contains("PiWork activity observer is already managed"));
+    }
+
+    #[test]
+    fn production_initializes_and_manages_the_assignment_outbox_before_readiness() {
+        let source = include_str!("lib.rs");
+        let assembly = source
+            .split("fn application_builder()")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg_attr(mobile")
+            .next()
+            .unwrap();
+        let publisher = assembly
+            .find("engine::publisher::TauriEventPublisher::with_observer")
+            .expect("production assignment sink does not use the shared Tauri publisher");
+        let initialize = assembly
+            .find("assignment::repository::AssignmentRepository::initialize_with_event_sink")
+            .expect("production startup does not recover and drain the assignment outbox");
+        let manage = assembly
+            .find("app.manage(assignment_repository)")
+            .expect("the initialized assignment repository is not retained in managed state");
+        let drain_command = assembly
+            .find("assignment::commands::drain_assignment_event_outbox")
+            .expect("the frontend-ready outbox drain command is not registered");
+        let show = assembly
+            .find(".show()?")
+            .expect("the main window readiness boundary is missing");
+
+        assert!(publisher < initialize && initialize < manage && manage < show);
+        assert!(manage < drain_command);
     }
 
     #[test]

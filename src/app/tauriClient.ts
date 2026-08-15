@@ -97,6 +97,7 @@ export type PiWorkClient = {
     resourceIds?: string[],
   ): Promise<StartWorkOutput>;
   stopWork(workId: string): Promise<WorkDetail>;
+  drainAssignmentEventOutbox(): Promise<void>;
   listenToWorkEvents(
     handler: (event: WorkEventEnvelope) => void,
   ): Promise<UnlistenFn>;
@@ -146,6 +147,8 @@ export const tauriClient: PiWorkClient = {
       input: { prompt, referencedFiles, resourceIds },
     }),
   stopWork: (workId) => invoke<WorkDetail>("stop_work", { workId }),
+  drainAssignmentEventOutbox: () =>
+    invoke<void>("drain_assignment_event_outbox"),
   listenToWorkEvents: (handler) =>
     listen<WorkEventEnvelope>("piwork://work-event", ({ payload }) =>
       handler(payload),

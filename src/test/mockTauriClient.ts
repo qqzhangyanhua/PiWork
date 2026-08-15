@@ -78,6 +78,7 @@ export type MockTauriClient = PiWorkClient & {
   detachDraftResource: Mock<PiWorkClient["detachDraftResource"]>;
   startWork: Mock<PiWorkClient["startWork"]>;
   stopWork: Mock<PiWorkClient["stopWork"]>;
+  drainAssignmentEventOutbox: Mock<PiWorkClient["drainAssignmentEventOutbox"]>;
   listenToWorkEvents: Mock<PiWorkClient["listenToWorkEvents"]>;
   emit(event: WorkEventEnvelope): void;
   seed(detail: WorkDetail): void;
@@ -602,6 +603,7 @@ export const createMockTauriClient = (): MockTauriClient => {
       return unlisten;
     },
   );
+  const drainAssignmentEventOutbox = vi.fn(async () => undefined);
 
   const client: MockTauriClient = {
     getRuntimeStatus,
@@ -628,6 +630,7 @@ export const createMockTauriClient = (): MockTauriClient => {
     detachDraftResource,
     startWork,
     stopWork,
+    drainAssignmentEventOutbox,
     listenToWorkEvents,
     unlisten,
     seed(detail) {

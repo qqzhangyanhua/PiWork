@@ -19,7 +19,10 @@ const MAX_ID_BYTES: usize = 255;
 const MAX_LABEL_BYTES: usize = 255;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
+const MAX_OUTBOX_ERROR_BYTES: usize = 512;
 const ASSIGNMENT_EVENT_VERSION: u32 = 2;
+const OUTBOX_LEASE_DURATION: chrono::Duration = chrono::Duration::seconds(30);
+const OUTBOX_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RECOVERY_RETRY_BASE: Duration = Duration::from_secs(1);
 const RECOVERY_RETRY_MAX: Duration = Duration::from_secs(60);
 
@@ -44,6 +47,8 @@ pub struct AcceptAssignmentInput {
     pub not_before: Option<DateTime<Utc>>,
 }
 
+/// Receives an at-least-once stream. Implementations must deduplicate the stable `event_id` before
+/// applying externally visible side effects because a crash can occur after publish but before ack.
 pub trait AssignmentEventSink: Send + Sync {
     fn publish(&self, event: WorkEventEnvelope) -> Result<(), AppError>;
 }
@@ -57,17 +62,31 @@ pub struct RecoveryReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PublishReplayReport {
+pub struct OutboxDrainReport {
     pub attempted: usize,
     pub published: usize,
     pub failed_event_ids: Vec<String>,
 }
 
-struct NoopEventSink;
+#[derive(Debug, Clone, FromRow, PartialEq, Eq)]
+pub struct PendingEventDelivery {
+    pub ordinal: i64,
+    pub event_id: String,
+    pub assignment_id: String,
+    pub status: String,
+    pub attempt_count: i64,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+}
 
-impl AssignmentEventSink for NoopEventSink {
+struct UnavailableEventSink;
+
+impl AssignmentEventSink for UnavailableEventSink {
     fn publish(&self, _event: WorkEventEnvelope) -> Result<(), AppError> {
-        Ok(())
+        Err(AppError::event_publish(
+            "assignment event sink is unavailable",
+        ))
     }
 }
 
@@ -77,13 +96,69 @@ pub struct AssignmentRepository {
     event_sink: Arc<dyn AssignmentEventSink>,
 }
 
+struct OutboxClaimGuard {
+    pool: SqlitePool,
+    lease_token: Option<String>,
+}
+
+impl OutboxClaimGuard {
+    fn new(pool: SqlitePool, lease_token: String) -> Self {
+        Self {
+            pool,
+            lease_token: Some(lease_token),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.lease_token = None;
+    }
+
+    fn lease_token(&self) -> &str {
+        self.lease_token
+            .as_deref()
+            .expect("armed outbox claim guards have a lease token")
+    }
+}
+
+impl Drop for OutboxClaimGuard {
+    fn drop(&mut self) {
+        let Some(lease_token) = self.lease_token.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        drop(runtime.spawn(async move {
+            let now = Utc::now();
+            let _ = sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = 'delivery interrupted before acknowledgement; details redacted', updated_at = ? WHERE status = 'delivering' AND lease_token = ?")
+                .bind(now)
+                .bind(lease_token)
+                .execute(&pool)
+                .await;
+        }));
+    }
+}
+
 impl AssignmentRepository {
     pub fn new(pool: SqlitePool) -> Self {
-        Self::with_event_sink(pool, Arc::new(NoopEventSink))
+        Self::with_event_sink(pool, Arc::new(UnavailableEventSink))
     }
 
     pub fn with_event_sink(pool: SqlitePool, event_sink: Arc<dyn AssignmentEventSink>) -> Self {
         Self { pool, event_sink }
+    }
+
+    /// Constructs a repository for an exclusive startup lifecycle and recovers deliveries claimed
+    /// by the previous process. The frontend-ready command drains pending events only after its
+    /// live listener is registered, so a successful Tauri emit cannot be acknowledged too early.
+    pub async fn initialize_with_event_sink(
+        pool: SqlitePool,
+        event_sink: Arc<dyn AssignmentEventSink>,
+    ) -> Result<Self, AppError> {
+        let repository = Self::with_event_sink(pool, event_sink);
+        repository.recover_startup_deliveries().await?;
+        Ok(repository)
     }
 
     pub async fn accept(
@@ -201,7 +276,7 @@ impl AssignmentRepository {
         .await?;
         insert_event(&mut transaction, &event).await?;
         transaction.commit().await?;
-        self.publish_committed_events(std::slice::from_ref(&event));
+        self.drain_after_commit().await;
         Ok(assignment)
     }
 
@@ -270,7 +345,7 @@ impl AssignmentRepository {
         assignment.status = AssignmentStatus::Claimed;
         assignment.claimed_at = Some(now);
         assignment.updated_at = now;
-        let event = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             None,
@@ -284,7 +359,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(std::slice::from_ref(&event));
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -371,7 +446,7 @@ impl AssignmentRepository {
         assignment.status = AssignmentStatus::Running;
         assignment.started_at = Some(now);
         assignment.updated_at = now;
-        let event = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -386,7 +461,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(std::slice::from_ref(&event));
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -423,7 +498,7 @@ impl AssignmentRepository {
             .await?;
         assignment.status = AssignmentStatus::Waiting;
         assignment.updated_at = now;
-        let event = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -438,7 +513,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(std::slice::from_ref(&event));
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -486,7 +561,7 @@ impl AssignmentRepository {
         assignment.result_summary = Some(result_summary.clone());
         assignment.completed_at = Some(now);
         assignment.updated_at = now;
-        let event = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -501,7 +576,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(std::slice::from_ref(&event));
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -568,7 +643,7 @@ impl AssignmentRepository {
         assignment.last_error = Some(error.clone());
         assignment.next_attempt_at = Some(next_attempt_at);
         assignment.updated_at = now;
-        let failed = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -582,7 +657,7 @@ impl AssignmentRepository {
             },
         )
         .await?;
-        let retry = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -598,7 +673,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(&[failed, retry]);
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -638,7 +713,7 @@ impl AssignmentRepository {
         assignment.last_error = Some(error.clone());
         assignment.completed_at = Some(now);
         assignment.updated_at = now;
-        let failed = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -652,7 +727,7 @@ impl AssignmentRepository {
             },
         )
         .await?;
-        let dead = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             Some(&run_id),
@@ -667,7 +742,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(&[failed, dead]);
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -693,7 +768,6 @@ impl AssignmentRepository {
             dead_lettered: Vec::new(),
             untouched: Vec::new(),
         };
-        let mut events = Vec::new();
         for row in rows {
             let mut assignment = AssignmentRecord::try_from(row)?;
             if assignment
@@ -721,38 +795,34 @@ impl AssignmentRepository {
                 assignment.claimed_at = None;
                 assignment.recovery_reason = Some(reason.clone());
                 assignment.updated_at = now;
-                events.push(
-                    assignment_event(
-                        &mut transaction,
-                        &assignment,
-                        None,
-                        None,
-                        now,
-                        WorkEventPayload::AssignmentInterrupted {
-                            assignment_id: assignment.id.clone(),
-                            agent_instance_id: assignment.assigned_agent_id.clone(),
-                            agent_session_id: None,
-                            reason,
-                        },
-                    )
-                    .await?,
-                );
-                events.push(
-                    assignment_event(
-                        &mut transaction,
-                        &assignment,
-                        None,
-                        None,
-                        now,
-                        WorkEventPayload::AssignmentQueued {
-                            assignment_id: assignment.id.clone(),
-                            assigned_agent_id: assignment.assigned_agent_id.clone(),
-                            title: assignment.title.clone(),
-                            priority: assignment.priority,
-                        },
-                    )
-                    .await?,
-                );
+                assignment_event(
+                    &mut transaction,
+                    &assignment,
+                    None,
+                    None,
+                    now,
+                    WorkEventPayload::AssignmentInterrupted {
+                        assignment_id: assignment.id.clone(),
+                        agent_instance_id: assignment.assigned_agent_id.clone(),
+                        agent_session_id: None,
+                        reason,
+                    },
+                )
+                .await?;
+                assignment_event(
+                    &mut transaction,
+                    &assignment,
+                    None,
+                    None,
+                    now,
+                    WorkEventPayload::AssignmentQueued {
+                        assignment_id: assignment.id.clone(),
+                        assigned_agent_id: assignment.assigned_agent_id.clone(),
+                        title: assignment.title.clone(),
+                        priority: assignment.priority,
+                    },
+                )
+                .await?;
                 report.requeued.push(assignment.id.clone());
                 continue;
             }
@@ -811,87 +881,79 @@ impl AssignmentRepository {
             assignment.next_attempt_at = next_attempt_at;
             assignment.recovery_reason = Some(reason.clone());
             assignment.updated_at = now;
-            events.push(
-                assignment_event(
-                    &mut transaction,
-                    &assignment,
-                    Some(&run.id),
-                    run.engine_session_id.clone(),
-                    now,
-                    WorkEventPayload::AssignmentInterrupted {
-                        assignment_id: assignment.id.clone(),
-                        agent_instance_id: assignment.assigned_agent_id.clone(),
-                        agent_session_id: run.engine_session_id.clone(),
-                        reason: reason.clone(),
-                    },
-                )
-                .await?,
-            );
+            assignment_event(
+                &mut transaction,
+                &assignment,
+                Some(&run.id),
+                run.engine_session_id.clone(),
+                now,
+                WorkEventPayload::AssignmentInterrupted {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    agent_session_id: run.engine_session_id.clone(),
+                    reason: reason.clone(),
+                },
+            )
+            .await?;
             match decision {
                 super::state_machine::RecoveryDecision::Requeue
                     if final_status == AssignmentStatus::DeadLetter =>
                 {
-                    events.push(
-                        assignment_event(
-                            &mut transaction,
-                            &assignment,
-                            Some(&run.id),
-                            run.engine_session_id.clone(),
-                            now,
-                            WorkEventPayload::AssignmentDeadLettered {
-                                assignment_id: assignment.id.clone(),
-                                agent_instance_id: assignment.assigned_agent_id.clone(),
-                                attempt_count: assignment.attempt_count,
-                                error: reason,
-                            },
-                        )
-                        .await?,
-                    );
+                    assignment_event(
+                        &mut transaction,
+                        &assignment,
+                        Some(&run.id),
+                        run.engine_session_id.clone(),
+                        now,
+                        WorkEventPayload::AssignmentDeadLettered {
+                            assignment_id: assignment.id.clone(),
+                            agent_instance_id: assignment.assigned_agent_id.clone(),
+                            attempt_count: assignment.attempt_count,
+                            error: reason,
+                        },
+                    )
+                    .await?;
                     report.dead_lettered.push(assignment.id.clone());
                 }
                 super::state_machine::RecoveryDecision::Requeue => {
-                    events.push(
-                        assignment_event(
-                            &mut transaction,
-                            &assignment,
-                            Some(&run.id),
-                            run.engine_session_id.clone(),
-                            now,
-                            WorkEventPayload::AssignmentRetryScheduled {
-                                assignment_id: assignment.id.clone(),
-                                agent_instance_id: assignment.assigned_agent_id.clone(),
-                                attempt_count: assignment.attempt_count,
-                                next_attempt_at: next_attempt_at
-                                    .expect("queued recovery has a next attempt"),
-                                reason: reason.clone(),
-                            },
-                        )
-                        .await?,
-                    );
+                    assignment_event(
+                        &mut transaction,
+                        &assignment,
+                        Some(&run.id),
+                        run.engine_session_id.clone(),
+                        now,
+                        WorkEventPayload::AssignmentRetryScheduled {
+                            assignment_id: assignment.id.clone(),
+                            agent_instance_id: assignment.assigned_agent_id.clone(),
+                            attempt_count: assignment.attempt_count,
+                            next_attempt_at: next_attempt_at
+                                .expect("queued recovery has a next attempt"),
+                            reason: reason.clone(),
+                        },
+                    )
+                    .await?;
                     report.requeued.push(assignment.id.clone())
                 }
                 super::state_machine::RecoveryDecision::RequireConfirmation => {
-                    events.push(
-                        assignment_event(
-                            &mut transaction,
-                            &assignment,
-                            Some(&run.id),
-                            run.engine_session_id.clone(),
-                            now,
-                            WorkEventPayload::AssignmentRecoveryRequired {
-                                assignment_id: assignment.id.clone(),
-                                agent_instance_id: assignment.assigned_agent_id.clone(),
-                                recovery_reason: reason,
-                            },
-                        )
-                        .await?,
-                    );
+                    assignment_event(
+                        &mut transaction,
+                        &assignment,
+                        Some(&run.id),
+                        run.engine_session_id.clone(),
+                        now,
+                        WorkEventPayload::AssignmentRecoveryRequired {
+                            assignment_id: assignment.id.clone(),
+                            agent_instance_id: assignment.assigned_agent_id.clone(),
+                            recovery_reason: reason,
+                        },
+                    )
+                    .await?;
                     report.confirmation_required.push(assignment.id.clone());
                 }
             }
         }
         transaction.commit().await?;
-        self.publish_committed_events(&events);
+        self.drain_after_commit().await;
         Ok(report)
     }
 
@@ -964,7 +1026,7 @@ impl AssignmentRepository {
                 },
             )
         };
-        let event = assignment_event(
+        assignment_event(
             &mut transaction,
             &assignment,
             event_run_id.as_deref(),
@@ -974,7 +1036,7 @@ impl AssignmentRepository {
         )
         .await?;
         transaction.commit().await?;
-        self.publish_committed_events(std::slice::from_ref(&event));
+        self.drain_after_commit().await;
         Ok(assignment.summary)
     }
 
@@ -1046,42 +1108,213 @@ impl AssignmentRepository {
         .collect()
     }
 
-    pub async fn replay_committed_events_for_assignment(
-        &self,
-        assignment_id: &str,
-    ) -> Result<PublishReplayReport, AppError> {
-        let assignment_id = validate_id("assignmentId", assignment_id)?;
-        let events = sqlx::query_as::<_, EventRow>(
-            "SELECT id, work_id, run_id, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id, sequence, version, occurred_at, payload FROM events WHERE assignment_id = ? ORDER BY rowid",
+    pub async fn pending_event_deliveries(&self) -> Result<Vec<PendingEventDelivery>, AppError> {
+        Ok(sqlx::query_as::<_, PendingEventDelivery>(
+            "SELECT ordinal, event_id, assignment_id, status, attempt_count, last_attempt_at, last_error, lease_expires_at FROM assignment_event_outbox WHERE status <> 'delivered' ORDER BY ordinal",
         )
-        .bind(&assignment_id)
         .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(WorkEventEnvelope::try_from)
-        .collect::<Result<Vec<_>, _>>()?;
-        Ok(self.publish_committed_events(&events))
+        .await?)
     }
 
-    fn publish_committed_events(&self, events: &[WorkEventEnvelope]) -> PublishReplayReport {
-        let mut report = PublishReplayReport {
+    /// Drains one globally ordered snapshot of undelivered Assignment events.
+    ///
+    /// Delivery is at-least-once across the publish/ack crash boundary. Every v2 Assignment event
+    /// has a stable `event_id`; sinks and consumers must use it as their idempotency key. A batch
+    /// process-owned lease serializes concurrent repository instances without holding a SQLite
+    /// lock while the external sink runs. Only the exclusive startup recovery path reclaims a
+    /// delivery, so a slow in-flight sink is never stolen after a wall-clock deadline.
+    pub async fn drain_pending_events(&self) -> Result<OutboxDrainReport, AppError> {
+        let (mut claim_guard, events) = loop {
+            if let Some(claimed) = self.claim_pending_batch().await? {
+                break claimed;
+            }
+            if self.pending_event_deliveries().await?.is_empty() {
+                return Ok(OutboxDrainReport {
+                    attempted: 0,
+                    published: 0,
+                    failed_event_ids: Vec::new(),
+                });
+            }
+            tokio::time::sleep(OUTBOX_CLAIM_POLL_INTERVAL).await;
+        };
+        let lease_token = claim_guard.lease_token().to_owned();
+        let mut report = OutboxDrainReport {
             attempted: events.len(),
             published: 0,
             failed_event_ids: Vec::new(),
         };
         for event in events {
-            if self.event_sink.publish(event.clone()).is_ok() {
-                report.published += 1;
-            } else {
-                report.failed_event_ids.push(
-                    event
-                        .event_id
-                        .clone()
-                        .unwrap_or_else(|| format!("{}:{}", event.work_id, event.sequence)),
-                );
+            let event_id = event
+                .event_id
+                .as_deref()
+                .expect("outbox events have stable IDs");
+            if let Err(error) = self.record_delivery_attempt(event_id, &lease_token).await {
+                let _ = self.release_claimed_batch_after_error(&lease_token).await;
+                return Err(error);
+            }
+            match self.event_sink.publish(event.clone()) {
+                Ok(()) => {
+                    if let Err(error) = self.acknowledge_delivery(event_id, &lease_token).await {
+                        let _ = self.release_claimed_batch_after_error(&lease_token).await;
+                        return Err(error);
+                    }
+                    report.published += 1;
+                }
+                Err(error) => {
+                    if let Err(database_error) = self
+                        .record_delivery_failure(event_id, &lease_token, &error)
+                        .await
+                    {
+                        let _ = self.release_claimed_batch_after_error(&lease_token).await;
+                        return Err(database_error);
+                    }
+                    report.failed_event_ids.push(event_id.to_owned());
+                }
             }
         }
-        report
+        claim_guard.disarm();
+        Ok(report)
+    }
+
+    async fn drain_after_commit(&self) {
+        let _ = self.drain_pending_events().await;
+    }
+
+    async fn recover_startup_deliveries(&self) -> Result<(), AppError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = 'delivery interrupted before acknowledgement; details redacted', updated_at = ? WHERE status = 'delivering'")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn claim_pending_batch(
+        &self,
+    ) -> Result<Option<(OutboxClaimGuard, Vec<WorkEventEnvelope>)>, AppError> {
+        let now = Utc::now();
+        let lease_token = Uuid::new_v4().to_string();
+        let lease_expires_at = now
+            .checked_add_signed(OUTBOX_LEASE_DURATION)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let active_claims: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status = 'delivering'",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        if active_claims != 0 {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let rows = sqlx::query_as::<_, EventRow>(
+            "SELECT events.id, events.work_id, events.run_id, events.turn_id, events.session_id, events.agent_id, events.assignment_id, events.causation_id, events.correlation_id, events.sequence, events.version, events.occurred_at, events.payload FROM assignment_event_outbox outbox INNER JOIN events ON events.id = outbox.event_id WHERE outbox.status <> 'delivered' ORDER BY outbox.ordinal",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.is_empty() {
+            transaction.commit().await?;
+            return Ok(None);
+        }
+        let events = rows
+            .into_iter()
+            .map(WorkEventEnvelope::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        let claimed = sqlx::query("UPDATE assignment_event_outbox SET status = 'delivering', lease_token = ?, lease_expires_at = ?, updated_at = ? WHERE status <> 'delivered'")
+            .bind(&lease_token)
+            .bind(lease_expires_at)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        if claimed.rows_affected() != events.len() as u64 {
+            return Err(AppError::event_publish(
+                "outbox delivery claim changed concurrently",
+            ));
+        }
+        let claim_guard = OutboxClaimGuard::new(self.pool.clone(), lease_token);
+        transaction.commit().await?;
+        Ok(Some((claim_guard, events)))
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        event_id: &str,
+        lease_token: &str,
+    ) -> Result<(), AppError> {
+        let now = Utc::now();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated = sqlx::query("UPDATE assignment_event_outbox SET attempt_count = attempt_count + 1, last_attempt_at = ?, last_error = NULL, updated_at = ? WHERE event_id = ? AND status = 'delivering' AND lease_token = ?")
+            .bind(now)
+            .bind(now)
+            .bind(event_id)
+            .bind(lease_token)
+            .execute(&mut *transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::event_publish(
+                "outbox delivery attempt lease was lost",
+            ));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn acknowledge_delivery(
+        &self,
+        event_id: &str,
+        lease_token: &str,
+    ) -> Result<(), AppError> {
+        let now = Utc::now();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated = sqlx::query("UPDATE assignment_event_outbox SET status = 'delivered', lease_token = NULL, lease_expires_at = NULL, last_error = NULL, delivered_at = ?, updated_at = ? WHERE event_id = ? AND status = 'delivering' AND lease_token = ?")
+            .bind(now)
+            .bind(now)
+            .bind(event_id)
+            .bind(lease_token)
+            .execute(&mut *transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::event_publish(
+                "outbox delivery acknowledgement lease was lost",
+            ));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn record_delivery_failure(
+        &self,
+        event_id: &str,
+        lease_token: &str,
+        error: &AppError,
+    ) -> Result<(), AppError> {
+        let now = Utc::now();
+        let redacted_error = redacted_delivery_error(error);
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated = sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ? WHERE event_id = ? AND status = 'delivering' AND lease_token = ?")
+            .bind(redacted_error)
+            .bind(now)
+            .bind(event_id)
+            .bind(lease_token)
+            .execute(&mut *transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::event_publish(
+                "outbox delivery failure lease was lost",
+            ));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    async fn release_claimed_batch_after_error(&self, lease_token: &str) -> Result<(), AppError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = 'delivery acknowledgement failed; details redacted', updated_at = ? WHERE status = 'delivering' AND lease_token = ?")
+            .bind(now)
+            .bind(lease_token)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 
@@ -1370,14 +1603,31 @@ fn validate_json(field: &str, value: &Value, expected: &str) -> Result<String, A
     Ok(serialized)
 }
 
+fn redacted_delivery_error(error: &AppError) -> String {
+    let category = match error {
+        AppError::EventPublish { .. } => "event_publish",
+        _ => "sink_error",
+    };
+    let message = format!("{category}: delivery failed; details redacted");
+    debug_assert!(message.len() <= MAX_OUTBOX_ERROR_BYTES);
+    message
+}
+
 async fn insert_event(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     event: &WorkEventEnvelope,
 ) -> Result<(), AppError> {
     let payload = serde_json::to_string(&event.payload)
         .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
+    let event_id = event
+        .event_id
+        .as_deref()
+        .expect("repository events have IDs");
+    let assignment_id = event.assignment_id.as_deref().ok_or_else(|| {
+        AppError::invalid_input("assignmentId", "Assignment events require an assignment id")
+    })?;
     sqlx::query("INSERT INTO events (id, work_id, run_id, sequence, version, occurred_at, payload, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(event.event_id.as_deref().expect("repository events have IDs"))
+        .bind(event_id)
         .bind(&event.work_id)
         .bind(&event.run_id)
         .bind(i64::from(event.sequence))
@@ -1390,6 +1640,13 @@ async fn insert_event(
         .bind(&event.assignment_id)
         .bind(&event.causation_id)
         .bind(&event.correlation_id)
+        .execute(&mut **transaction)
+        .await?;
+    sqlx::query("INSERT INTO assignment_event_outbox (event_id, assignment_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
+        .bind(event_id)
+        .bind(assignment_id)
+        .bind(event.occurred_at)
+        .bind(event.occurred_at)
         .execute(&mut **transaction)
         .await?;
     Ok(())
