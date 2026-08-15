@@ -234,7 +234,7 @@ pub enum WorkEventPayload {
     AssignmentClaimed {
         assignment_id: String,
         agent_instance_id: String,
-        agent_session_id: String,
+        agent_session_id: Option<String>,
     },
     AssignmentStarted {
         assignment_id: String,
@@ -626,7 +626,7 @@ mod tests {
             WorkEventPayload::AssignmentClaimed {
                 assignment_id: "assignment-1".into(),
                 agent_instance_id: "agent-1".into(),
-                agent_session_id: "session-1".into(),
+                agent_session_id: Some("session-1".into()),
             },
             WorkEventPayload::AssignmentStarted {
                 assignment_id: "assignment-1".into(),

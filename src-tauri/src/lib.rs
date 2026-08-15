@@ -6,6 +6,7 @@ use tauri::{Manager, path::BaseDirectory};
 
 pub mod agent;
 pub mod app_state;
+pub mod assignment;
 pub mod document_runtime;
 pub mod domain;
 pub mod engine;
