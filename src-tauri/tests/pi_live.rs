@@ -4,7 +4,10 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use piwork_lib::{
     domain::work::PermissionMode,
-    engine::{EngineAdapter, EngineEvent, EngineInput, EngineRunContext, pi::PiEngineAdapter},
+    engine::{
+        EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineRunIdentity,
+        pi::PiEngineAdapter,
+    },
     model::{ModelConfigurationRepository, ModelService},
 };
 
@@ -37,10 +40,20 @@ async fn saved_provider_drives_a_real_pi_tool_loop() {
         runtime.path().to_path_buf(),
     )
     .unwrap();
+    let work_id = "00000000-0000-0000-0000-000000000111";
     let context = EngineRunContext::new(
-        "00000000-0000-0000-0000-000000000111".into(),
-        "00000000-0000-0000-0000-000000000222".into(),
+        EngineRunIdentity::new(
+            work_id.into(),
+            "00000000-0000-0000-0000-000000000222".into(),
+            "00000000-0000-0000-0000-000000000444".into(),
+            "agent-instance:piwork-lead".into(),
+            work_id.into(),
+            0,
+        )
+        .unwrap(),
         workspace_path.clone(),
+        PermissionMode::AutoExecute,
+        None,
         PermissionMode::AutoExecute,
     )
     .unwrap();
@@ -105,9 +118,18 @@ async fn saved_provider_drives_a_real_pi_tool_loop() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let context = EngineRunContext::new(
-        "00000000-0000-0000-0000-000000000111".into(),
-        "00000000-0000-0000-0000-000000000333".into(),
+        EngineRunIdentity::new(
+            work_id.into(),
+            "00000000-0000-0000-0000-000000000333".into(),
+            "00000000-0000-0000-0000-000000000555".into(),
+            "agent-instance:piwork-lead".into(),
+            work_id.into(),
+            0,
+        )
+        .unwrap(),
         workspace_path.clone(),
+        PermissionMode::AutoExecute,
+        None,
         PermissionMode::AutoExecute,
     )
     .unwrap();

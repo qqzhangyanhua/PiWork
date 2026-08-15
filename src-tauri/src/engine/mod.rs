@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -119,25 +119,80 @@ pub enum EngineError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineRunIdentity {
+    work_id: String,
+    run_id: String,
+    assignment_id: String,
+    agent_instance_id: String,
+    agent_session_id: String,
+    session_generation: u32,
+}
+
+impl EngineRunIdentity {
+    pub fn new(
+        work_id: String,
+        run_id: String,
+        assignment_id: String,
+        agent_instance_id: String,
+        agent_session_id: String,
+        session_generation: u32,
+    ) -> Result<Self, EngineError> {
+        for (name, value) in [
+            ("work", work_id.as_str()),
+            ("run", run_id.as_str()),
+            ("assignment", assignment_id.as_str()),
+            ("agent instance", agent_instance_id.as_str()),
+            ("agent session", agent_session_id.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(EngineError::Start(format!(
+                    "{name} identity must not be empty"
+                )));
+            }
+        }
+        Ok(Self {
+            work_id,
+            run_id,
+            assignment_id,
+            agent_instance_id,
+            agent_session_id,
+            session_generation,
+        })
+    }
+}
+
+/// Validated, read-only execution context passed to an engine adapter.
+///
+/// Identity fields cannot be changed after construction:
+///
+/// ```compile_fail,E0616
+/// use piwork_lib::engine::EngineRunContext;
+///
+/// fn invalidate(context: &mut EngineRunContext) {
+///     context.work_id.clear();
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineRunContext {
-    pub work_id: String,
-    pub run_id: String,
-    pub root_path: PathBuf,
-    pub permission_mode: PermissionMode,
-    pub assignment_id: String,
-    pub agent_instance_id: String,
-    pub agent_session_id: String,
-    pub session_generation: u32,
-    pub resolved_model_configuration_id: Option<String>,
-    pub effective_permission: PermissionMode,
+    work_id: String,
+    run_id: String,
+    root_path: PathBuf,
+    permission_mode: PermissionMode,
+    assignment_id: String,
+    agent_instance_id: String,
+    agent_session_id: String,
+    session_generation: u32,
+    resolved_model_configuration_id: Option<String>,
+    effective_permission: PermissionMode,
 }
 
 impl EngineRunContext {
     pub fn new(
-        work_id: String,
-        run_id: String,
+        identity: EngineRunIdentity,
         root_path: PathBuf,
         permission_mode: PermissionMode,
+        resolved_model_configuration_id: Option<String>,
+        effective_permission: PermissionMode,
     ) -> Result<Self, EngineError> {
         if !root_path.is_absolute() {
             return Err(EngineError::Start("workspace root must be absolute".into()));
@@ -150,34 +205,87 @@ impl EngineRunContext {
             ));
         }
 
+        let EngineRunIdentity {
+            work_id,
+            run_id,
+            assignment_id,
+            agent_instance_id,
+            agent_session_id,
+            session_generation,
+        } = identity;
         Ok(Self {
             work_id,
             run_id,
             root_path,
             permission_mode,
-            assignment_id: String::new(),
-            agent_instance_id: String::new(),
-            agent_session_id: String::new(),
-            session_generation: 0,
-            resolved_model_configuration_id: None,
-            effective_permission: permission_mode,
+            assignment_id,
+            agent_instance_id,
+            agent_session_id,
+            session_generation,
+            resolved_model_configuration_id,
+            effective_permission,
         })
+    }
+
+    pub fn work_id(&self) -> &str {
+        &self.work_id
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn root_path(&self) -> &Path {
+        &self.root_path
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permission_mode
+    }
+
+    pub fn assignment_id(&self) -> &str {
+        &self.assignment_id
+    }
+
+    pub fn agent_instance_id(&self) -> &str {
+        &self.agent_instance_id
+    }
+
+    pub fn agent_session_id(&self) -> &str {
+        &self.agent_session_id
+    }
+
+    pub fn session_generation(&self) -> u32 {
+        self.session_generation
+    }
+
+    pub fn resolved_model_configuration_id(&self) -> Option<&str> {
+        self.resolved_model_configuration_id.as_deref()
+    }
+
+    pub fn effective_permission(&self) -> PermissionMode {
+        self.effective_permission
     }
 
     #[cfg(test)]
     pub fn test(work_id: &str, run_id: &str) -> Self {
-        Self {
-            work_id: work_id.into(),
-            run_id: run_id.into(),
-            root_path: std::env::current_dir().unwrap(),
-            permission_mode: PermissionMode::Balanced,
-            assignment_id: "assignment:test".into(),
-            agent_instance_id: "agent-instance:test".into(),
-            agent_session_id: "agent-session:test".into(),
-            session_generation: 1,
-            resolved_model_configuration_id: None,
-            effective_permission: PermissionMode::Balanced,
-        }
+        let identity = EngineRunIdentity::new(
+            work_id.into(),
+            run_id.into(),
+            format!("assignment:{run_id}"),
+            "agent-instance:test".into(),
+            work_id.into(),
+            0,
+        )
+        .unwrap();
+        Self::new(
+            identity,
+            std::env::current_dir().unwrap(),
+            PermissionMode::Balanced,
+            None,
+            PermissionMode::Balanced,
+        )
+        .unwrap()
     }
 }
 
@@ -305,7 +413,19 @@ mod tests {
         work::PermissionMode,
     };
 
-    use super::{EngineEvent, EngineRunContext};
+    use super::{EngineEvent, EngineRunContext, EngineRunIdentity};
+
+    fn identity(run_id: &str) -> EngineRunIdentity {
+        EngineRunIdentity::new(
+            "work-1".into(),
+            run_id.into(),
+            "assignment-1".into(),
+            "agent-instance-1".into(),
+            "agent-session-1".into(),
+            0,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn only_run_terminal_events_are_terminal() {
@@ -443,20 +563,63 @@ mod tests {
         let non_canonical = child.join("..").join("child");
 
         let context = EngineRunContext::new(
-            "work-1".into(),
-            "run-1".into(),
+            identity("run-1"),
             non_canonical,
             PermissionMode::Balanced,
+            Some("model-configuration-1".into()),
+            PermissionMode::AskEveryStep,
         )
         .unwrap();
 
-        assert_eq!(context.root_path, dunce::canonicalize(child).unwrap());
-        assert!(context.assignment_id.is_empty());
-        assert!(context.agent_instance_id.is_empty());
-        assert!(context.agent_session_id.is_empty());
-        assert_eq!(context.session_generation, 0);
-        assert_eq!(context.resolved_model_configuration_id, None);
-        assert_eq!(context.effective_permission, PermissionMode::Balanced);
+        assert_eq!(context.root_path(), dunce::canonicalize(child).unwrap());
+        assert_eq!(context.work_id(), "work-1");
+        assert_eq!(context.run_id(), "run-1");
+        assert_eq!(context.assignment_id(), "assignment-1");
+        assert_eq!(context.agent_instance_id(), "agent-instance-1");
+        assert_eq!(context.agent_session_id(), "agent-session-1");
+        assert_eq!(context.session_generation(), 0);
+        assert_eq!(
+            context.resolved_model_configuration_id(),
+            Some("model-configuration-1")
+        );
+        assert_eq!(context.permission_mode(), PermissionMode::Balanced);
+        assert_eq!(context.effective_permission(), PermissionMode::AskEveryStep);
+    }
+
+    #[test]
+    fn run_identity_rejects_blank_product_identifiers_and_preserves_generation_zero() {
+        let valid = [
+            "work-1",
+            "run-1",
+            "assignment-1",
+            "agent-instance-1",
+            "agent-session-1",
+        ];
+        let identity = EngineRunIdentity::new(
+            valid[0].into(),
+            valid[1].into(),
+            valid[2].into(),
+            valid[3].into(),
+            valid[4].into(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(identity.session_generation, 0);
+
+        for blank_index in 0..valid.len() {
+            let mut values = valid;
+            values[blank_index] = " \n ";
+            let error = EngineRunIdentity::new(
+                values[0].into(),
+                values[1].into(),
+                values[2].into(),
+                values[3].into(),
+                values[4].into(),
+                7,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("must not be empty"));
+        }
     }
 
     #[test]
@@ -481,9 +644,10 @@ mod tests {
             ),
         ] {
             let error = EngineRunContext::new(
-                "work-1".into(),
-                "run-1".into(),
+                identity("run-1"),
                 root_path,
+                PermissionMode::Balanced,
+                None,
                 PermissionMode::Balanced,
             )
             .unwrap_err();

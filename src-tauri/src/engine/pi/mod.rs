@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use crate::{
-    domain::work::PermissionMode,
+    domain::{event::SessionTransition, work::PermissionMode},
     model::{ModelProvider, ModelService, RuntimeModelConfiguration},
 };
 
@@ -688,6 +688,127 @@ impl PiEngineAdapter {
     }
 }
 
+impl PiEngineAdapter {
+    async fn begin(
+        &self,
+        context: EngineRunContext,
+        input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+        transition: Option<SessionTransition>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        if self.active.lock().await.contains_key(context.run_id()) {
+            return Err(EngineError::Start("run is already active".into()));
+        }
+        let configuration = self
+            .model_service
+            .runtime_configuration()
+            .await
+            .map_err(|_| EngineError::Start("model configuration is unavailable".into()))?;
+        let agent_directory = self.runtime_root.join(context.run_id()).join("agent");
+        let session_directory = self.sessions_root.join(context.work_id());
+        std::fs::create_dir_all(&agent_directory)
+            .and_then(|_| std::fs::create_dir_all(&session_directory))
+            .map_err(|_| {
+                EngineError::Start("Pi runtime directories could not be prepared".into())
+            })?;
+        let provider_config = PiProviderConfig::from_runtime(&configuration)
+            .to_json()
+            .map_err(|_| EngineError::Start("Pi provider configuration is invalid".into()))?;
+        std::fs::write(agent_directory.join("models.json"), provider_config).map_err(|_| {
+            EngineError::Start("Pi provider configuration could not be written".into())
+        })?;
+
+        let arguments = PiRunArguments::new(
+            context.root_path(),
+            &session_directory,
+            context.work_id(),
+            &configuration.model_id,
+            context.permission_mode(),
+        );
+        let mut command = self.command.process(&arguments);
+        command
+            .env("PI_CODING_AGENT_DIR", &agent_directory)
+            .env(API_KEY_ENVIRONMENT_VARIABLE, &configuration.api_key);
+        let mut child = command
+            .spawn()
+            .map_err(|_| EngineError::Start("Pi RPC process could not be started".into()))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| EngineError::Start("Pi RPC stdin is unavailable".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| EngineError::Start("Pi RPC stdout is unavailable".into()))?;
+        let startup_stderr = Arc::new(Mutex::new(Vec::new()));
+        if let Some(mut stderr) = child.stderr.take() {
+            let startup_stderr = Arc::clone(&startup_stderr);
+            tokio::spawn(async move {
+                let mut buffer = [0_u8; 1_024];
+                while let Ok(read) = stderr.read(&mut buffer).await {
+                    if read == 0 {
+                        break;
+                    }
+                    let mut captured = startup_stderr.lock().await;
+                    let remaining = 8_192_usize.saturating_sub(captured.len());
+                    captured.extend_from_slice(&buffer[..read.min(remaining)]);
+                }
+            });
+        }
+
+        let request_id = format!("run-{}", context.run_id());
+        write_rpc(&mut stdin, &prompt_command(&request_id, &input)).await?;
+        let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
+        let mut translator = RpcEventTranslator::default();
+        await_prompt_acceptance(
+            &mut child,
+            &mut stdout,
+            &request_id,
+            &mut translator,
+            &sink,
+            &startup_stderr,
+        )
+        .await?;
+        if let Some(transition) = transition {
+            sink.send(EngineEvent::SessionChanged {
+                transition,
+                reason: None,
+            })
+            .await
+            .map_err(|_| EngineError::ChannelClosed)?;
+        }
+        sink.send(EngineEvent::RunStarted {
+            model_label: configuration.model_id.clone(),
+        })
+        .await
+        .map_err(|_| EngineError::ChannelClosed)?;
+
+        let (control_sender, control_receiver) = mpsc::channel(1);
+        self.active
+            .lock()
+            .await
+            .insert(context.run_id().to_owned(), control_sender);
+        let active = Arc::clone(&self.active);
+        let run_id = context.run_id().to_owned();
+        tokio::spawn(run_rpc_loop(
+            child,
+            stdin,
+            stdout,
+            translator,
+            sink,
+            control_receiver,
+            active,
+            run_id,
+            agent_directory,
+        ));
+
+        Ok(EngineSessionRef {
+            engine_kind: "pi_rpc".into(),
+            session_id: context.work_id().to_owned(),
+        })
+    }
+}
+
 #[async_trait]
 impl EngineAdapter for PiEngineAdapter {
     fn kind(&self) -> &'static str {
@@ -723,108 +844,7 @@ impl EngineAdapter for PiEngineAdapter {
         input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
-        if self.active.lock().await.contains_key(&context.run_id) {
-            return Err(EngineError::Start("run is already active".into()));
-        }
-        let configuration = self
-            .model_service
-            .runtime_configuration()
-            .await
-            .map_err(|_| EngineError::Start("model configuration is unavailable".into()))?;
-        let agent_directory = self.runtime_root.join(&context.run_id).join("agent");
-        let session_directory = self.sessions_root.join(&context.work_id);
-        std::fs::create_dir_all(&agent_directory)
-            .and_then(|_| std::fs::create_dir_all(&session_directory))
-            .map_err(|_| {
-                EngineError::Start("Pi runtime directories could not be prepared".into())
-            })?;
-        let provider_config = PiProviderConfig::from_runtime(&configuration)
-            .to_json()
-            .map_err(|_| EngineError::Start("Pi provider configuration is invalid".into()))?;
-        std::fs::write(agent_directory.join("models.json"), provider_config).map_err(|_| {
-            EngineError::Start("Pi provider configuration could not be written".into())
-        })?;
-
-        let arguments = PiRunArguments::new(
-            &context.root_path,
-            &session_directory,
-            &context.work_id,
-            &configuration.model_id,
-            context.permission_mode,
-        );
-        let mut command = self.command.process(&arguments);
-        command
-            .env("PI_CODING_AGENT_DIR", &agent_directory)
-            .env(API_KEY_ENVIRONMENT_VARIABLE, &configuration.api_key);
-        let mut child = command
-            .spawn()
-            .map_err(|_| EngineError::Start("Pi RPC process could not be started".into()))?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| EngineError::Start("Pi RPC stdin is unavailable".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| EngineError::Start("Pi RPC stdout is unavailable".into()))?;
-        let startup_stderr = Arc::new(Mutex::new(Vec::new()));
-        if let Some(mut stderr) = child.stderr.take() {
-            let startup_stderr = Arc::clone(&startup_stderr);
-            tokio::spawn(async move {
-                let mut buffer = [0_u8; 1_024];
-                while let Ok(read) = stderr.read(&mut buffer).await {
-                    if read == 0 {
-                        break;
-                    }
-                    let mut captured = startup_stderr.lock().await;
-                    let remaining = 8_192_usize.saturating_sub(captured.len());
-                    captured.extend_from_slice(&buffer[..read.min(remaining)]);
-                }
-            });
-        }
-
-        let request_id = format!("run-{}", context.run_id);
-        write_rpc(&mut stdin, &prompt_command(&request_id, &input)).await?;
-        let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
-        let mut translator = RpcEventTranslator::default();
-        await_prompt_acceptance(
-            &mut child,
-            &mut stdout,
-            &request_id,
-            &mut translator,
-            &sink,
-            &startup_stderr,
-        )
-        .await?;
-        sink.send(EngineEvent::RunStarted {
-            model_label: configuration.model_id.clone(),
-        })
-        .await
-        .map_err(|_| EngineError::ChannelClosed)?;
-
-        let (control_sender, control_receiver) = mpsc::channel(1);
-        self.active
-            .lock()
-            .await
-            .insert(context.run_id.clone(), control_sender);
-        let active = Arc::clone(&self.active);
-        let run_id = context.run_id.clone();
-        tokio::spawn(run_rpc_loop(
-            child,
-            stdin,
-            stdout,
-            translator,
-            sink,
-            control_receiver,
-            active,
-            run_id,
-            agent_directory,
-        ));
-
-        Ok(EngineSessionRef {
-            engine_kind: self.kind().into(),
-            session_id: context.work_id,
-        })
+        self.begin(context, input, sink, None).await
     }
 
     async fn resume(
@@ -833,7 +853,8 @@ impl EngineAdapter for PiEngineAdapter {
         input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
-        self.start(context, input, sink).await
+        self.begin(context, input, sink, Some(SessionTransition::Resumed))
+            .await
     }
 
     async fn abort(&self, run_id: &str) -> Result<(), EngineError> {

@@ -21,6 +21,7 @@ pub enum FakeRunBehavior {
     HoldUntilAbort,
     Crash,
     LivenessTimeout,
+    DuplicateTerminal,
 }
 
 #[derive(Clone)]
@@ -266,7 +267,7 @@ impl FakeEngineAdapter {
 
         let (abort_sender, abort_receiver) = oneshot::channel();
         let (completion_sender, completion_receiver) = oneshot::channel();
-        let run_id = context.run_id.clone();
+        let run_id = context.run_id().to_owned();
         let generation = Uuid::new_v4();
         let mut active = self.active.lock().await;
         if active.contains_key(&run_id) {
@@ -388,13 +389,13 @@ impl EngineAdapter for FakeEngineAdapter {
             .lock()
             .await
             .rotations
-            .push((context.run_id, reason.to_owned()));
+            .push((context.run_id().to_owned(), reason.to_owned()));
         Ok(EngineSessionRef {
             engine_kind: self.kind().into(),
             session_id: format!(
                 "{}-generation-{}",
                 self.session_id.as_deref().unwrap_or("fake-session"),
-                context.session_generation.saturating_add(1)
+                context.session_generation().saturating_add(1)
             ),
         })
     }
@@ -496,6 +497,17 @@ async fn emit_run(
             .map_err(|_| EngineError::ChannelClosed)?;
             return Err(EngineError::Aborted);
         }
+        FakeRunBehavior::DuplicateTerminal => {
+            events.push(EngineEvent::RunCompleted {
+                summary: "Completed by the deterministic fake engine".into(),
+                artifacts: Vec::new(),
+                validation: Vec::new(),
+                limitations: Vec::new(),
+            });
+            events.push(EngineEvent::RunFailed {
+                message: "duplicate terminal must not escape the adapter".into(),
+            });
+        }
         FakeRunBehavior::Complete => {
             if request.capabilities.thought_stream {
                 events.push(EngineEvent::ThoughtDelta {
@@ -513,45 +525,45 @@ async fn emit_run(
                 text: format!("Working on: {}", request.prompt),
             });
             events.push(EngineEvent::ToolStarted {
-                tool_call_id: format!("{}-tool-1", request.context.run_id),
+                tool_call_id: format!("{}-tool-1", request.context.run_id()),
                 tool_name: "fake_tool".into(),
                 input_summary: "Inspect the workspace".into(),
             });
             if request.capabilities.parallel_tool_calls {
                 events.push(EngineEvent::ToolStarted {
-                    tool_call_id: format!("{}-tool-2", request.context.run_id),
+                    tool_call_id: format!("{}-tool-2", request.context.run_id()),
                     tool_name: "fake_parallel_tool".into(),
                     input_summary: "Inspect another file".into(),
                 });
             }
             if request.capabilities.tool_progress {
                 events.push(EngineEvent::ToolProgress {
-                    tool_call_id: format!("{}-tool-1", request.context.run_id),
+                    tool_call_id: format!("{}-tool-1", request.context.run_id()),
                     tool_name: "fake_tool".into(),
                     output_summary: "Halfway complete".into(),
                 });
             }
             if request.capabilities.permission_requests {
                 events.push(EngineEvent::PermissionRequested {
-                    request_id: format!("{}-permission-1", request.context.run_id),
-                    tool_call_id: Some(format!("{}-tool-1", request.context.run_id)),
+                    request_id: format!("{}-permission-1", request.context.run_id()),
+                    tool_call_id: Some(format!("{}-tool-1", request.context.run_id())),
                     title: "Allow fake tool".into(),
                     detail: "The conformance fake requests a deterministic permission".into(),
                 });
                 events.push(EngineEvent::PermissionResolved {
-                    request_id: format!("{}-permission-1", request.context.run_id),
+                    request_id: format!("{}-permission-1", request.context.run_id()),
                     outcome: PermissionOutcome::AllowedOnce,
                 });
             }
             events.push(EngineEvent::ToolFinished {
-                tool_call_id: format!("{}-tool-1", request.context.run_id),
+                tool_call_id: format!("{}-tool-1", request.context.run_id()),
                 tool_name: "fake_tool".into(),
                 output_summary: "Workspace inspected".into(),
                 success: true,
             });
             if request.capabilities.parallel_tool_calls {
                 events.push(EngineEvent::ToolFinished {
-                    tool_call_id: format!("{}-tool-2", request.context.run_id),
+                    tool_call_id: format!("{}-tool-2", request.context.run_id()),
                     tool_name: "fake_parallel_tool".into(),
                     output_summary: "Another file inspected".into(),
                     success: true,
@@ -598,6 +610,7 @@ async fn emit_events(
     abort: &mut oneshot::Receiver<()>,
 ) -> Result<(), EngineError> {
     for event in events {
+        let terminal = event.is_terminal();
         tokio::select! {
             biased;
             _ = &mut *abort => return Err(EngineError::Aborted),
@@ -607,6 +620,9 @@ async fn emit_events(
             biased;
             _ = &mut *abort => return Err(EngineError::Aborted),
             result = sink.send(event) => result.map_err(|_| EngineError::ChannelClosed)?,
+        }
+        if terminal {
+            break;
         }
     }
     Ok(())

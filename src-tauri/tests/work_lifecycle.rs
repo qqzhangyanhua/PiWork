@@ -49,6 +49,7 @@ struct PostReturnOverflowEngine {
 #[derive(Default)]
 struct PromptRecordingEngine {
     prompt: Mutex<Option<String>>,
+    context: Mutex<Option<EngineRunContext>>,
 }
 
 #[async_trait]
@@ -59,10 +60,11 @@ impl EngineAdapter for PromptRecordingEngine {
 
     async fn start(
         &self,
-        _context: EngineRunContext,
+        context: EngineRunContext,
         input: EngineInput,
         sink: mpsc::Sender<EngineEvent>,
     ) -> Result<EngineSessionRef, EngineError> {
+        *self.context.lock().unwrap() = Some(context);
         *self.prompt.lock().unwrap() = Some(input.message);
         sink.send(EngineEvent::RunStarted {
             model_label: "Recording model".into(),
@@ -86,6 +88,40 @@ impl EngineAdapter for PromptRecordingEngine {
     async fn abort(&self, _run_id: &str) -> Result<(), EngineError> {
         Err(EngineError::NotRunning)
     }
+}
+
+#[tokio::test]
+async fn supervisor_passes_real_legacy_execution_identity_to_the_engine() {
+    let harness = TestHarness::new().await;
+    let work = harness.create_work("Engine identity").await;
+    let engine = Arc::new(PromptRecordingEngine::default());
+    let (publisher, _published) = ChannelEventPublisher::channel(16);
+    let supervisor = EngineSupervisor::new(
+        harness.repository.clone(),
+        engine.clone(),
+        Arc::new(publisher),
+        "Recording model",
+    );
+
+    let started = supervisor
+        .start(&work.summary.id, "Inspect identity")
+        .await
+        .unwrap();
+    let run = immediate_run(&started);
+    let context = engine.context.lock().unwrap().clone().unwrap();
+
+    assert_eq!(context.work_id(), work.summary.id);
+    assert_eq!(context.run_id(), run.id);
+    assert_eq!(context.assignment_id(), started.assignment.id);
+    assert_eq!(
+        context.agent_instance_id(),
+        started.assignment.assigned_agent_id
+    );
+    assert_eq!(context.agent_session_id(), work.summary.id);
+    assert_eq!(context.session_generation(), 0);
+    assert_eq!(context.resolved_model_configuration_id(), None);
+    assert_eq!(context.permission_mode(), work.summary.permission_mode);
+    assert_eq!(context.effective_permission(), work.summary.permission_mode);
 }
 
 impl StartCountingEngine {
@@ -840,11 +876,10 @@ impl EngineAdapter for ControlledEngine {
                 .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             let _ = completion_sender.send(());
         });
-        self.state
-            .resources
-            .lock()
-            .await
-            .insert(context.run_id, ControlledResource { cancel, completion });
+        self.state.resources.lock().await.insert(
+            context.run_id().to_owned(),
+            ControlledResource { cancel, completion },
+        );
         self.state.started.add_permits(1);
 
         match self.state.behavior {

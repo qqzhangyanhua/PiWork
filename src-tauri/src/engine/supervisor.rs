@@ -17,7 +17,10 @@ use crate::{
         event::{WorkEventEnvelope, WorkEventPayload},
         work::StartWorkOutput,
     },
-    engine::{EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef},
+    engine::{
+        EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineRunIdentity,
+        EngineSessionRef,
+    },
     error::AppError,
     work::repository::WorkRepository,
 };
@@ -379,12 +382,25 @@ async fn run_lifecycle(
     let user_message = started.user_message;
     set_run_id(&active, &work_id, generation, &run.id).await;
 
-    let context = match EngineRunContext::new(
+    // C5 keeps the legacy one-session-per-Work mapping. Repository-backed
+    // agent sessions and generation rotation belong to the later C6 boundary.
+    let context = match EngineRunIdentity::new(
         work_id.clone(),
         run.id.clone(),
-        PathBuf::from(work.summary.root_path),
-        work.summary.permission_mode,
-    ) {
+        assignment.id.clone(),
+        assignment.assigned_agent_id.clone(),
+        work_id.clone(),
+        0,
+    )
+    .and_then(|identity| {
+        EngineRunContext::new(
+            identity,
+            PathBuf::from(&work.summary.root_path),
+            work.summary.permission_mode,
+            None,
+            work.summary.permission_mode,
+        )
+    }) {
         Ok(context) => context,
         Err(error) => {
             let outcome = finalize_without_abort(
