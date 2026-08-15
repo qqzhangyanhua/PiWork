@@ -19,11 +19,51 @@ describe("App", () => {
 
     expect(instances).toHaveLength(4);
     expect(packs.filter(({ status }) => status === "catalog_only")).toHaveLength(96);
+    expect(packs.filter(({ status }) => status === "executable").map(({ id }) => id)).toEqual([
+      "capability-pack:lead-coordination:v1",
+      "capability-pack:source-research:v1",
+      "capability-pack:engineering-execution:v1",
+      "capability-pack:independent-review:v1",
+    ]);
     expect(team.workId).toBe("work-1");
     expect(team.lead.roleKind).toBe("lead");
     expect(client.validateAgentAssembly).toBeTypeOf("function");
     expect(client.saveAgentCopy).toBeTypeOf("function");
     expect(client.addWorkMember).toBeTypeOf("function");
+  });
+
+  it("returns isolated agent DTOs like the Tauri serialization boundary", async () => {
+    const client = createMockTauriClient();
+    const firstInstances = await client.listAgentInstances();
+    const firstPacks = await client.listCapabilityPacks();
+    const firstTeam = await client.getWorkTeam("work-1");
+    firstInstances[0]!.displayName = "mutated builtin";
+    firstInstances[0]!.definition.capabilityPacks[0]!.name = "mutated nested pack";
+    firstPacks[0]!.name = "mutated catalog";
+    firstTeam.lead.instance.displayName = "mutated lead";
+
+    expect((await client.listAgentInstances())[0]!.displayName).not.toContain("mutated");
+    expect((await client.listCapabilityPacks())[0]!.name).not.toContain("mutated");
+    expect((await client.getWorkTeam("work-1")).lead.instance.displayName).not.toContain("mutated");
+
+    const copy = await client.saveAgentCopy({
+      sourceInstanceId: "agent-instance:piwork-engineer",
+      displayName: "Local engineer",
+      capabilityPackIds: ["capability-pack:engineering-execution:v1"],
+      engineOverride: null,
+      modelConfigurationOverride: null,
+      permissionPolicyOverride: null,
+      parallelismOverride: null,
+    });
+    const copyId = copy.id;
+    copy.displayName = "mutated copy";
+    expect((await client.listAgentInstances()).find(({ id }) => id === copyId)?.displayName)
+      .toBe("Local engineer");
+
+    const added = await client.addWorkMember("work-1", copyId);
+    added.members.find(({ instance }) => instance.id === copyId)!.instance.displayName = "mutated team";
+    expect((await client.getWorkTeam("work-1")).members
+      .find(({ instance }) => instance.id === copyId)?.instance.displayName).toBe("Local engineer");
   });
 
   it("explains that the Vite URL cannot access the desktop backend", () => {

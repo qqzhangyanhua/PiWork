@@ -355,6 +355,7 @@ mod tests {
     #[test]
     fn production_registers_every_agent_command() {
         let source = include_str!("lib.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
         for command in [
             "agent::commands::list_agent_instances",
             "agent::commands::list_capability_packs",
@@ -363,20 +364,36 @@ mod tests {
             "agent::commands::save_agent_copy",
             "agent::commands::add_work_member",
         ] {
-            assert!(source.contains(command), "missing {command}");
+            assert!(production.contains(command), "missing {command}");
         }
     }
 
-    #[test]
-    fn production_agent_allowlists_match_executable_b_stage_packs() {
+    #[tokio::test]
+    async fn production_agent_allowlists_match_migrated_executable_packs() {
+        let database = crate::storage::sqlite::Database::open_in_memory()
+            .await
+            .unwrap();
+        let requirements: Vec<(String, String)> = sqlx::query_as(
+            "SELECT required_tools_json, required_engine_capabilities_json \
+             FROM capability_packs WHERE status = 'executable'",
+        )
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+        let mut tools = std::collections::BTreeSet::new();
+        let mut engine_capabilities = std::collections::BTreeSet::new();
+        for (required_tools, required_engine_capabilities) in requirements {
+            tools.extend(serde_json::from_str::<Vec<String>>(&required_tools).unwrap());
+            engine_capabilities.extend(
+                serde_json::from_str::<Vec<String>>(&required_engine_capabilities).unwrap(),
+            );
+        }
+
+        assert_eq!(super::production_agent_tools(), tools,);
         assert_eq!(
-            super::production_agent_tools(),
-            ["bash", "edit", "find", "grep", "ls", "read", "write"]
-                .into_iter()
-                .map(String::from)
-                .collect()
+            super::production_agent_engine_capabilities(),
+            engine_capabilities,
         );
-        assert!(super::production_agent_engine_capabilities().is_empty());
     }
 
     #[test]

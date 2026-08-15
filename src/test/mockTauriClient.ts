@@ -88,9 +88,16 @@ export const createMockTauriClient = (): MockTauriClient => {
   const resourcesByDraft = new Map<string, ResourceSummary[]>();
   const thumbnailByResource = new Map<string, ResourceThumbnail>();
   const unlisten = vi.fn(() => handlers.clear());
+  const cloneDto = <T,>(value: T): T => structuredClone(value);
   const roleKinds = ["lead", "researcher", "engineer", "reviewer"] as const;
+  const executablePackIds = {
+    lead: "capability-pack:lead-coordination:v1",
+    researcher: "capability-pack:source-research:v1",
+    engineer: "capability-pack:engineering-execution:v1",
+    reviewer: "capability-pack:independent-review:v1",
+  } as const;
   const executablePacks: CapabilityPackSummary[] = roleKinds.map((roleKind) => ({
-    id: `capability-pack:${roleKind}:v1`,
+    id: executablePackIds[roleKind],
     catalogCapabilityId: null,
     name: `${roleKind} capability`,
     description: `${roleKind} executable capability`,
@@ -186,12 +193,14 @@ export const createMockTauriClient = (): MockTauriClient => {
     return { workId, lead: members[0]!, members };
   };
   const listAgentInstances: Mock<PiWorkClient["listAgentInstances"]> = vi.fn(
-    async () => [...agentInstances],
+    async () => cloneDto(agentInstances),
   );
   const listCapabilityPacks: Mock<PiWorkClient["listCapabilityPacks"]> = vi.fn(
-    async () => [...executablePacks, ...catalogPacks],
+    async () => cloneDto([...executablePacks, ...catalogPacks]),
   );
-  const getWorkTeam: Mock<PiWorkClient["getWorkTeam"]> = vi.fn(async (workId) => workTeam(workId));
+  const getWorkTeam: Mock<PiWorkClient["getWorkTeam"]> = vi.fn(
+    async (workId) => cloneDto(workTeam(workId)),
+  );
   const validateAgentAssembly: Mock<PiWorkClient["validateAgentAssembly"]> = vi.fn(
     async (_input: SaveAgentAssemblyInput): Promise<AssemblyDiagnostic[]> => [],
   );
@@ -216,15 +225,15 @@ export const createMockTauriClient = (): MockTauriClient => {
       parallelismOverride: input.parallelismOverride,
       builtin: false,
     };
-    agentInstances.push(copy);
-    return copy;
+    agentInstances.push(cloneDto(copy));
+    return cloneDto(copy);
   });
   const addWorkMember: Mock<PiWorkClient["addWorkMember"]> = vi.fn(
     async (workId, agentInstanceId) => {
       const instance = agentInstances.find(({ id }) => id === agentInstanceId);
       if (!instance) throw new Error(`Agent instance not found: ${agentInstanceId}`);
       teamMembersByWork.set(workId, [...(teamMembersByWork.get(workId) ?? []), instance]);
-      return workTeam(workId);
+      return cloneDto(workTeam(workId));
     },
   );
   const getRuntimeStatus: Mock<Required<PiWorkClient>["getRuntimeStatus"]> = vi.fn(async () => ({
