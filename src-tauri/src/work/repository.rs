@@ -1373,6 +1373,30 @@ mod tests {
             .begin_run(&work.summary.id, "Start", &[], "test-engine", "test-model")
             .await
             .unwrap();
+        let assigned_agent_id: String =
+            sqlx::query_scalar("SELECT agent_instance_id FROM work_leads WHERE work_id = ?")
+                .bind(&work.summary.id)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        let assignment_timestamp = Utc::now();
+        sqlx::query(
+            "INSERT INTO assignments ( \
+                 id, work_id, assigned_agent_id, kind, side_effect, title, instruction, \
+                 context_manifest_json, expected_result_schema_json, acceptance_criteria_json, \
+                 permission_scope_json, priority, status, attempt_count, max_attempts, \
+                 created_at, updated_at \
+             ) VALUES ('assignment-1', ?, ?, 'lead', 'read_only', 'Activity context', \
+                 'Round-trip assignment event identity', '{}', '{}', '[]', '{}', 0, \
+                 'queued', 0, 1, ?, ?)",
+        )
+        .bind(&work.summary.id)
+        .bind(&assigned_agent_id)
+        .bind(assignment_timestamp)
+        .bind(assignment_timestamp)
+        .execute(database.pool())
+        .await
+        .unwrap();
         let envelope = WorkEventEnvelope {
             version: 2,
             event_id: Some("event-1".into()),
