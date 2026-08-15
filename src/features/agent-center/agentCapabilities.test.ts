@@ -14,6 +14,13 @@ describe("Magic Factory agent capabilities", () => {
     expect(AGENT_CAPABILITIES.map(({ id }) => id)).toEqual(
       Array.from({ length: 96 }, (_, index) => index + 1),
     );
+    expect(AGENT_CAPABILITIES.map(({ catalogId }) => catalogId)).toEqual(
+      Array.from(
+        { length: 96 },
+        (_, index) => `catalog-capability:${String(index + 1).padStart(3, "0")}`,
+      ),
+    );
+    expect(new Set(AGENT_CAPABILITIES.map(({ catalogId }) => catalogId)).size).toBe(96);
     expect(AGENT_CAPABILITY_DOMAINS).toHaveLength(9);
     expect(AGENT_CAPABILITIES.filter(({ priority }) => priority === "P0")).toHaveLength(23);
     expect(

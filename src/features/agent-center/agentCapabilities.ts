@@ -1,3 +1,5 @@
+import type { CapabilityPackStatus } from "../../bindings";
+
 export type CapabilityPriority = "P0" | "P1" | "P2";
 
 export type AgentCapabilityDomainId =
@@ -13,6 +15,9 @@ export type AgentCapabilityDomainId =
 
 export type AgentCapability = {
   id: number;
+  catalogId: `catalog-capability:${string}`;
+  status: CapabilityPackStatus;
+  capabilityPackId: string;
   name: string;
   domainId: AgentCapabilityDomainId;
   priority: CapabilityPriority;
@@ -82,6 +87,10 @@ type CapabilityRow = readonly [
   implementation: string,
   priority: CapabilityPriority,
 ];
+
+export function getCatalogCapabilityId(id: number): AgentCapability["catalogId"] {
+  return `catalog-capability:${String(id).padStart(3, "0")}`;
+}
 
 const ROWS: CapabilityRow[] = [
   [1, "智能任务分流智能体", "innovation-service", "外部用户、平台运营", "判断用户是在提想法、交资料、查项目、询价还是寻求生态服务", "任务类型、推荐路径、工作流入口", "意图分类 + 规则路由", "P0"],
@@ -203,17 +212,23 @@ export const AGENT_CAPABILITIES: AgentCapability[] = ROWS.map(([
   outputs,
   implementation,
   priority,
-]) => ({
-  id,
-  name,
-  domainId,
-  priority,
-  audiences: [audiences],
-  coreCapability,
-  outputs: [outputs],
-  implementation,
-  suggestedInputs: [...SUGGESTED_INPUTS[domainId]],
-}));
+]) => {
+  const catalogId = getCatalogCapabilityId(id);
+  return {
+    id,
+    catalogId,
+    status: "catalog_only",
+    capabilityPackId: catalogId,
+    name,
+    domainId,
+    priority,
+    audiences: [audiences],
+    coreCapability,
+    outputs: [outputs],
+    implementation,
+    suggestedInputs: [...SUGGESTED_INPUTS[domainId]],
+  };
+});
 
 export function filterCapabilities(
   items: readonly AgentCapability[],
