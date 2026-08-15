@@ -76,6 +76,7 @@ pub struct QueueCompletion {
 pub enum QueueRelease {
     Completed {
         item: QueueItem,
+        continuation_inputs: Vec<QueueInput>,
     },
     Requeued {
         item: QueueItem,
@@ -337,14 +338,11 @@ impl WorkQueue {
         match completion.outcome {
             QueueOutcome::Completed => {
                 let completed = claim.item;
-                if withheld.is_empty() {
-                    self.known_ids.remove(&completed.id);
-                } else {
-                    let mut continuation = completed.clone();
-                    continuation.inputs = withheld;
-                    self.requeue_existing(continuation);
+                self.known_ids.remove(&completed.id);
+                QueueRelease::Completed {
+                    item: completed,
+                    continuation_inputs: withheld,
                 }
-                QueueRelease::Completed { item: completed }
             }
             QueueOutcome::PoolExhausted => {
                 merge_inputs(&mut claim.item.inputs, withheld);
@@ -1354,6 +1352,89 @@ mod tests {
             queue.release(complete(&claim, instant(4), QueueOutcome::Cancelled)),
             QueueRelease::Cancelled { .. }
         ));
+    }
+
+    #[test]
+    fn normal_completion_releases_original_ownership_and_exposes_continuation_once() {
+        let mut configured = limits();
+        configured.max_pending_per_work = 1;
+        configured.max_batch_size = 3;
+        configured.global_parallelism = 1;
+        let mut queue = WorkQueue::hydrate(
+            [
+                item("assignment", "work-a", "agent-a", instant(0)),
+                item("waiting", "work-b", "agent-b", instant(1)),
+            ],
+            configured,
+        )
+        .expect("valid queue");
+        let claim = queue.next_claim(instant(2)).expect("claim");
+        queue
+            .push_input("assignment", input("03-later-id", instant(3)))
+            .expect("first continuation input");
+        queue
+            .push_input("assignment", input("02-earlier-id", instant(3)))
+            .expect("second continuation input");
+
+        let release = queue.release(complete(&claim, instant(4), QueueOutcome::Completed));
+        let QueueRelease::Completed {
+            item: completed,
+            continuation_inputs,
+        } = release
+        else {
+            panic!("normal completion should expose its continuation inputs")
+        };
+        assert_eq!(completed.id, "assignment");
+        assert_eq!(
+            continuation_inputs
+                .iter()
+                .map(|input| input.id.as_str())
+                .collect::<Vec<_>>(),
+            ["02-earlier-id", "03-later-id"]
+        );
+        assert_eq!(queue.owned_count("work-a"), 0);
+        assert!(!queue.inflight_by_work.contains_key("work-a"));
+        assert!(!queue.known_ids.contains("assignment"));
+
+        queue
+            .push(item("replacement", "work-a", "agent-a", instant(5)))
+            .expect("completion releases the Work depth slot");
+        let live = queue
+            .next_claim(instant(5))
+            .expect("completion releases global capacity");
+        assert_eq!(live.item.id, "waiting");
+        assert!(matches!(
+            queue.release(complete(&claim, instant(5), QueueOutcome::Completed)),
+            QueueRelease::Rejected {
+                reason: CompletionRejection::UnknownOrExpiredClaim,
+                item: None,
+                ..
+            }
+        ));
+        assert_eq!(queue.inflight_by_work.get("work-b"), Some(&live));
+        assert_eq!(queue.owned_count("work-a"), 1);
+    }
+
+    #[test]
+    fn normal_completion_without_withheld_inputs_exposes_empty_continuation() {
+        let mut queue = WorkQueue::hydrate(
+            [item("assignment", "work-a", "agent-a", instant(0))],
+            limits(),
+        )
+        .expect("valid queue");
+        let claim = queue.next_claim(instant(1)).expect("claim");
+
+        let QueueRelease::Completed {
+            item,
+            continuation_inputs,
+        } = queue.release(complete(&claim, instant(2), QueueOutcome::Completed))
+        else {
+            panic!("normal completion should be observable")
+        };
+        assert_eq!(item.id, "assignment");
+        assert!(continuation_inputs.is_empty());
+        assert_eq!(queue.owned_count("work-a"), 0);
+        assert!(!queue.known_ids.contains("assignment"));
     }
 
     #[test]
