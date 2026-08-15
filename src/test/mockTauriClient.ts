@@ -281,7 +281,8 @@ export const createMockTauriClient = (): MockTauriClient => {
       instance,
       roleKind: instance.definition.roleKind,
       status: "joined" as const,
-      permissionPolicy: instance.definition.defaultPermissionPolicy,
+      permissionPolicy:
+        instance.permissionPolicyOverride ?? instance.definition.defaultPermissionPolicy,
       joinedAt: now(0),
       updatedAt: now(0),
     }));
@@ -312,6 +313,16 @@ export const createMockTauriClient = (): MockTauriClient => {
     const selectedPacks = input.capabilityPackIds.map((packId) =>
       capabilityPacks.find(({ id }) => id === packId)!,
     );
+    const sourcePermission = source.permissionPolicyOverride === null
+      ? source.definition.defaultPermissionPolicy
+      : leastPermission(
+        source.definition.defaultPermissionPolicy,
+        source.permissionPolicyOverride,
+      );
+    const effectivePermission = leastPermission(
+      sourcePermission,
+      input.permissionPolicyOverride ?? sourcePermission,
+    );
     const copy: AgentInstanceSummary = {
       ...source,
       id: `agent-instance:local:${agentInstances.length + 1}`,
@@ -319,6 +330,7 @@ export const createMockTauriClient = (): MockTauriClient => {
         ...source.definition,
         id: `agent-definition:local:${agentInstances.length + 1}:v1`,
         name: input.displayName,
+        defaultPermissionPolicy: effectivePermission,
         capabilityPacks: selectedPacks,
         builtin: false,
       },

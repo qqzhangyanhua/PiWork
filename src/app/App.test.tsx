@@ -101,6 +101,38 @@ describe("App", () => {
       .find(({ instance }) => instance.id === copyId)?.instance.displayName).toBe("Local engineer");
   });
 
+  it("persists a narrowed permission in the copied definition and Work membership", async () => {
+    const client = createMockTauriClient();
+    const work = await client.createWork({
+      title: "Narrowed Agent permission",
+      goal: "Preserve resolved assembly authority",
+      rootPath: "D:/workspace",
+      permissionMode: "balanced",
+      resourceDraftId: null,
+    });
+    const sourceBefore = (await client.listAgentInstances()).find(
+      ({ id }) => id === "agent-instance:piwork-engineer",
+    )!;
+
+    const copy = await client.saveAgentCopy({
+      sourceInstanceId: sourceBefore.id,
+      displayName: "Read-only engineer",
+      capabilityPackIds: [],
+      engineOverride: null,
+      modelConfigurationOverride: null,
+      permissionPolicyOverride: "read_only",
+      parallelismOverride: null,
+    });
+    const team = await client.addWorkMember(work.summary.id, copy.id);
+    const member = team.members.find(({ instance }) => instance.id === copy.id)!;
+
+    expect.soft(copy.definition.defaultPermissionPolicy).toBe("read_only");
+    expect.soft(copy.permissionPolicyOverride).toBe("read_only");
+    expect.soft(member.permissionPolicy).toBe("read_only");
+    expect((await client.listAgentInstances()).find(({ id }) => id === sourceBefore.id))
+      .toEqual(sourceBefore);
+  });
+
   it("fails closed when validating or saving invalid agent assemblies", async () => {
     const client = createMockTauriClient();
     const base: SaveAgentAssemblyInput = {
