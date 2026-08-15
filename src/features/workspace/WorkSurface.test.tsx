@@ -1520,21 +1520,26 @@ describe("WorkSurface", () => {
     expect(within(sidebar).getByRole("button", { name: "数据源（即将推出）" })).toBeDisabled();
   });
 
-  it("从能力详情生成可编辑的新对话草稿且不会自动发送", async () => {
+  it("shows_catalog_badges_and_keeps_prompt_drafting", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     render(<WorkSurface client={client} initialView="home" />);
 
     const sidebar = await screen.findByRole("complementary", { name: "项目与对话" });
     await user.click(within(sidebar).getByRole("button", { name: "智能体中心" }));
+    await user.click(await screen.findByRole("tab", { name: "能力库" }));
+    expect(screen.getAllByText("目录能力").length).toBeGreaterThan(0);
     await user.click(await screen.findByRole("button", { name: "查看需求澄清智能体详情" }));
-    await user.click(within(screen.getByRole("dialog", { name: "需求澄清智能体" })).getByRole("button", { name: "开始使用" }));
+    const capabilityDialog = screen.getByRole("dialog", { name: "需求澄清智能体" });
+    expect(within(capabilityDialog).getByText("目录能力")).toBeInTheDocument();
+    await user.click(within(capabilityDialog).getByRole("button", { name: "创建任务草稿" }));
 
     const home = await screen.findByRole("region", { name: "对话主页" });
     const editor = within(home).getByLabelText("首个任务");
     expect(editor).toHaveTextContent("需求澄清智能体");
     expect(editor).toHaveTextContent("业务目标：");
     expect(client.createWork).not.toHaveBeenCalled();
+    expect(client.startWork).not.toHaveBeenCalled();
   });
 
   it("侧栏设置导航项打开设置页", async () => {

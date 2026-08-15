@@ -191,7 +191,11 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
           {diagnosticsOpen && <pre className="diagnostics">{formatAppErrorDiagnostics(pageError, t("diagnostics.unavailable"))}</pre>}
         </AnimatedSurfaceState>
       ) : activeView === "agents" ? (
-        <AgentCenterPage onStartCapability={startCapability} />
+        <AgentCenterPage
+          client={client}
+          currentWorkId={selectedWork?.id}
+          onStartCatalogCapability={startCapability}
+        />
       ) : activeView === "settings" ? (
         <SettingsPage
           client={client}

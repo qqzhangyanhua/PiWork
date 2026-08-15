@@ -116,10 +116,26 @@
   "agentCenter": {
     "title": "智能体中心",
     "headerKicker": "制造业工程化智能工作平台",
-    "eyebrow": "MAGIC FACTORY · 能力中台",
-    "description": "不是 96 个彼此独立的机器人，而是一套按真实业务节点组合人、AI、知识与工具的专业能力系统。",
-    "stats": { "label": "能力目录统计", "domains": "大能力域", "capabilities": "项能力", "p0": "项首期能力" },
-    "views": { "label": "能力中心视图", "recommended": "首期推荐", "all": "全部能力" },
+    "eyebrow": "MAGIC FACTORY · 持久团队",
+    "descriptions": {
+      "team": "四个长期成员各有明确职责、权限和能力边界；他们只在加入 Work 或接受任务时运行。",
+      "library": "96 项业务能力按真实状态展示：目录能力用于创建任务草稿，可执行能力包才可装配到成员。"
+    },
+    "stats": {
+      "teamLabel": "长期团队统计", "libraryLabel": "能力目录统计",
+      "members": "位长期成员", "leads": "位主理人", "systemPacks": "个系统基础能力",
+      "domains": "大能力域", "capabilities": "项能力", "p0": "项首期能力"
+    },
+    "views": { "label": "智能体中心视图", "team": "我的团队", "library": "能力库" },
+    "loading": "正在读取团队和能力库…",
+    "loadError": "无法加载团队和能力库",
+    "team": {
+      "kicker": "长期成员", "title": "我的专业团队",
+      "description": "查看每个成员的职责、权限、Engine 与固定系统能力。",
+      "currentWorkHint": "可从成员详情把合适成员提前加入当前 Work。",
+      "runtimeNote": "这里展示长期身份，不展示伪造的运行状态；Assignment 上线后才会出现真实执行态。"
+    },
+    "libraryViews": { "label": "能力库浏览方式", "recommended": "首期推荐", "all": "全部能力" },
     "paths": { "kicker": "建设路径", "title": "从业务闭环发现能力", "description": "先选择要推进的业务阶段，再查看这一阶段会组合调用的专业能力。" },
     "recommended": { "kicker": "路径能力", "count": "当前路径包含 {{count}} 项能力" },
     "catalog": { "kicker": "能力目录", "title": "探索全部 96 项能力", "description": "按关键词、能力域和建设优先级组合筛选。" },
@@ -130,11 +146,60 @@
     },
     "results": "找到 {{count}} 项能力",
     "empty": { "title": "没有匹配的能力", "body": "换一个关键词，或清除当前领域和优先级筛选。", "clear": "清除筛选" },
-    "capability": { "open": "查看{{name}}详情", "viewDetails": "查看详情" },
+    "capability": {
+      "open": "查看{{name}}详情", "viewDetails": "查看详情",
+      "status": { "catalog_only": "目录能力", "executable": "可装载", "deprecated": "已停用" }
+    },
+    "member": {
+      "open": "查看{{name}}详情", "lead": "主理人", "modelDefault": "默认模型",
+      "systemPacks": "系统基础能力", "permission": "权限", "runtime": "Engine / Model",
+      "version": "定义 v{{version}}", "inCurrentWork": "已加入当前 Work", "longLived": "长期成员",
+      "builtin": "内置成员", "local": "本地副本", "identityStable": "持久身份",
+      "roles": { "lead": "主理", "researcher": "研究", "engineer": "工程", "reviewer": "审阅" },
+      "status": { "active": "已启用", "inactive": "未启用" },
+      "permissions": { "inherit_work": "继承 Work", "read_only": "只读", "work_write": "Work 内可写" }
+    },
+    "memberDrawer": {
+      "close": "关闭成员详情", "responsibilities": "长期职责", "boundaries": "明确边界",
+      "loadedPacks": "已装载能力", "engineModel": "Engine / Model", "memory": "记忆策略",
+      "memoryPolicies": { "confirmed_only": "仅保留已确认记忆" },
+      "tools": "工具", "noTools": "未声明工具", "participatingWorks": "已参与 Work",
+      "noParticipatingWorks": "暂无可用的参与记录。", "adding": "正在加入…",
+      "addToWork": "加入当前 Work", "noCurrentWork": "先选择一个 Work，才能把成员加入其中。"
+    },
+    "assembler": {
+      "kicker": "成员装配", "title": "自定义长期成员", "builtinSource": "内置来源 · 只读",
+      "localSource": "本地来源", "readonlyNote": "内置成员为只读；自定义会创建本地副本。",
+      "customize": "自定义副本", "copySuffix": " 副本", "displayName": "成员名称",
+      "engine": "Engine 覆盖", "model": "Model 覆盖", "permission": "权限策略",
+      "inheritDefinition": "使用定义默认值", "parallelism": "并行上限",
+      "systemPacks": "系统基础能力", "fixedInherited": "随角色固定继承，不可卸载",
+      "businessPacks": "业务能力包", "executableCount": "{{count}} 个可装载",
+      "catalogOnlyCount": "{{count}} 项目录能力暂不可安装",
+      "catalogOnlyReason": "它们尚未补齐可执行指令、工具合同和验证规则；复制仍可保存基础覆盖项。",
+      "validation": "装配校验", "validating": "正在校验装配…", "valid": "服务端校验通过",
+      "displayNameRequired": "请输入成员名称后再保存。",
+      "validationFailed": "无法完成装配校验", "repair": "修复建议", "saving": "正在保存…",
+      "save": "保存长期成员",
+      "diagnostics": {
+        "not_executable": "移除未就绪的能力包，或等待它升级为可装载能力。",
+        "incompatible_role": "移除不兼容能力包，或改用兼容的角色模板。",
+        "missing_tool": "为所选 Engine 提供所需工具，或移除该能力包。",
+        "missing_engine_capability": "更换具备所需能力的 Engine，或移除该能力包。",
+        "permission_escalation": "降低能力要求或选择不会扩大来源成员权限的策略。",
+        "capability_conflict": "移除互相冲突的能力包，只保留一种工作方式。",
+        "context_budget_exceeded": "减少能力包或缩短装配指令后重试。"
+      }
+    },
     "drawer": {
       "close": "关闭详情", "catalogId": "能力编号 #{{id}}", "audiences": "使用对象",
       "coreCapability": "核心能力", "outputs": "主要输出", "implementation": "实现方式",
-      "preparation": "使用前准备", "startHint": "将生成一份可编辑任务草稿，确认资料和约束后再发送。", "start": "开始使用"
+      "preparation": "使用前准备", "availability": "当前可用性",
+      "catalogOnlyReason": "该能力仍是目录说明，尚未具备可装载所需的指令、工具与验证合同。",
+      "deprecatedReason": "该能力已停用，仅保留历史说明。",
+      "startHint": "将创建一份可编辑任务草稿，确认资料和约束后再发送。",
+      "createDraft": "创建任务草稿", "assembleHint": "选择兼容成员并进入装配；此操作不会启动 Assignment。",
+      "chooseMember": "选择成员装配", "deprecatedHint": "已停用能力不提供任务或装配入口。"
     }
   },
   "workspace": {

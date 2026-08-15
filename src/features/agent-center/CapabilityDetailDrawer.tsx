@@ -1,8 +1,8 @@
-import { ArrowRight, X } from "lucide-react";
+import { ArrowRight, PackagePlus, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AgentCapability } from "./agentCapabilities";
+import type { CapabilityLibraryItem } from "./agentCapabilities";
 
 const FOCUSABLE = "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
 
@@ -11,13 +11,15 @@ export function CapabilityDetailDrawer({
   domainName,
   returnFocusTo,
   onClose,
-  onStart,
+  onAssemble,
+  onStartCatalog,
 }: {
-  capability: AgentCapability;
+  capability: CapabilityLibraryItem;
   domainName: string;
   returnFocusTo: HTMLButtonElement | null;
   onClose(): void;
-  onStart(): void;
+  onAssemble(): void;
+  onStartCatalog(): void;
 }) {
   const { t } = useTranslation();
   const drawerRef = useRef<HTMLElement>(null);
@@ -84,6 +86,9 @@ export function CapabilityDetailDrawer({
         </header>
 
         <div className="capability-drawer__meta">
+          <span className={`capability-status capability-status--${capability.status}`}>
+            {t(`agentCenter.capability.status.${capability.status}`)}
+          </span>
           <span className={`capability-priority capability-priority--${capability.priority.toLocaleLowerCase()}`}>
             {capability.priority}
           </span>
@@ -111,13 +116,38 @@ export function CapabilityDetailDrawer({
             <h3>{t("agentCenter.drawer.preparation")}</h3>
             <ul>{capability.suggestedInputs.map((input) => <li key={input}>{input}</li>)}</ul>
           </section>
+          {capability.status === "catalog_only" && (
+            <section className="capability-drawer__availability">
+              <h3>{t("agentCenter.drawer.availability")}</h3>
+              <p>{t("agentCenter.drawer.catalogOnlyReason")}</p>
+            </section>
+          )}
+          {capability.status === "deprecated" && (
+            <section className="capability-drawer__availability is-deprecated">
+              <h3>{t("agentCenter.drawer.availability")}</h3>
+              <p>{t("agentCenter.drawer.deprecatedReason")}</p>
+            </section>
+          )}
         </div>
 
         <footer className="capability-drawer__footer">
-          <p>{t("agentCenter.drawer.startHint")}</p>
-          <button className="capability-drawer__start" onClick={onStart} type="button">
-            {t("agentCenter.drawer.start")}<ArrowRight aria-hidden="true" size={16} />
-          </button>
+          {capability.status === "catalog_only" && (
+            <>
+              <p>{t("agentCenter.drawer.startHint")}</p>
+              <button className="capability-drawer__start" onClick={onStartCatalog} type="button">
+                {t("agentCenter.drawer.createDraft")}<ArrowRight aria-hidden="true" size={16} />
+              </button>
+            </>
+          )}
+          {capability.status === "executable" && (
+            <>
+              <p>{t("agentCenter.drawer.assembleHint")}</p>
+              <button className="capability-drawer__start" onClick={onAssemble} type="button">
+                {t("agentCenter.drawer.chooseMember")}<PackagePlus aria-hidden="true" size={16} />
+              </button>
+            </>
+          )}
+          {capability.status === "deprecated" && <p>{t("agentCenter.drawer.deprecatedHint")}</p>}
         </footer>
       </aside>
     </div>

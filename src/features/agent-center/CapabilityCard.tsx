@@ -2,10 +2,10 @@ import { ArrowUpRight, Bot } from "lucide-react";
 import { forwardRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AgentCapability } from "./agentCapabilities";
+import type { CapabilityLibraryItem } from "./agentCapabilities";
 
 export const CapabilityCard = forwardRef<HTMLButtonElement, {
-  capability: AgentCapability;
+  capability: CapabilityLibraryItem;
   domainName: string;
   onOpen(trigger: HTMLButtonElement): void;
 }>(function CapabilityCard({ capability, domainName, onOpen }, ref) {
@@ -22,8 +22,13 @@ export const CapabilityCard = forwardRef<HTMLButtonElement, {
     >
       <span className="capability-card__topline">
         <span className="capability-card__icon" aria-hidden="true"><Bot size={17} /></span>
-        <span className={`capability-priority capability-priority--${capability.priority.toLocaleLowerCase()}`}>
-          {capability.priority}
+        <span className="capability-card__badges">
+          <span className={`capability-status capability-status--${capability.status}`}>
+            {t(`agentCenter.capability.status.${capability.status}`)}
+          </span>
+          <span className={`capability-priority capability-priority--${capability.priority.toLocaleLowerCase()}`}>
+            {capability.priority}
+          </span>
         </span>
       </span>
       <span className="capability-card__body">
