@@ -341,6 +341,12 @@ mod tests {
                 && start.contains("userMessage: UserMessageSummary")
         );
 
+        let session = std::fs::read_to_string(output_dir.join("AgentSessionSummary.ts")).unwrap();
+        assert!(
+            !session.contains("engineSessionId"),
+            "AgentSessionSummary must not expose the opaque Engine session reference"
+        );
+
         let permission = std::fs::read_to_string(output_dir.join("PermissionMode.ts")).unwrap();
         assert!(permission.contains("\"ask_every_step\" | \"balanced\" | \"auto_execute\""));
     }

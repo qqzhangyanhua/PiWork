@@ -100,7 +100,6 @@ pub struct AgentSessionSummary {
     pub agent_instance_id: String,
     pub engine_kind: String,
     pub generation: u32,
-    pub engine_session_id: Option<String>,
     pub current_assignment_id: Option<String>,
     pub last_successful_turn_id: Option<String>,
     pub rotation_reason: Option<String>,
@@ -304,7 +303,6 @@ mod tests {
             agent_instance_id: "agent-1".into(),
             engine_kind: "codex".into(),
             generation: 2,
-            engine_session_id: Some("engine-session-1".into()),
             current_assignment_id: Some("assignment-1".into()),
             last_successful_turn_id: Some("turn-1".into()),
             rotation_reason: Some("context_limit".into()),
@@ -341,6 +339,7 @@ mod tests {
         assert_eq!(session["generation"], 2);
         assert_eq!(session["lastSuccessfulTurnId"], "turn-1");
         assert_eq!(session["rotationReason"], "context_limit");
+        assert!(session.get("engineSessionId").is_none());
         assert_eq!(
             serde_json::to_value(queued).unwrap()["referencedFiles"][0],
             "src/main.rs"

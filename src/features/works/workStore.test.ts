@@ -155,6 +155,28 @@ const workDetail = (): WorkDetail => ({
 });
 
 describe("createWorkStore", () => {
+  it("keeps mock legacy start output non-durable and opaque", async () => {
+    const client = createMockTauriClient();
+    client.seed(workDetail());
+
+    const output = await client.startWork("w1", "Investigate");
+
+    expect(output.assignment).toMatchObject({
+      id: `legacy-run:${output.run?.id}`,
+      workId: "w1",
+      status: "running",
+      contextManifest: null,
+      expectedResultSchema: null,
+      acceptanceCriteria: null,
+      permissionScope: null,
+    });
+    expect(output.run).toMatchObject({
+      assignmentId: null,
+      agentInstanceId: null,
+    });
+    expect((await client.getWork("w1")).events).toEqual([]);
+  });
+
   it("imports Work resources and keeps failed files isolated", async () => {
     const client = createMockTauriClient();
     client.seed(workDetail());

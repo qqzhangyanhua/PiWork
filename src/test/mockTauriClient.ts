@@ -537,11 +537,12 @@ export const createMockTauriClient = (): MockTauriClient => {
     const detail = details.get(workId);
     if (!detail) throw new Error(`Work not found: ${workId}`);
     const id = `run-${++runSequence}`;
+    const legacyAssignmentId = `legacy-run:${id}`;
     const run: RunSummary = {
       id,
       workId,
-      assignmentId: `assignment-${runSequence}`,
-      agentInstanceId: "00000000-0000-0000-0000-000000000001",
+      assignmentId: null,
+      agentInstanceId: null,
       engineKind: "fake",
       engineSessionId: `session-${runSequence}`,
       modelLabel: "Fake model",
@@ -565,16 +566,20 @@ export const createMockTauriClient = (): MockTauriClient => {
     detail.summary.updatedAt = run.createdAt;
       return {
         assignment: assignmentSummary({
-          id: run.assignmentId ?? `assignment-${runSequence}`,
+          id: legacyAssignmentId,
           workId,
           instruction: prompt.trim(),
+          contextManifest: null,
+          expectedResultSchema: null,
+          acceptanceCriteria: null,
+          permissionScope: null,
           createdAt: run.createdAt,
-          claimedAt: run.createdAt,
+          claimedAt: null,
           startedAt: run.createdAt,
           updatedAt: run.createdAt,
         }),
         run,
-        userMessage,
+        userMessage: { ...userMessage, assignmentId: legacyAssignmentId },
       } satisfies StartWorkOutput;
     },
   );
