@@ -21,6 +21,7 @@ const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_JSON_BYTES: usize = 1024 * 1024;
 const MAX_OUTBOX_ERROR_BYTES: usize = 512;
 const ASSIGNMENT_EVENT_VERSION: u32 = 2;
+const OUTBOX_BATCH_SIZE: i64 = 64;
 const OUTBOX_LEASE_DURATION: chrono::Duration = chrono::Duration::seconds(30);
 const OUTBOX_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RECOVERY_RETRY_BASE: Duration = Duration::from_secs(1);
@@ -1116,7 +1117,7 @@ impl AssignmentRepository {
         .await?)
     }
 
-    /// Drains one globally ordered snapshot of undelivered Assignment events.
+    /// Drains globally ordered, fixed-size batches of undelivered Assignment events.
     ///
     /// Delivery is at-least-once across the publish/ack crash boundary. Every v2 Assignment event
     /// has a stable `event_id`; sinks and consumers must use it as their idempotency key. A batch
@@ -1124,56 +1125,62 @@ impl AssignmentRepository {
     /// lock while the external sink runs. Only the exclusive startup recovery path reclaims a
     /// delivery, so a slow in-flight sink is never stolen after a wall-clock deadline.
     pub async fn drain_pending_events(&self) -> Result<OutboxDrainReport, AppError> {
-        let (mut claim_guard, events) = loop {
-            if let Some(claimed) = self.claim_pending_batch().await? {
-                break claimed;
-            }
-            if self.pending_event_deliveries().await?.is_empty() {
-                return Ok(OutboxDrainReport {
-                    attempted: 0,
-                    published: 0,
-                    failed_event_ids: Vec::new(),
-                });
-            }
-            tokio::time::sleep(OUTBOX_CLAIM_POLL_INTERVAL).await;
-        };
-        let lease_token = claim_guard.lease_token().to_owned();
         let mut report = OutboxDrainReport {
-            attempted: events.len(),
+            attempted: 0,
             published: 0,
             failed_event_ids: Vec::new(),
         };
-        for event in events {
-            let event_id = event
-                .event_id
-                .as_deref()
-                .expect("outbox events have stable IDs");
-            if let Err(error) = self.record_delivery_attempt(event_id, &lease_token).await {
-                let _ = self.release_claimed_batch_after_error(&lease_token).await;
-                return Err(error);
+        loop {
+            let (mut claim_guard, events) = loop {
+                if let Some(claimed) = self.claim_pending_batch().await? {
+                    break claimed;
+                }
+                if self.pending_event_deliveries().await?.is_empty() {
+                    return Ok(report);
+                }
+                tokio::time::sleep(OUTBOX_CLAIM_POLL_INTERVAL).await;
+            };
+            let lease_token = claim_guard.lease_token().to_owned();
+            let mut publish_failed = false;
+            for event in events {
+                let event_id = event
+                    .event_id
+                    .as_deref()
+                    .expect("outbox events have stable IDs");
+                if let Err(error) = self.record_delivery_attempt(event_id, &lease_token).await {
+                    let _ = self.release_claimed_batch_after_error(&lease_token).await;
+                    return Err(error);
+                }
+                report.attempted += 1;
+                match self.event_sink.publish(event.clone()) {
+                    Ok(()) => {
+                        if let Err(error) = self.acknowledge_delivery(event_id, &lease_token).await
+                        {
+                            let _ = self.release_claimed_batch_after_error(&lease_token).await;
+                            return Err(error);
+                        }
+                        report.published += 1;
+                    }
+                    Err(error) => {
+                        if let Err(database_error) = self
+                            .record_delivery_failure(event_id, &lease_token, &error)
+                            .await
+                        {
+                            let _ = self.release_claimed_batch_after_error(&lease_token).await;
+                            return Err(database_error);
+                        }
+                        report.failed_event_ids.push(event_id.to_owned());
+                        self.release_unattempted_batch(&lease_token).await?;
+                        publish_failed = true;
+                        break;
+                    }
+                }
             }
-            match self.event_sink.publish(event.clone()) {
-                Ok(()) => {
-                    if let Err(error) = self.acknowledge_delivery(event_id, &lease_token).await {
-                        let _ = self.release_claimed_batch_after_error(&lease_token).await;
-                        return Err(error);
-                    }
-                    report.published += 1;
-                }
-                Err(error) => {
-                    if let Err(database_error) = self
-                        .record_delivery_failure(event_id, &lease_token, &error)
-                        .await
-                    {
-                        let _ = self.release_claimed_batch_after_error(&lease_token).await;
-                        return Err(database_error);
-                    }
-                    report.failed_event_ids.push(event_id.to_owned());
-                }
+            claim_guard.disarm();
+            if publish_failed {
+                return Ok(report);
             }
         }
-        claim_guard.disarm();
-        Ok(report)
     }
 
     async fn drain_after_commit(&self) {
@@ -1208,8 +1215,9 @@ impl AssignmentRepository {
             return Ok(None);
         }
         let rows = sqlx::query_as::<_, EventRow>(
-            "SELECT events.id, events.work_id, events.run_id, events.turn_id, events.session_id, events.agent_id, events.assignment_id, events.causation_id, events.correlation_id, events.sequence, events.version, events.occurred_at, events.payload FROM assignment_event_outbox outbox INNER JOIN events ON events.id = outbox.event_id WHERE outbox.status <> 'delivered' ORDER BY outbox.ordinal",
+            "SELECT events.id, events.work_id, events.run_id, events.turn_id, events.session_id, events.agent_id, events.assignment_id, events.causation_id, events.correlation_id, events.sequence, events.version, events.occurred_at, events.payload FROM assignment_event_outbox outbox INNER JOIN events ON events.id = outbox.event_id WHERE outbox.status = 'pending' ORDER BY outbox.ordinal LIMIT ?",
         )
+        .bind(OUTBOX_BATCH_SIZE)
         .fetch_all(&mut *transaction)
         .await?;
         if rows.is_empty() {
@@ -1220,10 +1228,11 @@ impl AssignmentRepository {
             .into_iter()
             .map(WorkEventEnvelope::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let claimed = sqlx::query("UPDATE assignment_event_outbox SET status = 'delivering', lease_token = ?, lease_expires_at = ?, updated_at = ? WHERE status <> 'delivered'")
+        let claimed = sqlx::query("UPDATE assignment_event_outbox SET status = 'delivering', lease_token = ?, lease_expires_at = ?, updated_at = ? WHERE status = 'pending' AND ordinal IN (SELECT ordinal FROM assignment_event_outbox WHERE status = 'pending' ORDER BY ordinal LIMIT ?)")
             .bind(&lease_token)
             .bind(lease_expires_at)
             .bind(now)
+            .bind(OUTBOX_BATCH_SIZE)
             .execute(&mut *transaction)
             .await?;
         if claimed.rows_affected() != events.len() as u64 {
@@ -1310,6 +1319,16 @@ impl AssignmentRepository {
     async fn release_claimed_batch_after_error(&self, lease_token: &str) -> Result<(), AppError> {
         let now = Utc::now();
         sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, last_error = 'delivery acknowledgement failed; details redacted', updated_at = ? WHERE status = 'delivering' AND lease_token = ?")
+            .bind(now)
+            .bind(lease_token)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn release_unattempted_batch(&self, lease_token: &str) -> Result<(), AppError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE assignment_event_outbox SET status = 'pending', lease_token = NULL, lease_expires_at = NULL, updated_at = ? WHERE status = 'delivering' AND lease_token = ?")
             .bind(now)
             .bind(lease_token)
             .execute(&self.pool)

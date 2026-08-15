@@ -23,9 +23,13 @@ pub struct ActivityObserverHandle {
 
 struct ActivityObserverInner {
     tx: broadcast::Sender<WorkEventEnvelope>,
-    buffer: Mutex<VecDeque<WorkEventEnvelope>>,
-    seen_event_ids: Mutex<HashSet<String>>,
+    state: Mutex<ActivityObserverState>,
     capacity: usize,
+}
+
+struct ActivityObserverState {
+    buffer: VecDeque<WorkEventEnvelope>,
+    seen_event_ids: HashSet<String>,
 }
 
 impl ActivityObserverHandle {
@@ -34,7 +38,7 @@ impl ActivityObserverHandle {
     }
 
     #[cfg(test)]
-    fn in_process_with_capacity(capacity: usize) -> Self {
+    pub(crate) fn in_process_with_capacity(capacity: usize) -> Self {
         Self::with_capacity(capacity)
     }
 
@@ -43,8 +47,10 @@ impl ActivityObserverHandle {
         Self {
             inner: Arc::new(ActivityObserverInner {
                 tx,
-                buffer: Mutex::new(VecDeque::with_capacity(capacity)),
-                seen_event_ids: Mutex::new(HashSet::new()),
+                state: Mutex::new(ActivityObserverState {
+                    buffer: VecDeque::with_capacity(capacity),
+                    seen_event_ids: HashSet::new(),
+                }),
                 capacity,
             }),
         }
@@ -55,37 +61,77 @@ impl ActivityObserverHandle {
     }
 
     pub fn snapshot(&self) -> Vec<WorkEventEnvelope> {
-        let buffer = self
+        let state = self
             .inner
-            .buffer
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        buffer.iter().cloned().collect()
+        state.buffer.iter().cloned().collect()
     }
 
     /// Returns `false` when this exact stable event id was already observed.
     pub fn emit_committed(&self, envelope: WorkEventEnvelope) -> bool {
-        if let Some(event_id) = envelope.event_id.as_ref() {
-            let mut seen = self
-                .inner
-                .seen_event_ids
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !seen.insert(event_id.clone()) {
-                return false;
-            }
-        }
-        let mut buffer = self
+        let mut state = self
             .inner
-            .buffer
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if buffer.len() == self.inner.capacity {
-            buffer.pop_front();
+        if !self.commit_locked(&mut state, &envelope) {
+            return false;
         }
-        buffer.push_back(envelope.clone());
+        drop(state);
         let _ = self.inner.tx.send(envelope);
-        drop(buffer);
+        true
+    }
+
+    pub(crate) fn emit_committed_after<F>(
+        &self,
+        envelope: WorkEventEnvelope,
+        emit: F,
+    ) -> Result<bool, AppError>
+    where
+        F: FnOnce(WorkEventEnvelope) -> Result<(), AppError>,
+    {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if envelope
+            .event_id
+            .as_ref()
+            .is_some_and(|event_id| state.seen_event_ids.contains(event_id))
+        {
+            return Ok(false);
+        }
+        emit(envelope.clone())?;
+        let committed = self.commit_locked(&mut state, &envelope);
+        debug_assert!(
+            committed,
+            "observer state is locked across frontend emission"
+        );
+        drop(state);
+        let _ = self.inner.tx.send(envelope);
+        Ok(true)
+    }
+
+    fn commit_locked(
+        &self,
+        state: &mut ActivityObserverState,
+        envelope: &WorkEventEnvelope,
+    ) -> bool {
+        if let Some(event_id) = envelope.event_id.as_ref()
+            && !state.seen_event_ids.insert(event_id.clone())
+        {
+            return false;
+        }
+        if state.buffer.len() == self.inner.capacity
+            && let Some(evicted) = state.buffer.pop_front()
+            && let Some(event_id) = evicted.event_id
+        {
+            state.seen_event_ids.remove(&event_id);
+        }
+        state.buffer.push_back(envelope.clone());
         true
     }
 }
@@ -171,6 +217,22 @@ mod tests {
             live.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn observer_evicts_seen_ids_with_the_bounded_replay_buffer() {
+        let observer = ActivityObserverHandle::in_process_with_capacity(2);
+        let event_1 = committed_event("event-1", 1);
+        let event_2 = committed_event("event-2", 2);
+        let event_3 = committed_event("event-3", 3);
+
+        assert!(observer.emit_committed(event_1.clone()));
+        assert!(observer.emit_committed(event_2.clone()));
+        assert!(observer.emit_committed(event_3.clone()));
+        assert_eq!(observer.inner.state.lock().unwrap().seen_event_ids.len(), 2);
+        assert!(!observer.emit_committed(event_2.clone()));
+        assert!(observer.emit_committed(event_1.clone()));
+        assert_eq!(observer.snapshot(), vec![event_3, event_1]);
     }
 
     #[tokio::test]

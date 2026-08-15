@@ -353,7 +353,7 @@ async fn repository_second_publish_failure_retries_only_pending_with_exactly_onc
 }
 
 #[tokio::test]
-async fn repository_recovery_middle_publish_failure_retries_only_the_pending_batch_member() {
+async fn repository_publish_failure_blocks_higher_ordinals_until_the_failed_event_retries() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-recovery-publish-a").await;
     seed_work(database.pool(), "work-recovery-publish-b").await;
@@ -386,7 +386,7 @@ async fn repository_recovery_middle_publish_failure_retries_only_the_pending_bat
     let report = repository.recover_orphans(&[]).await.unwrap();
 
     assert_eq!(report.requeued.len(), 2);
-    assert_eq!(failing.call_count.load(Ordering::SeqCst), 8);
+    assert_eq!(failing.call_count.load(Ordering::SeqCst), 6);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM assignments WHERE status = 'queued' AND id IN (?, ?)"
@@ -408,20 +408,43 @@ async fn repository_recovery_middle_publish_failure_retries_only_the_pending_bat
         8
     );
     let pending = repository.pending_event_deliveries().await.unwrap();
-    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.len(), 3);
+    assert_eq!(
+        pending
+            .iter()
+            .map(|delivery| delivery.attempt_count)
+            .collect::<Vec<_>>(),
+        vec![1, 0, 0]
+    );
+    let ordered_event_ids = sqlx::query_scalar::<_, String>(
+        "SELECT event_id FROM assignment_event_outbox ORDER BY ordinal",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        failing
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.event_id.as_ref().unwrap().clone())
+            .collect::<Vec<_>>(),
+        ordered_event_ids[..5]
+    );
+
     let report = repository.drain_pending_events().await.unwrap();
-    assert_eq!(report.attempted, 1);
-    assert_eq!(report.published, 1);
+    assert_eq!(report.attempted, 3);
+    assert_eq!(report.published, 3);
     assert_eq!(failing.call_count.load(Ordering::SeqCst), 9);
     let published = failing.published.lock().unwrap();
     assert_eq!(published.len(), 8);
     assert_eq!(
         published
             .iter()
-            .map(|event| event.event_id.as_deref().unwrap())
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        8
+            .map(|event| event.event_id.as_ref().unwrap().clone())
+            .collect::<Vec<_>>(),
+        ordered_event_ids
     );
 }
 
@@ -546,6 +569,135 @@ async fn repository_pending_outbox_uses_global_persistent_ordinals_across_vacuum
             .iter()
             .map(|delivery| (delivery.ordinal, delivery.event_id.as_str()))
             .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repository_drain_claims_fixed_batches_and_preserves_order_across_three_batches() {
+    const EVENT_COUNT: usize = 130;
+    const EXPECTED_BATCH_SIZE: i64 = 64;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let database = Database::open(temporary.path().join("assignment-outbox-batches.db"))
+        .await
+        .unwrap();
+    seed_work(database.pool(), "work-outbox-batches").await;
+    let failing = Arc::new(FailingSink::new(vec![1]));
+    let setup = AssignmentRepository::with_event_sink(database.pool().clone(), failing.clone());
+    let assignment = setup
+        .accept(accept_input("work-outbox-batches", "Bounded batches"))
+        .await
+        .unwrap();
+    let first_event_id: String =
+        sqlx::query_scalar("SELECT event_id FROM assignment_event_outbox ORDER BY ordinal LIMIT 1")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    sqlx::query("UPDATE assignment_event_outbox SET attempt_count = 0, last_attempt_at = NULL, last_error = NULL")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    let base_occurred_at = Utc::now() - chrono::Duration::minutes(1);
+    let mut transaction = database.pool().begin().await.unwrap();
+    for sequence in 2..=EVENT_COUNT {
+        let event_id = format!("batch-event-{sequence:03}");
+        let occurred_at = base_occurred_at + chrono::Duration::milliseconds(sequence as i64);
+        sqlx::query("INSERT INTO events (id, work_id, run_id, sequence, version, occurred_at, payload, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id) SELECT ?, work_id, run_id, ?, version, ?, payload, turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id FROM events WHERE id = ?")
+            .bind(&event_id)
+            .bind(sequence as i64)
+            .bind(occurred_at)
+            .bind(&first_event_id)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO assignment_event_outbox (event_id, assignment_id, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(event_id)
+            .bind(&assignment.id)
+            .bind(occurred_at)
+            .bind(occurred_at)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    let status_counts = sqlx::query_as::<_, (String, i64)>(
+        "SELECT status, COUNT(*) FROM assignment_event_outbox GROUP BY status ORDER BY status",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(status_counts, vec![("pending".into(), EVENT_COUNT as i64)]);
+
+    let sink = Arc::new(BlockingSink::default());
+    let repository = AssignmentRepository::with_event_sink(database.pool().clone(), sink.clone());
+    let draining = repository.clone();
+    let drain = tokio::spawn(async move { draining.drain_pending_events().await });
+    let started_sink = sink.clone();
+    if tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || started_sink.wait_until_first_publish_starts()),
+    )
+    .await
+    .is_err()
+    {
+        sink.release_first_publish();
+        let drain_finished = drain.is_finished();
+        if drain_finished {
+            let result = drain.await;
+            panic!("the bounded-batch drain failed before its first sink event: {result:?}");
+        }
+        drain.abort();
+        panic!("the bounded-batch drain never invoked its first sink event");
+    }
+    let counts = tokio::time::timeout(Duration::from_secs(2), async {
+        let delivering: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status = 'delivering'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE status = 'pending'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        (delivering, pending)
+    })
+    .await;
+    sink.release_first_publish();
+    let report = drain.await.unwrap().unwrap();
+    let (delivering, pending) =
+        counts.expect("outbox status could not be inspected while the sink was blocked");
+
+    assert_eq!(delivering, EXPECTED_BATCH_SIZE);
+    assert_eq!(pending, EVENT_COUNT as i64 - EXPECTED_BATCH_SIZE);
+    assert_eq!(report.attempted, EVENT_COUNT);
+    assert_eq!(report.published, EVENT_COUNT);
+    assert_eq!(sink.call_count.load(Ordering::SeqCst), EVENT_COUNT);
+    let expected = sqlx::query_scalar::<_, String>(
+        "SELECT event_id FROM assignment_event_outbox ORDER BY ordinal",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        sink.published
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.event_id.as_ref().unwrap().clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assignment_event_outbox WHERE attempt_count = 1 AND status = 'delivered'"
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        EVENT_COUNT as i64
     );
 }
 
@@ -1016,7 +1168,16 @@ async fn repository_state_mutations_return_committed_facts_when_every_publicatio
             .status,
         AssignmentStatus::Cancelled
     );
-    assert!(failing.call_count.load(Ordering::SeqCst) >= 19);
+    let pending = repository.pending_event_deliveries().await.unwrap();
+    let call_count = failing.call_count.load(Ordering::SeqCst);
+    assert!(pending.len() >= 19);
+    assert_eq!(pending[0].attempt_count as usize, call_count);
+    assert!(
+        pending
+            .iter()
+            .skip(1)
+            .all(|delivery| delivery.attempt_count == 0)
+    );
 }
 
 #[tokio::test]
