@@ -70,7 +70,7 @@ CREATE TABLE assignments (
     UNIQUE (work_id, id),
     UNIQUE (work_id, id, assigned_agent_id),
     FOREIGN KEY (work_id, parent_assignment_id)
-        REFERENCES assignments(work_id, id) ON DELETE RESTRICT,
+        REFERENCES assignments(work_id, id) ON DELETE NO ACTION,
     FOREIGN KEY (work_id, created_by_agent_id)
         REFERENCES work_agents(work_id, agent_instance_id) ON DELETE RESTRICT,
     FOREIGN KEY (work_id, assigned_agent_id)
@@ -87,6 +87,23 @@ ON assignments(status, not_before, created_at, id);
 CREATE INDEX idx_assignments_assigned_agent
 ON assignments(work_id, assigned_agent_id, status);
 
+CREATE TEMP TABLE migration_0006_legacy_assignment_map (
+    work_id TEXT NOT NULL,
+    original_assignment_id TEXT NOT NULL,
+    mapped_assignment_id TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (work_id, original_assignment_id)
+) WITHOUT ROWID;
+
+INSERT INTO migration_0006_legacy_assignment_map (
+    work_id, original_assignment_id, mapped_assignment_id
+)
+SELECT DISTINCT
+    work_id,
+    assignment_id,
+    'legacy-assignment:' || length(work_id) || ':' || work_id || ':' || assignment_id
+FROM events
+WHERE assignment_id IS NOT NULL;
+
 INSERT INTO assignments (
     id, work_id, assigned_agent_id, kind, side_effect, title, instruction,
     context_manifest_json, expected_result_schema_json, acceptance_criteria_json,
@@ -94,14 +111,18 @@ INSERT INTO assignments (
     created_at, completed_at, updated_at
 )
 SELECT
-    legacy.id,
+    legacy.mapped_assignment_id,
     legacy.work_id,
     work_leads.agent_instance_id,
     'lead',
     'unknown',
     'Legacy assignment',
     'Preserved from the pre-assignment event journal during schema migration.',
-    '{"legacy":true}',
+    json_object(
+        'legacy', json('true'),
+        'originalAssignmentId', legacy.original_assignment_id,
+        'workId', legacy.work_id
+    ),
     '{}',
     '[]',
     '{"mode":"inherit_work","legacy":true}',
@@ -114,13 +135,19 @@ SELECT
     legacy.updated_at
 FROM (
     SELECT
-        assignment_id AS id,
-        MIN(work_id) AS work_id,
-        MIN(occurred_at) AS created_at,
-        MAX(occurred_at) AS updated_at
-    FROM events
-    WHERE assignment_id IS NOT NULL
-    GROUP BY assignment_id
+        mapping.work_id,
+        mapping.original_assignment_id,
+        mapping.mapped_assignment_id,
+        MIN(events.occurred_at) AS created_at,
+        MAX(events.occurred_at) AS updated_at
+    FROM migration_0006_legacy_assignment_map AS mapping
+    INNER JOIN events
+        ON events.work_id = mapping.work_id
+       AND events.assignment_id = mapping.original_assignment_id
+    GROUP BY
+        mapping.work_id,
+        mapping.original_assignment_id,
+        mapping.mapped_assignment_id
 ) AS legacy
 INNER JOIN work_leads ON work_leads.work_id = legacy.work_id;
 
@@ -139,7 +166,9 @@ CREATE TABLE agent_sessions (
     work_id TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE,
     agent_instance_id TEXT NOT NULL,
     engine_kind TEXT NOT NULL CHECK (length(trim(engine_kind)) > 0),
-    engine_reference TEXT NOT NULL CHECK (length(engine_reference) > 0),
+    engine_reference TEXT CHECK (
+        engine_reference IS NULL OR length(engine_reference) > 0
+    ),
     generation INTEGER NOT NULL CHECK (generation BETWEEN 1 AND 4294967295),
     current_assignment_id TEXT,
     last_successful_turn_id TEXT,
@@ -277,9 +306,23 @@ INSERT INTO events (
     turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id
 )
 SELECT
-    id, work_id, run_id, sequence, version, occurred_at, payload,
-    turn_id, session_id, agent_id, assignment_id, causation_id, correlation_id
-FROM migration_0006_events;
+    events.id,
+    events.work_id,
+    events.run_id,
+    events.sequence,
+    events.version,
+    events.occurred_at,
+    events.payload,
+    events.turn_id,
+    events.session_id,
+    events.agent_id,
+    mapping.mapped_assignment_id,
+    events.causation_id,
+    events.correlation_id
+FROM migration_0006_events AS events
+LEFT JOIN migration_0006_legacy_assignment_map AS mapping
+    ON mapping.work_id = events.work_id
+   AND mapping.original_assignment_id = events.assignment_id;
 
 CREATE TABLE resource_links (
     id TEXT PRIMARY KEY NOT NULL,
@@ -343,3 +386,4 @@ DROP TABLE migration_0006_resource_links;
 DROP TABLE migration_0006_events;
 DROP TABLE migration_0006_messages;
 DROP TABLE migration_0006_runs;
+DROP TABLE migration_0006_legacy_assignment_map;

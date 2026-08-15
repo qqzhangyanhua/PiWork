@@ -1857,6 +1857,69 @@ async fn assignment_rows_dependencies_and_agent_sessions_round_trip() {
 }
 
 #[tokio::test]
+async fn assignment_agent_session_engine_reference_attaches_after_creation() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "assignment-session-attach").await;
+    insert_assignment_member(
+        &database,
+        "assignment-session-attach",
+        "agent-instance:piwork-engineer",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-session-attach-1",
+        "assignment-session-attach",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, \
+             engine_reference, generation, current_assignment_id, status, created_at, updated_at) \
+         VALUES ('assignment-session-pending', 'assignment-session-attach', \
+             'agent-instance:piwork-engineer', 'pi', NULL, 1, \
+             'assignment-session-attach-1', 'ready', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let before_attach: Option<String> = sqlx::query_scalar(
+        "SELECT engine_reference FROM agent_sessions WHERE id = 'assignment-session-pending'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(before_attach, None);
+
+    let empty_attach = sqlx::query(
+        "UPDATE agent_sessions SET engine_reference = '' \
+         WHERE id = 'assignment-session-pending'",
+    )
+    .execute(database.pool())
+    .await;
+    assert_database_error_contains(empty_attach, "CHECK constraint failed");
+
+    sqlx::query(
+        "UPDATE agent_sessions SET engine_reference = 'opaque-engine-reference' \
+         WHERE id = 'assignment-session-pending'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let attached: String = sqlx::query_scalar(
+        "SELECT engine_reference FROM agent_sessions WHERE id = 'assignment-session-pending'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(attached, "opaque-engine-reference");
+}
+
+#[tokio::test]
 async fn assignment_value_constraints_reject_invalid_wire_values_json_and_counters() {
     let database = Database::open_in_memory().await.unwrap();
     insert_work(&database, "assignment-constraints").await;
@@ -1979,6 +2042,121 @@ async fn assignment_relationship_inflight_and_dependency_constraints_are_enforce
     )
     .await;
     assert_database_error_contains(second_inflight, "UNIQUE constraint failed");
+}
+
+#[tokio::test]
+async fn assignment_parent_restricts_direct_delete_but_work_delete_cascades_the_graph() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "assignment-cascade-work").await;
+    insert_assignment_member(
+        &database,
+        "assignment-cascade-work",
+        "agent-instance:piwork-engineer",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-cascade-parent",
+        "assignment-cascade-work",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+    insert_assignment(
+        &database,
+        "assignment-cascade-child",
+        "assignment-cascade-work",
+        "agent-instance:piwork-engineer",
+        "queued",
+    )
+    .await;
+    sqlx::query(
+        "UPDATE assignments SET parent_assignment_id = 'assignment-cascade-parent' \
+         WHERE id = 'assignment-cascade-child'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO assignment_dependencies (assignment_id, depends_on_assignment_id) \
+         VALUES ('assignment-cascade-child', 'assignment-cascade-parent')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, \
+             engine_reference, generation, current_assignment_id, status, created_at, updated_at) \
+         VALUES ('assignment-cascade-session', 'assignment-cascade-work', \
+             'agent-instance:piwork-engineer', 'pi', 'engine-reference', 1, \
+             'assignment-cascade-child', 'ready', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, assignment_id, \
+             agent_instance_id, attempt_number, created_at, updated_at) \
+         VALUES ('assignment-cascade-run', 'assignment-cascade-work', 'pi', 'test', 'queued', \
+             'assignment-cascade-child', 'agent-instance:piwork-engineer', 1, ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO events (id, work_id, run_id, assignment_id, sequence, version, occurred_at, payload) \
+         VALUES ('assignment-cascade-event', 'assignment-cascade-work', \
+             'assignment-cascade-run', 'assignment-cascade-child', 1, 1, ?, '{}')",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .execute(database.pool())
+    .await
+    .unwrap();
+
+    let direct_parent_delete =
+        sqlx::query("DELETE FROM assignments WHERE id = 'assignment-cascade-parent'")
+            .execute(database.pool())
+            .await;
+    assert_database_error_contains(direct_parent_delete, "FOREIGN KEY constraint failed");
+
+    sqlx::query("DELETE FROM works WHERE id = 'assignment-cascade-work'")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    for (table, statement) in [
+        (
+            "assignments",
+            "SELECT COUNT(*) FROM assignments WHERE work_id = 'assignment-cascade-work'",
+        ),
+        (
+            "assignment_dependencies",
+            "SELECT COUNT(*) FROM assignment_dependencies \
+             WHERE assignment_id LIKE 'assignment-cascade-%' \
+                OR depends_on_assignment_id LIKE 'assignment-cascade-%'",
+        ),
+        (
+            "agent_sessions",
+            "SELECT COUNT(*) FROM agent_sessions WHERE work_id = 'assignment-cascade-work'",
+        ),
+        (
+            "runs",
+            "SELECT COUNT(*) FROM runs WHERE work_id = 'assignment-cascade-work'",
+        ),
+        (
+            "events",
+            "SELECT COUNT(*) FROM events WHERE work_id = 'assignment-cascade-work'",
+        ),
+    ] {
+        let count: i64 = sqlx::query_scalar(statement)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "rows remain in {table}");
+    }
 }
 
 #[tokio::test]
@@ -2332,6 +2510,12 @@ async fn assignment_migration_upgrades_legacy_runs_messages_and_events() {
     .fetch_one(&mut connection)
     .await
     .unwrap();
+    let mapped_legacy_assignment_id = format!(
+        "legacy-assignment:{}:{}:{}",
+        "legacy-assignment-work".len(),
+        "legacy-assignment-work",
+        "legacy-event-assignment"
+    );
     assert_eq!(
         event,
         (
@@ -2339,26 +2523,448 @@ async fn assignment_migration_upgrades_legacy_runs_messages_and_events() {
             "turn-legacy".into(),
             "session-legacy".into(),
             "agent-legacy".into(),
-            "legacy-event-assignment".into(),
+            mapped_legacy_assignment_id.clone(),
             "cause-legacy".into(),
             "correlation-legacy".into(),
         )
     );
-    let legacy_assignment: (String, String, String) = sqlx::query_as(
-        "SELECT assigned_agent_id, side_effect, status FROM assignments \
-         WHERE id = 'legacy-event-assignment'",
+    let legacy_assignment: (String, String, String, String) = sqlx::query_as(
+        "SELECT assigned_agent_id, side_effect, status, context_manifest_json \
+         FROM assignments WHERE id = ?",
+    )
+    .bind(&mapped_legacy_assignment_id)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(legacy_assignment.0, "agent-instance:piwork-lead");
+    assert_eq!(legacy_assignment.1, "unknown");
+    assert_eq!(legacy_assignment.2, "interrupted");
+    let legacy_context = serde_json::from_str::<serde_json::Value>(&legacy_assignment.3).unwrap();
+    assert_eq!(legacy_context["legacy"], true);
+    assert_eq!(
+        legacy_context["originalAssignmentId"],
+        "legacy-event-assignment"
+    );
+    assert_eq!(legacy_context["workId"], "legacy-assignment-work");
+    let foreign_key_violations: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(foreign_key_violations, 0);
+    let quick_check: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(quick_check, "ok");
+}
+
+#[tokio::test]
+async fn assignment_migration_remaps_same_legacy_id_per_work_without_losing_resources() {
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    for (version, description, sql) in [
+        (
+            1,
+            "foundation",
+            include_str!("../migrations/0001_foundation.sql"),
+        ),
+        (
+            2,
+            "resources",
+            include_str!("../migrations/0002_resources.sql"),
+        ),
+        (
+            3,
+            "document derivatives",
+            include_str!("../migrations/0003_document_derivatives.sql"),
+        ),
+        (
+            4,
+            "activity protocol v2",
+            include_str!("../migrations/0004_activity_protocol_v2.sql"),
+        ),
+    ] {
+        apply_agent_domain_migration(&mut connection, version, description, sql).await;
+    }
+    let work_ids = ["legacy-collision-work-a", "legacy-collision-work-b"];
+    for work_id in work_ids {
+        sqlx::query(
+            "INSERT INTO works (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
+             VALUES (?, 'Legacy', 'Goal', '/workspace', 'balanced', 'draft', ?, ?)",
+        )
+        .bind(work_id)
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+    apply_agent_domain_migration(
+        &mut connection,
+        5,
+        "agent domain",
+        include_str!("../migrations/0005_agent_domain.sql"),
+    )
+    .await;
+
+    for (suffix, work_id, hash_character) in [("a", work_ids[0], "b"), ("b", work_ids[1], "c")] {
+        let run_id = format!("legacy-collision-run-{suffix}");
+        let message_id = format!("legacy-collision-message-{suffix}");
+        let blob_id = format!("legacy-collision-blob-{suffix}");
+        let resource_id = format!("legacy-collision-resource-{suffix}");
+        sqlx::query(
+            "INSERT INTO runs (id, work_id, engine_kind, model_label, status, created_at, updated_at) \
+             VALUES (?, ?, 'pi', 'model', 'completed', ?, ?)",
+        )
+        .bind(&run_id)
+        .bind(work_id)
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:01:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
+             VALUES (?, ?, ?, 'assistant', 'done', ?)",
+        )
+        .bind(&message_id)
+        .bind(work_id)
+        .bind(&run_id)
+        .bind("2026-01-01T00:01:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO resource_blobs (id, plaintext_sha256, size, created_at) \
+             VALUES (?, ?, 4, ?)",
+        )
+        .bind(&blob_id)
+        .bind(hash_character.repeat(64))
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO managed_resources (id, space_id, blob_id, original_name, media_type, size, \
+                 origin, status, created_at, updated_at) \
+             VALUES (?, 'local-personal', ?, 'legacy.txt', 'text/plain', 4, \
+                 'user_upload', 'ready', ?, ?)",
+        )
+        .bind(&resource_id)
+        .bind(&blob_id)
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO resource_links (id, resource_id, work_id, draft_id, message_id, run_id, role, created_at) \
+             VALUES (?, ?, ?, NULL, ?, ?, 'attached', ?)",
+        )
+        .bind(format!("legacy-collision-link-{suffix}"))
+        .bind(&resource_id)
+        .bind(work_id)
+        .bind(&message_id)
+        .bind(&run_id)
+        .bind("2026-01-01T00:01:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, work_id, run_id, sequence, version, occurred_at, payload, assignment_id) \
+             VALUES (?, ?, ?, 1, 1, ?, '{}', 'shared-legacy-assignment')",
+        )
+        .bind(format!("legacy-collision-event-{suffix}"))
+        .bind(work_id)
+        .bind(&run_id)
+        .bind("2026-01-01T00:01:00Z")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+
+    let migration_sql = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations/0006_assignment_sessions.sql"),
+    )
+    .unwrap();
+    let migration = Migration::new(
+        6,
+        Cow::Borrowed("assignment sessions"),
+        MigrationType::Simple,
+        Cow::Owned(migration_sql),
+        false,
+    );
+    connection.apply(&migration).await.unwrap();
+
+    let event_assignments = sqlx::query_as::<_, (String, String)>(
+        "SELECT work_id, assignment_id FROM events ORDER BY work_id",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    let expected_assignments = work_ids
+        .into_iter()
+        .map(|work_id| {
+            (
+                work_id.to_string(),
+                format!(
+                    "legacy-assignment:{}:{}:{}",
+                    work_id.len(),
+                    work_id,
+                    "shared-legacy-assignment"
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(event_assignments, expected_assignments);
+
+    let anchors = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT id, work_id, context_manifest_json FROM assignments ORDER BY work_id",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(anchors.len(), 2);
+    for ((id, work_id, context), (_, expected_id)) in anchors.iter().zip(&expected_assignments) {
+        assert_eq!(id, expected_id);
+        let context = serde_json::from_str::<serde_json::Value>(context).unwrap();
+        assert_eq!(context["legacy"], true);
+        assert_eq!(context["originalAssignmentId"], "shared-legacy-assignment");
+        assert_eq!(context["workId"], work_id.as_str());
+    }
+
+    for table in ["runs", "messages", "events", "resource_links"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "legacy rows lost from {table}");
+    }
+    let links = sqlx::query_as::<_, (String, String, String, String)>(
+        "SELECT work_id, resource_id, message_id, run_id \
+         FROM resource_links ORDER BY work_id",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        links,
+        vec![
+            (
+                work_ids[0].into(),
+                "legacy-collision-resource-a".into(),
+                "legacy-collision-message-a".into(),
+                "legacy-collision-run-a".into(),
+            ),
+            (
+                work_ids[1].into(),
+                "legacy-collision-resource-b".into(),
+                "legacy-collision-message-b".into(),
+                "legacy-collision-run-b".into(),
+            ),
+        ]
+    );
+    let foreign_key_violations: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(foreign_key_violations, 0);
+    let quick_check: String = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(quick_check, "ok");
+}
+
+#[tokio::test]
+async fn assignment_migration_failure_rolls_back_legacy_resources_atomically() {
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    for (version, description, sql) in [
+        (
+            1,
+            "foundation",
+            include_str!("../migrations/0001_foundation.sql"),
+        ),
+        (
+            2,
+            "resources",
+            include_str!("../migrations/0002_resources.sql"),
+        ),
+        (
+            3,
+            "document derivatives",
+            include_str!("../migrations/0003_document_derivatives.sql"),
+        ),
+        (
+            4,
+            "activity protocol v2",
+            include_str!("../migrations/0004_activity_protocol_v2.sql"),
+        ),
+        (
+            5,
+            "agent domain",
+            include_str!("../migrations/0005_agent_domain.sql"),
+        ),
+    ] {
+        apply_agent_domain_migration(&mut connection, version, description, sql).await;
+    }
+    sqlx::query(
+        "INSERT INTO works (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
+         VALUES ('legacy-atomic-work', 'Legacy', 'Goal', '/workspace', 'balanced', 'draft', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO runs (id, work_id, engine_kind, model_label, status, created_at, updated_at) \
+         VALUES ('legacy-atomic-run', 'legacy-atomic-work', 'pi', 'model', 'completed', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
+         VALUES ('legacy-atomic-message', 'legacy-atomic-work', 'legacy-atomic-run', \
+             'assistant', 'done', ?)",
+    )
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO resource_blobs (id, plaintext_sha256, size, created_at) \
+         VALUES ('legacy-atomic-blob', ?, 4, ?)",
+    )
+    .bind("d".repeat(64))
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO managed_resources (id, space_id, blob_id, original_name, media_type, size, \
+             origin, status, created_at, updated_at) \
+         VALUES ('legacy-atomic-resource', 'local-personal', 'legacy-atomic-blob', \
+             'legacy.txt', 'text/plain', 4, 'user_upload', 'ready', ?, ?)",
+    )
+    .bind("2026-01-01T00:00:00Z")
+    .bind("2026-01-01T00:00:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO resource_links (id, resource_id, work_id, draft_id, message_id, run_id, role, created_at) \
+         VALUES ('legacy-atomic-link', 'legacy-atomic-resource', 'legacy-atomic-work', NULL, \
+             'legacy-atomic-message', 'legacy-atomic-run', 'attached', ?)",
+    )
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO events (id, work_id, run_id, sequence, version, occurred_at, payload, assignment_id) \
+         VALUES ('legacy-atomic-event', 'legacy-atomic-work', 'legacy-atomic-run', 1, 1, \
+             ?, '{}', 'legacy-atomic-assignment')",
+    )
+    .bind("2026-01-01T00:01:00Z")
+    .execute(&mut connection)
+    .await
+    .unwrap();
+
+    let migration_sql = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations/0006_assignment_sessions.sql"),
+    )
+    .unwrap();
+    let migration = Migration::new(
+        6,
+        Cow::Borrowed("assignment sessions"),
+        MigrationType::Simple,
+        Cow::Owned(migration_sql),
+        false,
+    );
+    assert!(connection.apply(&migration).await.is_err());
+
+    let assignment_table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'assignments'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(assignment_table_count, 0);
+    let temp_mapping_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_temp_schema \
+         WHERE type = 'table' AND name = 'migration_0006_legacy_assignment_map'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(temp_mapping_count, 0);
+    for (table, id) in [
+        ("runs", "legacy-atomic-run"),
+        ("messages", "legacy-atomic-message"),
+        ("events", "legacy-atomic-event"),
+        ("resource_links", "legacy-atomic-link"),
+    ] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE id = ?"))
+            .bind(id)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "legacy row lost from {table}");
+    }
+    let legacy_event: (String, String) =
+        sqlx::query_as("SELECT run_id, assignment_id FROM events WHERE id = 'legacy-atomic-event'")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(
+        legacy_event,
+        (
+            "legacy-atomic-run".into(),
+            "legacy-atomic-assignment".into(),
+        )
+    );
+    let legacy_link: (String, String, String) = sqlx::query_as(
+        "SELECT resource_id, message_id, run_id FROM resource_links \
+         WHERE id = 'legacy-atomic-link'",
     )
     .fetch_one(&mut connection)
     .await
     .unwrap();
     assert_eq!(
-        legacy_assignment,
+        legacy_link,
         (
-            "agent-instance:piwork-lead".into(),
-            "unknown".into(),
-            "interrupted".into(),
+            "legacy-atomic-resource".into(),
+            "legacy-atomic-message".into(),
+            "legacy-atomic-run".into(),
         )
     );
+    let applied_v6: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 6")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(applied_v6, 0);
     let foreign_key_violations: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
             .fetch_one(&mut connection)

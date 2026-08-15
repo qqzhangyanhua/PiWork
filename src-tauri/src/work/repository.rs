@@ -1404,7 +1404,7 @@ mod tests {
             run_id: Some(started.run.as_ref().expect("immediate run").id.clone()),
             turn_id: Some("turn-1".into()),
             session_id: Some("session-1".into()),
-            agent_id: Some("agent-1".into()),
+            agent_id: Some(assigned_agent_id.clone()),
             assignment_id: Some("assignment-1".into()),
             causation_id: Some("event-0".into()),
             correlation_id: Some("correlation-1".into()),
@@ -1416,6 +1416,10 @@ mod tests {
                 output_summary: "halfway".into(),
             },
         };
+        assert_eq!(
+            envelope.agent_id.as_deref(),
+            Some(assigned_agent_id.as_str())
+        );
 
         repository
             .append_event_and_transition(&envelope)
