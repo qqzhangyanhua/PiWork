@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
+    process::{ChildStdin, Command},
     sync::{Notify, mpsc, oneshot, watch},
 };
 
@@ -24,6 +24,14 @@ use super::{
     EngineAdapter, EngineCapabilities, EngineError, EngineEvent, EngineInput, EngineRunContext,
     EngineSessionRef,
 };
+
+mod event_dispatch;
+mod redaction;
+mod startup;
+
+use event_dispatch::{EventDelivery, deliver_terminal, publish_started_events};
+use redaction::SensitiveRedactor;
+use startup::await_prompt_acceptance;
 
 const PROVIDER_NAME: &str = "piwork";
 const API_KEY_ENVIRONMENT_VARIABLE: &str = "PIWORK_MODEL_API_KEY";
@@ -316,7 +324,20 @@ impl RpcEventTranslator {
         S: Into<String>,
     {
         Self {
-            redactor: SensitiveRedactor::new(values),
+            redactor: SensitiveRedactor::from_secrets(values),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_sensitive_values_and_local_paths<I, S, P>(values: I, local_paths: P) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        P: IntoIterator,
+        P::Item: Into<PathBuf>,
+    {
+        Self {
+            redactor: SensitiveRedactor::from_secrets_and_local_paths(values, local_paths),
             ..Self::default()
         }
     }
@@ -373,7 +394,7 @@ impl RpcEventTranslator {
                 self.tool_count += 1;
                 self.capture_outcome_hints(&tool_name, &args);
                 let mut public_args = args;
-                self.redactor.redact_registered_values(&mut public_args);
+                self.redactor.redact_structured_value(&mut public_args);
                 Some(EngineEvent::ToolStarted {
                     tool_call_id,
                     tool_name,
@@ -383,12 +404,12 @@ impl RpcEventTranslator {
             "tool_execution_update" => Some(EngineEvent::ToolProgress {
                 tool_call_id: required_string(message, "toolCallId")?,
                 tool_name: required_string(message, "toolName")?,
-                output_summary: summarize_tool_result(message.get("partialResult")),
+                output_summary: summarize_tool_result(message.get("partialResult"), &self.redactor),
             }),
             "tool_execution_end" => Some(EngineEvent::ToolFinished {
                 tool_call_id: required_string(message, "toolCallId")?,
                 tool_name: required_string(message, "toolName")?,
-                output_summary: summarize_tool_result(message.get("result")),
+                output_summary: summarize_tool_result(message.get("result"), &self.redactor),
                 success: !message
                     .get("isError")
                     .and_then(Value::as_bool)
@@ -442,287 +463,6 @@ impl RpcEventTranslator {
     }
 }
 
-#[derive(Default)]
-struct SensitiveRedactor {
-    values: Vec<String>,
-}
-
-impl SensitiveRedactor {
-    fn new<I, S>(values: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let mut redaction_values = Vec::new();
-        for value in values.into_iter().map(|value| value.into()) {
-            register_sensitive_variants(&mut redaction_values, &value);
-            #[cfg(windows)]
-            for alias in windows_path_aliases(&value) {
-                register_sensitive_variants(&mut redaction_values, &alias);
-            }
-        }
-        redaction_values.sort_by_key(|value| std::cmp::Reverse(value.len()));
-        Self {
-            values: redaction_values,
-        }
-    }
-
-    fn redact_text(&self, text: &str) -> String {
-        self.values.iter().fold(text.to_owned(), |rendered, value| {
-            replace_ascii_case_insensitive(&rendered, value, "[REDACTED]")
-        })
-    }
-
-    fn redact_value(&self, value: &mut Value) {
-        match value {
-            Value::String(text) => *text = self.redact_text(text),
-            Value::Array(values) => {
-                for value in values {
-                    self.redact_value(value);
-                }
-            }
-            Value::Object(object) => {
-                for (key, value) in object {
-                    if sensitive_json_key(key) {
-                        *value = Value::String("[REDACTED]".into());
-                    } else {
-                        self.redact_value(value);
-                    }
-                }
-            }
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
-        }
-    }
-
-    fn redact_registered_values(&self, value: &mut Value) {
-        match value {
-            Value::String(text) => *text = self.redact_text(text),
-            Value::Array(values) => {
-                for value in values {
-                    self.redact_registered_values(value);
-                }
-            }
-            Value::Object(object) => {
-                for value in object.values_mut() {
-                    self.redact_registered_values(value);
-                }
-            }
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
-        }
-    }
-
-    fn redact_event(&self, event: &mut EngineEvent) {
-        let redact = |value: &mut String| *value = self.redact_text(value);
-        let redact_many = |values: &mut Vec<String>| {
-            for value in values {
-                redact(value);
-            }
-        };
-        match event {
-            EngineEvent::RunStarted { model_label } => redact(model_label),
-            EngineEvent::AssistantDelta { text } | EngineEvent::ThoughtDelta { text } => {
-                redact(text)
-            }
-            EngineEvent::ToolStarted {
-                tool_call_id,
-                tool_name,
-                ..
-            } => {
-                redact(tool_call_id);
-                redact(tool_name);
-            }
-            EngineEvent::ToolFinished {
-                tool_call_id,
-                tool_name,
-                output_summary,
-                ..
-            }
-            | EngineEvent::ToolProgress {
-                tool_call_id,
-                tool_name,
-                output_summary,
-            } => {
-                redact(tool_call_id);
-                redact(tool_name);
-                redact(output_summary);
-            }
-            EngineEvent::RunCompleted {
-                summary,
-                artifacts,
-                validation,
-                limitations,
-            } => {
-                redact(summary);
-                redact_many(artifacts);
-                redact_many(validation);
-                redact_many(limitations);
-            }
-            EngineEvent::RunFailed { message } => redact(message),
-            EngineEvent::PlanChanged { plan_id, text, .. } => {
-                redact(plan_id);
-                redact(text);
-            }
-            EngineEvent::ToolPending {
-                tool_call_id,
-                tool_name,
-                input_summary,
-            } => {
-                redact(tool_call_id);
-                redact(tool_name);
-                redact(input_summary);
-            }
-            EngineEvent::PermissionRequested {
-                request_id,
-                tool_call_id,
-                title,
-                detail,
-            } => {
-                redact(request_id);
-                if let Some(tool_call_id) = tool_call_id {
-                    redact(tool_call_id);
-                }
-                redact(title);
-                redact(detail);
-            }
-            EngineEvent::PermissionResolved { request_id, .. } => redact(request_id),
-            EngineEvent::Waiting { reason } => redact(reason),
-            EngineEvent::SessionChanged { reason, .. } => {
-                if let Some(reason) = reason {
-                    redact(reason);
-                }
-            }
-            EngineEvent::ArtifactProduced { path } => redact(path),
-            EngineEvent::ValidationProduced {
-                command, summary, ..
-            } => {
-                redact(command);
-                redact(summary);
-            }
-            EngineEvent::RawEngineEvent { kind, payload_json } => {
-                redact(kind);
-                redact(payload_json);
-            }
-            EngineEvent::Liveness { .. } | EngineEvent::UsageUpdated { .. } => {}
-        }
-    }
-}
-
-fn register_sensitive_variants(values: &mut Vec<String>, value: &str) {
-    if value.is_empty() {
-        return;
-    }
-    let backslash = value.replace('/', "\\");
-    let plain = if let Some(unc) = backslash.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else if let Some(disk) = backslash.strip_prefix(r"\\?\") {
-        disk.to_owned()
-    } else {
-        backslash
-    };
-    let mut variants = vec![plain.clone(), plain.replace('\\', "/")];
-    if plain.starts_with(r"\\") {
-        let unc = plain.trim_start_matches('\\');
-        variants.push(format!(r"\\?\UNC\{unc}"));
-        variants.push(format!("//?/UNC/{}", unc.replace('\\', "/")));
-    } else if plain.as_bytes().get(1) == Some(&b':') {
-        variants.push(format!(r"\\?\{plain}"));
-        variants.push(format!("//?/{}", plain.replace('\\', "/")));
-    }
-    for variant in variants {
-        if !values
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&variant))
-        {
-            values.push(variant);
-        }
-    }
-}
-
-fn replace_ascii_case_insensitive(text: &str, needle: &str, replacement: &str) -> String {
-    if needle.is_empty() {
-        return text.to_owned();
-    }
-    let folded_text = text.to_ascii_lowercase();
-    let folded_needle = needle.to_ascii_lowercase();
-    let mut rendered = String::with_capacity(text.len());
-    let mut offset = 0;
-    while let Some(relative) = folded_text[offset..].find(&folded_needle) {
-        let start = offset + relative;
-        let end = start + needle.len();
-        rendered.push_str(&text[offset..start]);
-        rendered.push_str(replacement);
-        offset = end;
-    }
-    rendered.push_str(&text[offset..]);
-    rendered
-}
-
-#[cfg(windows)]
-fn windows_path_aliases(value: &str) -> Vec<String> {
-    if !Path::new(value).exists() {
-        return Vec::new();
-    }
-    let mut aliases = vec![value.to_owned()];
-    if let Ok(canonical) = std::fs::canonicalize(value) {
-        aliases.push(canonical.to_string_lossy().into_owned());
-        aliases.push(dunce::simplified(&canonical).to_string_lossy().into_owned());
-    }
-    let candidates = aliases.clone();
-    for candidate in candidates {
-        if let Some(long) = windows_path_name(&candidate, false) {
-            aliases.push(long);
-        }
-        if let Some(short) = windows_path_name(&candidate, true) {
-            aliases.push(short);
-        }
-    }
-    aliases
-}
-
-#[cfg(windows)]
-fn windows_path_name(value: &str, short: bool) -> Option<String> {
-    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        #[link_name = "GetLongPathNameW"]
-        fn get_long_path_name_w(long: *const u16, output: *mut u16, capacity: u32) -> u32;
-        #[link_name = "GetShortPathNameW"]
-        fn get_short_path_name_w(long: *const u16, output: *mut u16, capacity: u32) -> u32;
-    }
-
-    let input = OsStr::new(value)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let mut output = vec![0_u16; 32_768];
-    let length = unsafe {
-        if short {
-            get_short_path_name_w(input.as_ptr(), output.as_mut_ptr(), output.len() as u32)
-        } else {
-            get_long_path_name_w(input.as_ptr(), output.as_mut_ptr(), output.len() as u32)
-        }
-    } as usize;
-    (length > 0 && length < output.len()).then(|| String::from_utf16_lossy(&output[..length]))
-}
-
-fn sensitive_json_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "key"
-        || key.ends_with("key")
-        || [
-            "token",
-            "secret",
-            "authorization",
-            "path",
-            "directory",
-            "session",
-            "model",
-        ]
-        .iter()
-        .any(|sensitive| key.contains(sensitive))
-}
-
 fn usage_event(message: &Value) -> Option<EngineEvent> {
     let usage = message.pointer("/message/usage")?;
     usage.as_object()?;
@@ -747,7 +487,7 @@ fn raw_event(mut message: Value, redactor: &SensitiveRedactor) -> EngineEvent {
         .and_then(Value::as_str)
         .map(|kind| summarize_to_limit(&redactor.redact_text(kind), MAX_RAW_EVENT_KIND_CHARS))
         .unwrap_or_else(|| "unknown".into());
-    redactor.redact_value(&mut message);
+    redactor.redact_raw_value(&mut message);
     EngineEvent::RawEngineEvent {
         kind,
         payload_json: summarize_to_limit(
@@ -765,7 +505,12 @@ fn summarize_json(value: &Value) -> String {
     summarize(&serde_json::to_string(value).unwrap_or_else(|_| "{}".into()))
 }
 
-fn summarize_tool_result(result: Option<&Value>) -> String {
+fn summarize_tool_result(result: Option<&Value>, redactor: &SensitiveRedactor) -> String {
+    let mut public_result = result.cloned();
+    if let Some(result) = public_result.as_mut() {
+        redactor.redact_structured_value(result);
+    }
+    let result = public_result.as_ref();
     let text_parts = result
         .and_then(|result| result.get("content"))
         .and_then(Value::as_array)
@@ -842,378 +587,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-#[cfg(windows)]
-mod process_tree {
-    use std::{
-        ffi::c_void,
-        io,
-        mem::size_of,
-        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
-        ptr,
-    };
-
-    use tokio::process::{Child, Command};
-
-    use super::PROCESS_TREE_TERMINATION_TIMEOUT;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const CREATE_SUSPENDED: u32 = 0x0000_0004;
-    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
-    const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS: i32 = 1;
-    const JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS: i32 = 3;
-    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
-    const ERROR_INVALID_PARAMETER: i32 = 87;
-    const ERROR_MORE_DATA: i32 = 234;
-    const SYNCHRONIZE: u32 = 0x0010_0000;
-    const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_TIMEOUT: u32 = 258;
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct IoCounters {
-        read_operation_count: u64,
-        write_operation_count: u64,
-        other_operation_count: u64,
-        read_transfer_count: u64,
-        write_transfer_count: u64,
-        other_transfer_count: u64,
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct JobObjectBasicLimitInformation {
-        per_process_user_time_limit: i64,
-        per_job_user_time_limit: i64,
-        limit_flags: u32,
-        minimum_working_set_size: usize,
-        maximum_working_set_size: usize,
-        active_process_limit: u32,
-        affinity: usize,
-        priority_class: u32,
-        scheduling_class: u32,
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct JobObjectExtendedLimitInformation {
-        basic_limit_information: JobObjectBasicLimitInformation,
-        io_info: IoCounters,
-        process_memory_limit: usize,
-        job_memory_limit: usize,
-        peak_process_memory_used: usize,
-        peak_job_memory_used: usize,
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct JobObjectBasicAccountingInformation {
-        total_user_time: i64,
-        total_kernel_time: i64,
-        this_period_total_user_time: i64,
-        this_period_total_kernel_time: i64,
-        total_page_fault_count: u32,
-        total_processes: u32,
-        active_processes: u32,
-        total_terminated_processes: u32,
-    }
-
-    #[repr(C)]
-    struct JobObjectBasicProcessIdListHeader {
-        number_of_assigned_processes: u32,
-        number_of_process_ids_in_list: u32,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        #[link_name = "CreateJobObjectW"]
-        fn create_job_object_w(attributes: *const c_void, name: *const u16) -> *mut c_void;
-        #[link_name = "SetInformationJobObject"]
-        fn set_information_job_object(
-            job: *mut c_void,
-            information_class: i32,
-            information: *const c_void,
-            information_length: u32,
-        ) -> i32;
-        #[link_name = "AssignProcessToJobObject"]
-        fn assign_process_to_job_object(job: *mut c_void, process: *mut c_void) -> i32;
-        #[link_name = "TerminateJobObject"]
-        fn terminate_job_object(job: *mut c_void, exit_code: u32) -> i32;
-        #[link_name = "QueryInformationJobObject"]
-        fn query_information_job_object(
-            job: *mut c_void,
-            information_class: i32,
-            information: *mut c_void,
-            information_length: u32,
-            return_length: *mut u32,
-        ) -> i32;
-        #[link_name = "OpenProcess"]
-        fn open_process(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
-        #[link_name = "WaitForSingleObject"]
-        fn wait_for_single_object(handle: *mut c_void, milliseconds: u32) -> u32;
-    }
-
-    #[link(name = "ntdll")]
-    unsafe extern "system" {
-        #[link_name = "NtResumeProcess"]
-        fn nt_resume_process(process: *mut c_void) -> i32;
-    }
-
-    pub(super) struct PiProcessTree {
-        job: OwnedHandle,
-    }
-
-    impl PiProcessTree {
-        pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Self)> {
-            command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
-            let tree = Self::new()?;
-            let mut child = command.spawn()?;
-            if let Err(error) = tree.assign_and_resume(&child) {
-                let _ = child.start_kill();
-                return Err(error);
-            }
-            Ok((child, tree))
-        }
-
-        fn new() -> io::Result<Self> {
-            let raw_job = unsafe { create_job_object_w(ptr::null(), ptr::null()) };
-            if raw_job.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let job = unsafe { OwnedHandle::from_raw_handle(raw_job) };
-            let mut information = JobObjectExtendedLimitInformation::default();
-            information.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let configured = unsafe {
-                set_information_job_object(
-                    job.as_raw_handle(),
-                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-                    ptr::from_ref(&information).cast(),
-                    size_of::<JobObjectExtendedLimitInformation>() as u32,
-                )
-            };
-            if configured == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(Self { job })
-        }
-
-        fn assign_and_resume(&self, child: &Child) -> io::Result<()> {
-            let process = child.raw_handle().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "spawned Pi process exited")
-            })?;
-            if unsafe { assign_process_to_job_object(self.job.as_raw_handle(), process) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let status = unsafe { nt_resume_process(process) };
-            if status < 0 {
-                return Err(io::Error::other(format!(
-                    "NtResumeProcess failed with NTSTATUS {status:#010x}"
-                )));
-            }
-            Ok(())
-        }
-
-        fn process_ids(&self) -> io::Result<Vec<u32>> {
-            let mut word_capacity = 64_usize;
-            loop {
-                let mut buffer = vec![0_usize; word_capacity];
-                let queried = unsafe {
-                    query_information_job_object(
-                        self.job.as_raw_handle(),
-                        JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS,
-                        buffer.as_mut_ptr().cast(),
-                        (buffer.len() * size_of::<usize>()) as u32,
-                        ptr::null_mut(),
-                    )
-                };
-                let header =
-                    unsafe { &*buffer.as_ptr().cast::<JobObjectBasicProcessIdListHeader>() };
-                if queried != 0 {
-                    let count = header.number_of_process_ids_in_list as usize;
-                    let available = (buffer.len() * size_of::<usize>()
-                        - size_of::<JobObjectBasicProcessIdListHeader>())
-                        / size_of::<usize>();
-                    if count > available {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Pi Job returned an oversized process list",
-                        ));
-                    }
-                    let ids = unsafe {
-                        std::slice::from_raw_parts(
-                            buffer
-                                .as_ptr()
-                                .cast::<u8>()
-                                .add(size_of::<JobObjectBasicProcessIdListHeader>())
-                                .cast::<usize>(),
-                            count,
-                        )
-                    };
-                    return ids
-                        .iter()
-                        .map(|id| {
-                            u32::try_from(*id).map_err(|_| {
-                                io::Error::other("Pi Job returned an invalid process id")
-                            })
-                        })
-                        .collect();
-                }
-                let error = io::Error::last_os_error();
-                if error.raw_os_error() != Some(ERROR_MORE_DATA) {
-                    return Err(error);
-                }
-                let required_bytes = size_of::<JobObjectBasicProcessIdListHeader>()
-                    + header.number_of_assigned_processes as usize * size_of::<usize>();
-                word_capacity = word_capacity
-                    .saturating_mul(2)
-                    .max(required_bytes.div_ceil(size_of::<usize>()));
-            }
-        }
-
-        fn process_handles(&self) -> io::Result<Vec<OwnedHandle>> {
-            let mut handles = Vec::new();
-            for process_id in self.process_ids()? {
-                let raw_process = unsafe { open_process(SYNCHRONIZE, 0, process_id) };
-                if raw_process.is_null() {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER) {
-                        continue;
-                    }
-                    return Err(error);
-                }
-                handles.push(unsafe { OwnedHandle::from_raw_handle(raw_process) });
-            }
-            Ok(handles)
-        }
-
-        pub(super) async fn terminate_and_confirm(&self, child: &mut Child) -> io::Result<()> {
-            let processes = self.process_handles()?;
-            if unsafe { terminate_job_object(self.job.as_raw_handle(), 1) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, child.wait())
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Pi child did not exit"))??;
-            self.confirm_terminated(&processes).await
-        }
-
-        fn active_processes(&self) -> io::Result<u32> {
-            let mut information = JobObjectBasicAccountingInformation::default();
-            let queried = unsafe {
-                query_information_job_object(
-                    self.job.as_raw_handle(),
-                    JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS,
-                    ptr::from_mut(&mut information).cast(),
-                    size_of::<JobObjectBasicAccountingInformation>() as u32,
-                    ptr::null_mut(),
-                )
-            };
-            if queried == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(information.active_processes)
-        }
-
-        async fn confirm_terminated(&self, processes: &[OwnedHandle]) -> io::Result<()> {
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, async {
-                loop {
-                    let mut all_signaled = true;
-                    for process in processes {
-                        match unsafe { wait_for_single_object(process.as_raw_handle(), 0) } {
-                            WAIT_OBJECT_0 => {}
-                            WAIT_TIMEOUT => all_signaled = false,
-                            _ => return Err(io::Error::last_os_error()),
-                        }
-                    }
-                    if all_signaled && self.active_processes()? == 0 {
-                        return Ok(());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Pi Job did not empty"))?
-        }
-    }
-}
-
-#[cfg(unix)]
-mod process_tree {
-    use std::io;
-
-    use tokio::process::{Child, Command};
-
-    use super::PROCESS_TREE_TERMINATION_TIMEOUT;
-
-    const SIGKILL: i32 = 9;
-    const EPERM: i32 = 1;
-    const ESRCH: i32 = 3;
-
-    unsafe extern "C" {
-        fn kill(process_id: i32, signal: i32) -> i32;
-    }
-
-    pub(super) struct PiProcessTree {
-        process_group_id: i32,
-    }
-
-    impl PiProcessTree {
-        pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Self)> {
-            command.process_group(0);
-            let mut child = command.spawn()?;
-            let Some(process_group_id) = child.id().and_then(|id| i32::try_from(id).ok()) else {
-                let _ = child.start_kill();
-                return Err(io::Error::other(
-                    "spawned Pi process has no valid process id",
-                ));
-            };
-            Ok((child, Self { process_group_id }))
-        }
-
-        fn terminate(&self) -> io::Result<()> {
-            let result = unsafe { kill(-self.process_group_id, SIGKILL) };
-            if result == 0 || io::Error::last_os_error().raw_os_error() == Some(ESRCH) {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        }
-
-        fn is_empty(&self) -> io::Result<bool> {
-            if unsafe { kill(-self.process_group_id, 0) } == 0 {
-                return Ok(false);
-            }
-            let error = io::Error::last_os_error();
-            match error.raw_os_error() {
-                Some(ESRCH) => Ok(true),
-                Some(EPERM) => Ok(false),
-                _ => Err(error),
-            }
-        }
-
-        async fn confirm_terminated(&self) -> io::Result<()> {
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, async {
-                loop {
-                    if self.is_empty()? {
-                        return Ok(());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .map_err(|_| {
-                io::Error::new(io::ErrorKind::TimedOut, "Pi process group did not empty")
-            })?
-        }
-
-        pub(super) async fn terminate_and_confirm(&self, child: &mut Child) -> io::Result<()> {
-            self.terminate()?;
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, child.wait())
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Pi child did not exit"))??;
-            self.confirm_terminated().await
-        }
-    }
-}
+mod process_tree;
 
 use process_tree::PiProcessTree;
 
@@ -1350,6 +724,7 @@ enum PiRunOutcome {
     Aborted,
     ChannelClosed,
     UnconfirmedCleanup,
+    DeliveryUnconfirmed,
 }
 
 struct PiRunCompletion {
@@ -1417,13 +792,24 @@ impl PiEngineAdapter {
         runtime_root: PathBuf,
         executable: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        Ok(Self {
-            model_service,
-            sessions_root,
-            runtime_root,
-            command: PiCommand::discover(executable.as_deref())?,
-            active: Arc::new(Mutex::new(HashMap::new())),
-        })
+        #[cfg(not(windows))]
+        {
+            let _ = (model_service, sessions_root, runtime_root, executable);
+            // The shipped Pi sidecar and confirmable Job Object containment are
+            // Windows-only. Do not silently substitute Unix process groups:
+            // detached descendants would escape and cleanup could not be proven.
+            Err(EngineError::Unsupported("pi_rpc_windows_only"))
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                model_service,
+                sessions_root,
+                runtime_root,
+                command: PiCommand::discover(executable.as_deref())?,
+                active: Arc::new(Mutex::new(HashMap::new())),
+            })
+        }
     }
 }
 
@@ -1492,10 +878,10 @@ impl EngineAdapter for PiEngineAdapter {
 
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            session_resume: true,
+            session_resume: cfg!(windows),
             session_rotate: false,
             native_steer: false,
-            cancel: true,
+            cancel: cfg!(windows),
             thought_stream: true,
             plan_updates: false,
             permission_requests: false,
@@ -1552,6 +938,9 @@ impl EngineAdapter for PiEngineAdapter {
             PiRunOutcome::UnconfirmedCleanup => Err(EngineError::Start(
                 "Pi process cleanup could not be confirmed".into(),
             )),
+            PiRunOutcome::DeliveryUnconfirmed => Err(EngineError::Start(
+                "Pi terminal event delivery could not be confirmed".into(),
+            )),
         }
     }
 }
@@ -1579,6 +968,9 @@ struct StartedPiRun {
     stdout: PiRpcRecordReader,
     translator: RpcEventTranslator,
     session: EngineSessionRef,
+    transition: Option<SessionTransition>,
+    model_label: String,
+    buffered_events: Vec<EngineEvent>,
 }
 
 #[derive(Debug)]
@@ -1608,8 +1000,8 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
     let mut startup = Some(startup);
     let agent_directory = runtime_root.join(&run_id).join("agent");
     let session_directory = sessions_root.join(context.work_id());
-    let mut child: Option<Child> = None;
     let mut process_tree: Option<PiProcessTree> = None;
+    let mut spawn_cleanup_confirmed = true;
     let mut startup_stdin: Option<ChildStdin> = None;
     let mut stderr_task = None;
 
@@ -1646,22 +1038,24 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         process
             .env("PI_CODING_AGENT_DIR", &agent_directory)
             .env(API_KEY_ENVIRONMENT_VARIABLE, &configuration.api_key);
-        let (spawned_child, spawned_tree) = PiProcessTree::spawn(&mut process)
-            .map_err(|_| EngineError::Start("Pi RPC process could not be started".into()))?;
-        child = Some(spawned_child);
+        let spawned_tree = match PiProcessTree::spawn(&mut process).await {
+            Ok(tree) => tree,
+            Err(error) => {
+                spawn_cleanup_confirmed = error.cleanup_confirmed();
+                return Err(EngineError::Start(
+                    "Pi RPC process could not be started".into(),
+                ));
+            }
+        };
         process_tree = Some(spawned_tree);
-        let process = child.as_mut().unwrap();
-        startup_stdin = Some(
-            process
-                .stdin
-                .take()
-                .ok_or_else(|| EngineError::Start("Pi RPC stdin is unavailable".into()))?,
-        );
-        let stdout = process
-            .stdout
-            .take()
-            .ok_or_else(|| EngineError::Start("Pi RPC stdout is unavailable".into()))?;
-        if let Some(mut stderr) = process.stderr.take() {
+        let stdio = process_tree
+            .as_mut()
+            .unwrap()
+            .take_stdio()
+            .map_err(|_| EngineError::Start("Pi RPC stdio is unavailable".into()))?;
+        startup_stdin = Some(stdio.stdin);
+        let stdout = stdio.stdout;
+        if let Some(mut stderr) = stdio.stderr {
             stderr_task = Some(tokio::spawn(async move {
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             }));
@@ -1677,65 +1071,33 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             result = write_rpc(startup_stdin.as_mut().unwrap(), &prompt) => result?,
         }
         let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
-        let mut translator = RpcEventTranslator::with_sensitive_values([
-            configuration.api_key.clone(),
-            context.work_id().to_owned(),
-            context.run_id().to_owned(),
-            context.agent_session_id().to_owned(),
-            context.root_path().to_string_lossy().into_owned(),
-            sessions_root.to_string_lossy().into_owned(),
-            session_directory.to_string_lossy().into_owned(),
-            runtime_root.to_string_lossy().into_owned(),
-            agent_directory.to_string_lossy().into_owned(),
-            configuration.model_id.clone(),
-        ]);
+        let mut translator = RpcEventTranslator::with_sensitive_values_and_local_paths(
+            [
+                configuration.api_key.clone(),
+                context.work_id().to_owned(),
+                context.run_id().to_owned(),
+                context.agent_session_id().to_owned(),
+                configuration.model_id.clone(),
+            ],
+            [
+                context.root_path().to_path_buf(),
+                sessions_root.clone(),
+                session_directory.clone(),
+                runtime_root.clone(),
+                agent_directory.clone(),
+            ],
+        );
         let buffered_events = tokio::select! {
             biased;
             _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
                 return Err(EngineError::Aborted);
             }
             result = await_prompt_acceptance(
-                child.as_mut().unwrap(),
                 &mut stdout,
                 &request_id,
                 &mut translator,
             ) => result?,
         };
-        if let Some(transition) = transition {
-            tokio::select! {
-                biased;
-                _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
-                    return Err(EngineError::Aborted);
-                }
-                result = sink.send(EngineEvent::SessionChanged { transition, reason: None }) => {
-                    result.map_err(|_| EngineError::ChannelClosed)?;
-                }
-            }
-        }
-        tokio::select! {
-            biased;
-            _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
-                return Err(EngineError::Aborted);
-            }
-            result = sink.send(EngineEvent::RunStarted { model_label: configuration.model_id.clone() }) => {
-                result.map_err(|_| EngineError::ChannelClosed)?;
-            }
-        }
-        for event in buffered_events {
-            tokio::select! {
-                biased;
-                _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
-                    return Err(EngineError::Aborted);
-                }
-                result = sink.send(event) => {
-                    result.map_err(|_| EngineError::ChannelClosed)?;
-                }
-            }
-        }
-        if !mark_pi_running(&active, &run_id, generation) {
-            return Err(EngineError::Aborted);
-        }
-
         Ok(StartedPiRun {
             stdin: startup_stdin.take().unwrap(),
             stdout,
@@ -1744,6 +1106,9 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
                 engine_kind: "pi_rpc".into(),
                 session_id: context.work_id().to_owned(),
             },
+            transition,
+            model_label: configuration.model_id.clone(),
+            buffered_events,
         })
     }
     .await;
@@ -1761,14 +1126,55 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
                 }
             };
             if acknowledged {
-                run_rpc_loop(
-                    &mut started.stdin,
-                    &mut started.stdout,
-                    &mut started.translator,
-                    &sink,
-                    &mut cancel,
-                )
-                .await
+                if !mark_pi_running(&active, &run_id, generation) {
+                    let _ = write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
+                    PiStreamResult {
+                        outcome: PiRunOutcome::Aborted,
+                        terminal_event: None,
+                    }
+                } else {
+                    let mut initial_events = Vec::with_capacity(
+                        started.buffered_events.len()
+                            + 1
+                            + usize::from(started.transition.is_some()),
+                    );
+                    if let Some(transition) = started.transition {
+                        initial_events.push(EngineEvent::SessionChanged {
+                            transition,
+                            reason: None,
+                        });
+                    }
+                    initial_events.push(EngineEvent::RunStarted {
+                        model_label: started.model_label,
+                    });
+                    initial_events.extend(started.buffered_events);
+                    match publish_started_events(&sink, initial_events, &mut cancel).await {
+                        Ok(()) => {
+                            run_rpc_loop(
+                                &mut started.stdin,
+                                &mut started.stdout,
+                                &mut started.translator,
+                                &sink,
+                                &mut cancel,
+                            )
+                            .await
+                        }
+                        Err(delivery) => {
+                            if delivery == EventDelivery::Aborted {
+                                let _ =
+                                    write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
+                            }
+                            PiStreamResult {
+                                outcome: if delivery == EventDelivery::Aborted {
+                                    PiRunOutcome::Aborted
+                                } else {
+                                    PiRunOutcome::ChannelClosed
+                                },
+                                terminal_event: None,
+                            }
+                        }
+                    }
+                }
             } else {
                 let _ = write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
                 PiStreamResult {
@@ -1799,8 +1205,8 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
     let allow_graceful_abort =
         matches!(stream.outcome, PiRunOutcome::Aborted | PiRunOutcome::Failed)
             || startup_error.is_some();
-    let cleanup_confirmed =
-        finish_pi_process_tree(child.as_mut(), process_tree.as_ref(), allow_graceful_abort).await;
+    let cleanup_confirmed = spawn_cleanup_confirmed
+        && finish_pi_process_tree(process_tree.take(), allow_graceful_abort).await;
     if let Some(mut stderr_task) = stderr_task
         && tokio::time::timeout(STDERR_DRAIN_TIMEOUT, &mut stderr_task)
             .await
@@ -1827,26 +1233,38 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             message: "Pi process-tree cleanup could not be confirmed".into(),
         };
     }
-    if outcome == PiRunOutcome::Aborted || outcome == PiRunOutcome::UnconfirmedCleanup {
-        if sink.send(terminal_event).await.is_err() && cleanup_confirmed {
-            outcome = PiRunOutcome::ChannelClosed;
-        }
-    } else {
-        tokio::select! {
-            biased;
-            _ = wait_for_abort(&mut cancel) => {
-                outcome = PiRunOutcome::Aborted;
-                let _ = sink.send(EngineEvent::RunFailed {
-                    message: "Pi run was aborted".into(),
-                }).await;
-            }
-            result = sink.send(terminal_event) => {
-                if result.is_err() {
-                    outcome = PiRunOutcome::ChannelClosed;
-                }
-            }
-        }
+    let observe_abort = !matches!(
+        outcome,
+        PiRunOutcome::Aborted | PiRunOutcome::UnconfirmedCleanup
+    );
+    let mut delivery = deliver_terminal(&sink, terminal_event, &mut cancel, observe_abort).await;
+    if delivery == Err(EventDelivery::Aborted) {
+        outcome = PiRunOutcome::Aborted;
+        delivery = deliver_terminal(
+            &sink,
+            EngineEvent::RunFailed {
+                message: "Pi run was aborted".into(),
+            },
+            &mut cancel,
+            false,
+        )
+        .await;
     }
+    match delivery {
+        Ok(()) => {}
+        Err(EventDelivery::ChannelClosed) => {
+            if cleanup_confirmed {
+                outcome = PiRunOutcome::ChannelClosed;
+            }
+        }
+        Err(EventDelivery::TimedOut) => {
+            if cleanup_confirmed {
+                outcome = PiRunOutcome::DeliveryUnconfirmed;
+            }
+        }
+        Err(EventDelivery::Aborted) => unreachable!("abort is normalized above"),
+    }
+    drop(sink);
     remove_pi_generation(&active, &run_id, generation);
     completion.complete(outcome);
     if let Some(error) = startup_error {
@@ -1904,79 +1322,16 @@ fn remove_pi_generation(active: &Weak<PiActiveRuns>, run_id: &str, generation: u
 }
 
 async fn finish_pi_process_tree(
-    child: Option<&mut Child>,
-    process_tree: Option<&PiProcessTree>,
+    process_tree: Option<PiProcessTree>,
     allow_graceful_abort: bool,
 ) -> bool {
-    let Some(child) = child else {
+    let Some(process_tree) = process_tree else {
         return true;
     };
-    let mut child_reaped = false;
-    if allow_graceful_abort
-        && matches!(
-            tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
-            Ok(Ok(_))
-        )
-    {
-        child_reaped = true;
-    }
-    if let Some(process_tree) = process_tree {
-        return process_tree.terminate_and_confirm(child).await.is_ok();
-    }
-    if !child_reaped {
-        let _ = child.start_kill();
-        child_reaped = matches!(
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, child.wait()).await,
-            Ok(Ok(_))
-        );
-    }
-    child_reaped
-}
-
-async fn await_prompt_acceptance(
-    child: &mut Child,
-    stdout: &mut PiRpcRecordReader,
-    request_id: &str,
-    translator: &mut RpcEventTranslator,
-) -> Result<Vec<EngineEvent>, EngineError> {
-    tokio::time::timeout(RPC_START_TIMEOUT, async {
-        let mut buffered_events = Vec::new();
-        loop {
-            let record = stdout
-                .next_record()
-                .await
-                .map_err(startup_rpc_record_error)?;
-            let Some(record) = record else {
-                let _ = child.wait().await;
-                return Err(EngineError::Start(PI_STARTUP_EXITED_DIAGNOSTIC.into()));
-            };
-            let message: Value = serde_json::from_str(&record)
-                .map_err(|_| EngineError::Start("Pi RPC returned malformed JSON".into()))?;
-            if message.get("type").and_then(Value::as_str) == Some("response")
-                && message.get("id").and_then(Value::as_str) == Some(request_id)
-            {
-                if message.get("success").and_then(Value::as_bool) == Some(true) {
-                    return Ok(buffered_events);
-                }
-                return Err(EngineError::Start(PI_STARTUP_REJECTED_DIAGNOSTIC.into()));
-            }
-            if let Some(event) = translator.translate(message) {
-                if event.is_terminal() {
-                    return Err(EngineError::Start(
-                        "Pi failed before accepting the Run".into(),
-                    ));
-                }
-                if buffered_events.len() == MAX_PRE_ACCEPTANCE_EVENTS {
-                    return Err(EngineError::Start(
-                        "Pi emitted too many events before accepting the Run".into(),
-                    ));
-                }
-                buffered_events.push(event);
-            }
-        }
-    })
-    .await
-    .map_err(|_| EngineError::Start(PI_STARTUP_TIMEOUT_DIAGNOSTIC.into()))?
+    process_tree
+        .terminate_and_confirm(allow_graceful_abort)
+        .await
+        .is_ok()
 }
 
 async fn run_rpc_loop(

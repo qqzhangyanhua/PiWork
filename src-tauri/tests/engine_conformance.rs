@@ -773,15 +773,17 @@ impl AdapterFactory for PiAdapterFactory {
 }
 
 fn adapter_factories() -> Vec<Box<dyn AdapterFactory>> {
-    vec![
+    let mut factories: Vec<Box<dyn AdapterFactory>> = vec![
         Box::new(FakeAdapterFactory {
             profile: FakeProfile::Full,
         }),
         Box::new(FakeAdapterFactory {
             profile: FakeProfile::Minimal,
         }),
-        Box::new(PiAdapterFactory),
-    ]
+    ];
+    #[cfg(windows)]
+    factories.push(Box::new(PiAdapterFactory));
+    factories
 }
 
 fn fixture_marker(root: &Path, name: &str) -> PathBuf {
@@ -901,6 +903,7 @@ async fn pi_fixture_adapter(root: &Path, scenario: FixtureScenario) -> Arc<PiEng
     )
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_uses_effective_permission_for_execution_tools() {
     let root = tempfile::tempdir().unwrap();
@@ -934,6 +937,7 @@ async fn pi_uses_effective_permission_for_execution_tools() {
     assert!(!tools.contains("bash"));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_startup_crash_diagnostic_does_not_include_stderr_or_launch_secrets() {
     let root = tempfile::tempdir().unwrap();
@@ -982,6 +986,7 @@ async fn pi_startup_crash_diagnostic_does_not_include_stderr_or_launch_secrets()
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_prompt_rejection_diagnostic_ignores_rpc_details_and_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1046,6 +1051,7 @@ async fn pi_prompt_rejection_diagnostic_ignores_rpc_details_and_stderr() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_startup_timeout_diagnostic_ignores_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1106,6 +1112,7 @@ async fn pi_startup_timeout_diagnostic_ignores_stderr() {
     assert_one_terminal(&collect_closed(retry_receiver).await);
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_buffers_pre_acceptance_events_until_after_run_started() {
     let root = tempfile::tempdir().unwrap();
@@ -1141,6 +1148,42 @@ async fn pi_buffers_pre_acceptance_events_until_after_run_started() {
     assert_one_terminal(&events);
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn pi_start_returns_before_capacity_one_pre_acceptance_buffer_flush() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::PreAcceptanceEvents).await;
+    let (sender, receiver) = mpsc::channel(1);
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        adapter.start(
+            context("run-capacity-one-pre-acceptance", 0),
+            input("buffer"),
+            sender,
+        ),
+    )
+    .await
+    .expect("accepted start must not wait for buffered event sink capacity")
+    .unwrap();
+
+    let events = collect_closed(receiver).await;
+    assert!(matches!(
+        events.first(),
+        Some(EngineEvent::RunStarted { .. })
+    ));
+    assert!(matches!(
+        events.get(1),
+        Some(EngineEvent::ThoughtDelta { text }) if text == "before-acceptance"
+    ));
+    assert!(matches!(
+        events.get(2),
+        Some(EngineEvent::RawEngineEvent { kind, .. }) if kind == "future_pre_acceptance"
+    ));
+    assert_one_terminal(&events);
+}
+
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_treats_a_pre_acceptance_terminal_as_startup_failure() {
     let root = tempfile::tempdir().unwrap();
@@ -1164,6 +1207,7 @@ async fn pi_treats_a_pre_acceptance_terminal_as_startup_failure() {
     ));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_rejects_a_pre_acceptance_event_flood_without_filling_the_sink() {
     let root = tempfile::tempdir().unwrap();
@@ -1200,6 +1244,7 @@ async fn pi_rejects_a_pre_acceptance_event_flood_without_filling_the_sink() {
     assert!(receiver.recv().await.is_none());
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_runtime_context_redacts_sensitive_raw_events() {
     let root = tempfile::tempdir().unwrap();
@@ -1234,6 +1279,7 @@ async fn pi_runtime_context_redacts_sensitive_raw_events() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_reserves_a_run_before_concurrent_startup() {
     let root = tempfile::tempdir().unwrap();
@@ -1276,6 +1322,7 @@ async fn pi_reserves_a_run_before_concurrent_startup() {
     assert!(matches!(second, Ok(Err(EngineError::Start(_)))));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_abort_waits_for_child_exit_and_cleanup_acknowledgement() {
     let root = tempfile::tempdir().unwrap();
@@ -1305,6 +1352,7 @@ async fn pi_abort_waits_for_child_exit_and_cleanup_acknowledgement() {
     assert!(!root.path().join("runtime/run-abort-ack/agent").exists());
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_abort_interrupts_sink_backpressure_and_delivers_a_terminal_after_cleanup() {
     let root = tempfile::tempdir().unwrap();
@@ -1360,6 +1408,68 @@ async fn pi_abort_interrupts_sink_backpressure_and_delivers_a_terminal_after_cle
     assert!(receiver.recv().await.is_none());
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn pi_abort_fails_boundedly_when_capacity_one_sink_is_never_drained() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::Backpressure).await;
+    let (sender, receiver) = mpsc::channel(1);
+    adapter
+        .start(
+            context("run-never-drained-terminal", 0),
+            input("hold"),
+            sender,
+        )
+        .await
+        .unwrap();
+    wait_for_fixture_marker(root.path(), "backpressure-emitted").await;
+    bounded("capacity-one Pi sink to become full", async {
+        while receiver.len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        adapter.abort("run-never-drained-terminal"),
+    )
+    .await
+    .expect("terminal delivery failure must complete within its deadline")
+    .expect_err("an undelivered terminal must not acknowledge abort");
+    assert!(
+        matches!(error, EngineError::Start(ref message) if message.contains("delivery")),
+        "unexpected abort error: {error:?}"
+    );
+    assert!(
+        !root
+            .path()
+            .join("runtime/run-never-drained-terminal/agent")
+            .exists()
+    );
+
+    drop(receiver);
+    let (retry_sender, mut retry_receiver) = mpsc::channel(8);
+    adapter
+        .start(
+            context("run-never-drained-terminal", 0),
+            input("retry"),
+            retry_sender,
+        )
+        .await
+        .expect("failed terminal delivery must remove the active generation");
+    assert!(matches!(
+        receive_event(&mut retry_receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+    adapter.abort("run-never-drained-terminal").await.unwrap();
+    assert!(matches!(
+        receive_event(&mut retry_receiver).await,
+        EngineEvent::RunFailed { .. }
+    ));
+}
+
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_abort_interrupts_error_terminal_backpressure() {
     for (scenario, run_id) in [
@@ -1417,6 +1527,7 @@ async fn pi_abort_interrupts_error_terminal_backpressure() {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_completion_reaps_a_descendant_that_inherits_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1450,6 +1561,7 @@ async fn pi_completion_reaps_a_descendant_that_inherits_stderr() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_abort_reaps_a_descendant_that_inherits_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1487,6 +1599,7 @@ async fn pi_abort_reaps_a_descendant_that_inherits_stderr() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn dropping_pi_reaps_a_descendant_that_inherits_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1526,6 +1639,7 @@ async fn dropping_pi_reaps_a_descendant_that_inherits_stderr() {
     );
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_rejects_restart_while_abort_cleanup_is_in_progress() {
     let root = tempfile::tempdir().unwrap();
@@ -1562,6 +1676,7 @@ async fn pi_rejects_restart_while_abort_cleanup_is_in_progress() {
     assert!(matches!(restart, Err(EngineError::Start(_))));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_allows_same_run_restart_after_abort_cleanup_acknowledgement() {
     let root = tempfile::tempdir().unwrap();
@@ -1610,6 +1725,7 @@ async fn pi_allows_same_run_restart_after_abort_cleanup_acknowledgement() {
     collect_closed(second_receiver).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn cancelling_a_pi_abort_caller_does_not_strand_completion() {
     let root = tempfile::tempdir().unwrap();
@@ -1666,6 +1782,7 @@ async fn cancelling_a_pi_abort_caller_does_not_strand_completion() {
     collect_closed(restarted_receiver).await;
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn dropping_pi_after_receiver_close_releases_the_node_process() {
     let root = tempfile::tempdir().unwrap();
@@ -1730,6 +1847,7 @@ async fn dropping_a_holding_fake_releases_its_run_task() {
     assert!(matches!(events.last(), Some(EngineEvent::RunFailed { .. })));
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn cancelling_pi_startup_sends_abort_and_reaps_the_node_process() {
     let root = tempfile::tempdir().unwrap();

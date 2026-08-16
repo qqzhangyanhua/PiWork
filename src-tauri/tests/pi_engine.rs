@@ -18,6 +18,7 @@ fn configuration(provider: ModelProvider) -> RuntimeModelConfiguration {
     }
 }
 
+#[cfg(windows)]
 #[tokio::test]
 async fn pi_declares_only_capabilities_verified_by_its_rpc_translation_and_control_paths() {
     use std::sync::Arc;
@@ -408,6 +409,32 @@ fn rpc_known_events_redact_sensitive_values_before_translation() {
 }
 
 #[test]
+fn rpc_tool_fallback_redacts_sensitive_json_keys_and_escaped_values() {
+    let secret = "private\"\\json-sentinel";
+    let mut translator = RpcEventTranslator::with_sensitive_values([secret]);
+
+    for event in [
+        translator.translate(json!({
+            "type": "tool_execution_update",
+            "toolCallId": "call-redact",
+            "toolName": "read",
+            "partialResult": { secret: { "nested": secret } }
+        })),
+        translator.translate(json!({
+            "type": "tool_execution_end",
+            "toolCallId": "call-redact",
+            "toolName": "read",
+            "result": { secret: { "nested": secret } },
+            "isError": false
+        })),
+    ] {
+        let rendered = format!("{:?}", event.unwrap());
+        assert!(!rendered.contains("private"), "fallback leaked: {rendered}");
+        assert!(rendered.contains("[REDACTED]"));
+    }
+}
+
+#[test]
 fn rpc_redaction_preserves_protocol_discriminators_and_keys() {
     let mut translator = RpcEventTranslator::with_sensitive_values([
         "agent_end",
@@ -436,7 +463,7 @@ fn rpc_redaction_preserves_protocol_discriminators_and_keys() {
         })),
         Some(EngineEvent::ToolStarted { tool_name, input_summary, .. })
             if tool_name == "read"
-                && input_summary.contains("toolName")
+                && !input_summary.contains("toolName")
                 && input_summary.contains("[REDACTED]")
     ));
     assert!(matches!(
@@ -509,11 +536,13 @@ fn rpc_redacts_windows_path_case_separator_and_verbatim_variants() {
 }
 
 #[cfg(windows)]
-fn windows_short_path(path: &str) -> String {
+fn windows_path_name(path: &str, use_short_name: bool) -> Option<String> {
     use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
+        #[link_name = "GetLongPathNameW"]
+        fn get_long_path_name_w(long: *const u16, output: *mut u16, capacity: u32) -> u32;
         #[link_name = "GetShortPathNameW"]
         fn get_short_path_name_w(long: *const u16, short: *mut u16, capacity: u32) -> u32;
     }
@@ -522,29 +551,107 @@ fn windows_short_path(path: &str) -> String {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let mut short = vec![0_u16; 32_768];
-    let length =
-        unsafe { get_short_path_name_w(long.as_ptr(), short.as_mut_ptr(), short.len() as u32) }
-            as usize;
-    assert!(length > 0 && length < short.len());
-    String::from_utf16(&short[..length]).unwrap()
+    let mut output = vec![0_u16; 32_768];
+    let length = unsafe {
+        if use_short_name {
+            get_short_path_name_w(long.as_ptr(), output.as_mut_ptr(), output.len() as u32)
+        } else {
+            get_long_path_name_w(long.as_ptr(), output.as_mut_ptr(), output.len() as u32)
+        }
+    } as usize;
+    (length > 0 && length < output.len()).then(|| String::from_utf16(&output[..length]).unwrap())
 }
 
 #[cfg(windows)]
 #[test]
 fn rpc_redacts_an_actual_windows_short_path_alias() {
-    let long_path = r"C:\Program Files";
-    let short_path = windows_short_path(long_path);
-    assert_ne!(
-        short_path.to_ascii_lowercase(),
-        long_path.to_ascii_lowercase()
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("Long Alias Component");
+    std::fs::create_dir_all(&path).unwrap();
+    let long_path = path.to_string_lossy();
+    let Some(short_path) = windows_path_name(&long_path, true) else {
+        return;
+    };
+    if short_path.eq_ignore_ascii_case(&long_path) {
+        return;
+    }
+    let mut translator = RpcEventTranslator::with_sensitive_values_and_local_paths(
+        std::iter::empty::<String>(),
+        [path],
     );
-    let mut translator = RpcEventTranslator::with_sensitive_values([long_path]);
 
     assert!(matches!(
         translator.translate(json!({
             "type": "message_update",
             "assistantMessageEvent": {"type": "text_delta", "delta": short_path}
+        })),
+        Some(EngineEvent::AssistantDelta { text }) if text == "[REDACTED]"
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn rpc_redacts_actual_unicode_windows_case_variants() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("Ünicode秘密");
+    std::fs::create_dir_all(&path).unwrap();
+    let variant = path.to_string_lossy().replace('Ü', "ü");
+    let mut translator = RpcEventTranslator::with_sensitive_values_and_local_paths(
+        std::iter::empty::<String>(),
+        [path],
+    );
+
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": variant}
+        })),
+        Some(EngineEvent::AssistantDelta { text }) if text == "[REDACTED]"
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn rpc_redacts_mixed_windows_short_and_long_components() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary
+        .path()
+        .join("Long Alias Component Alpha")
+        .join("Long Alias Component Beta");
+    std::fs::create_dir_all(&path).unwrap();
+    let rendered = path.to_string_lossy();
+    let Some(long) = windows_path_name(&rendered, false) else {
+        return;
+    };
+    let Some(short) = windows_path_name(&rendered, true) else {
+        return;
+    };
+    let long_parts = long.split('\\').collect::<Vec<_>>();
+    let short_parts = short.split('\\').collect::<Vec<_>>();
+    if long_parts.len() != short_parts.len() {
+        return;
+    }
+    let changed = long_parts
+        .iter()
+        .zip(&short_parts)
+        .enumerate()
+        .filter_map(|(index, (long, short))| (!long.eq_ignore_ascii_case(short)).then_some(index))
+        .collect::<Vec<_>>();
+    if changed.len() < 2 {
+        return;
+    }
+    let mut mixed_parts = long_parts;
+    mixed_parts[changed[0]] = short_parts[changed[0]];
+    let mixed = mixed_parts.join("\\");
+    let mut translator = RpcEventTranslator::with_sensitive_values_and_local_paths(
+        std::iter::empty::<String>(),
+        [path],
+    );
+
+    assert!(matches!(
+        translator.translate(json!({
+            "type": "message_update",
+            "assistantMessageEvent": {"type": "text_delta", "delta": mixed}
         })),
         Some(EngineEvent::AssistantDelta { text }) if text == "[REDACTED]"
     ));
