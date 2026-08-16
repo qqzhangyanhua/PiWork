@@ -504,7 +504,10 @@ fn rpc_raw_redaction_preserves_keys_while_redacting_payload_values() {
 #[test]
 fn rpc_redacts_windows_path_case_separator_and_verbatim_variants() {
     let sensitive_path = r"D:\Workspace\Secret Folder";
-    let mut translator = RpcEventTranslator::with_sensitive_values([sensitive_path]);
+    let mut translator = RpcEventTranslator::with_sensitive_values_and_local_paths(
+        std::iter::empty::<String>(),
+        [sensitive_path],
+    );
 
     for variant in [
         r"d:\workspace\secret folder",
@@ -521,8 +524,10 @@ fn rpc_redacts_windows_path_case_separator_and_verbatim_variants() {
         ));
     }
 
-    let mut verbatim_registered =
-        RpcEventTranslator::with_sensitive_values([r"\\?\D:\Workspace\Secret Folder"]);
+    let mut verbatim_registered = RpcEventTranslator::with_sensitive_values_and_local_paths(
+        std::iter::empty::<String>(),
+        [r"\\?\D:\Workspace\Secret Folder"],
+    );
     assert!(matches!(
         verbatim_registered.translate(json!({
             "type": "message_update",

@@ -110,6 +110,8 @@ pub enum EngineError {
     NotRunning,
     #[error("engine run was aborted")]
     Aborted,
+    #[error("engine cleanup could not be confirmed")]
+    CleanupUnconfirmed,
     #[error("engine capability is unsupported: {0}")]
     Unsupported(&'static str),
 }

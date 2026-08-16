@@ -29,7 +29,7 @@ mod event_dispatch;
 mod redaction;
 mod startup;
 
-use event_dispatch::{EventDelivery, deliver_terminal, publish_started_events};
+use event_dispatch::{EventDelivery, EventDispatcher};
 use redaction::SensitiveRedactor;
 use startup::await_prompt_acceptance;
 
@@ -101,8 +101,7 @@ fn escape_xml_attribute(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 const RPC_START_TIMEOUT: Duration = Duration::from_secs(15);
-const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-const PROCESS_TREE_TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
 const MAX_PRE_ACCEPTANCE_EVENTS: usize = 64;
 // Pi lifecycle records may contain cumulative/full assistant output up to the
 // configured 32,768-token ceiling. 1 MiB admits those records while retaining
@@ -115,6 +114,39 @@ const MAX_RAW_EVENT_KIND_CHARS: usize = 256;
 const PI_STARTUP_EXITED_DIAGNOSTIC: &str = "Pi RPC exited before accepting the Run";
 const PI_STARTUP_REJECTED_DIAGNOSTIC: &str = "Pi rejected the Run prompt";
 const PI_STARTUP_TIMEOUT_DIAGNOSTIC: &str = "Pi RPC did not accept the Run in time";
+
+#[derive(Clone, Copy)]
+struct CleanupBudget {
+    deadline: tokio::time::Instant,
+}
+
+impl CleanupBudget {
+    fn new() -> Self {
+        Self::from_start(tokio::time::Instant::now())
+    }
+
+    fn from_start(started: tokio::time::Instant) -> Self {
+        Self {
+            deadline: started + CLEANUP_TIMEOUT,
+        }
+    }
+
+    fn deadline(self) -> tokio::time::Instant {
+        self.deadline
+    }
+}
+
+fn begin_cleanup(cleanup: &mut Option<CleanupBudget>) -> CleanupBudget {
+    *cleanup.get_or_insert_with(CleanupBudget::new)
+}
+
+async fn write_abort_before_deadline(stdin: &mut ChildStdin, cleanup: CleanupBudget) {
+    let _ = tokio::time::timeout_at(
+        cleanup.deadline(),
+        write_rpc(stdin, &json!({"type": "abort"})),
+    )
+    .await;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RpcRecordReadError {
@@ -724,7 +756,6 @@ enum PiRunOutcome {
     Aborted,
     ChannelClosed,
     UnconfirmedCleanup,
-    DeliveryUnconfirmed,
 }
 
 struct PiRunCompletion {
@@ -935,12 +966,7 @@ impl EngineAdapter for PiEngineAdapter {
             PiRunOutcome::Completed | PiRunOutcome::Failed | PiRunOutcome::ChannelClosed => {
                 Err(EngineError::NotRunning)
             }
-            PiRunOutcome::UnconfirmedCleanup => Err(EngineError::Start(
-                "Pi process cleanup could not be confirmed".into(),
-            )),
-            PiRunOutcome::DeliveryUnconfirmed => Err(EngineError::Start(
-                "Pi terminal event delivery could not be confirmed".into(),
-            )),
+            PiRunOutcome::UnconfirmedCleanup => Err(EngineError::CleanupUnconfirmed),
         }
     }
 }
@@ -997,11 +1023,13 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         startup,
         mut caller_acknowledgement,
     } = request;
+    let mut dispatcher = EventDispatcher::new(sink);
     let mut startup = Some(startup);
     let agent_directory = runtime_root.join(&run_id).join("agent");
     let session_directory = sessions_root.join(context.work_id());
     let mut process_tree: Option<PiProcessTree> = None;
     let mut spawn_cleanup_confirmed = true;
+    let mut cleanup_budget = None;
     let mut startup_stdin: Option<ChildStdin> = None;
     let mut stderr_task = None;
 
@@ -1042,6 +1070,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             Ok(tree) => tree,
             Err(error) => {
                 spawn_cleanup_confirmed = error.cleanup_confirmed();
+                cleanup_budget = error.cleanup_budget();
                 return Err(EngineError::Start(
                     "Pi RPC process could not be started".into(),
                 ));
@@ -1116,83 +1145,85 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
     let mut startup_error = None;
     let stream = match startup_result {
         Ok(mut started) => {
-            let acknowledged = if startup.take().unwrap().send(Ok(started.session)).is_err() {
-                false
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = wait_for_abort(&mut cancel) => false,
-                    acknowledged = &mut caller_acknowledgement => acknowledged.is_ok(),
+            let mut initial_events = Vec::with_capacity(
+                started.buffered_events.len() + 1 + usize::from(started.transition.is_some()),
+            );
+            if let Some(transition) = started.transition {
+                initial_events.push(EngineEvent::SessionChanged {
+                    transition,
+                    reason: None,
+                });
+            }
+            initial_events.push(EngineEvent::RunStarted {
+                model_label: started.model_label,
+            });
+            initial_events.extend(started.buffered_events);
+
+            if let Err(delivery) = dispatcher.stage_initial(initial_events) {
+                startup_error = Some(EngineError::Start(match delivery {
+                    EventDelivery::CapacityExceeded => {
+                        "Pi startup events exceeded the internal staging capacity".into()
+                    }
+                    EventDelivery::ChannelClosed
+                    | EventDelivery::TimedOut
+                    | EventDelivery::Aborted => "Pi event delivery stopped during startup".into(),
+                }));
+                let cleanup = begin_cleanup(&mut cleanup_budget);
+                write_abort_before_deadline(&mut started.stdin, cleanup).await;
+                PiStreamResult {
+                    outcome: PiRunOutcome::ChannelClosed,
+                    terminal_event: None,
                 }
-            };
-            if acknowledged {
-                if !mark_pi_running(&active, &run_id, generation) {
-                    let _ = write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
-                    PiStreamResult {
-                        outcome: PiRunOutcome::Aborted,
-                        terminal_event: None,
-                    }
-                } else {
-                    let mut initial_events = Vec::with_capacity(
-                        started.buffered_events.len()
-                            + 1
-                            + usize::from(started.transition.is_some()),
-                    );
-                    if let Some(transition) = started.transition {
-                        initial_events.push(EngineEvent::SessionChanged {
-                            transition,
-                            reason: None,
-                        });
-                    }
-                    initial_events.push(EngineEvent::RunStarted {
-                        model_label: started.model_label,
-                    });
-                    initial_events.extend(started.buffered_events);
-                    match publish_started_events(&sink, initial_events, &mut cancel).await {
-                        Ok(()) => {
-                            run_rpc_loop(
-                                &mut started.stdin,
-                                &mut started.stdout,
-                                &mut started.translator,
-                                &sink,
-                                &mut cancel,
-                            )
-                            .await
-                        }
-                        Err(delivery) => {
-                            if delivery == EventDelivery::Aborted {
-                                let _ =
-                                    write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
-                            }
-                            PiStreamResult {
-                                outcome: if delivery == EventDelivery::Aborted {
-                                    PiRunOutcome::Aborted
-                                } else {
-                                    PiRunOutcome::ChannelClosed
-                                },
-                                terminal_event: None,
-                            }
-                        }
-                    }
-                }
-            } else {
-                let _ = write_rpc(&mut started.stdin, &json!({"type": "abort"})).await;
+            } else if !mark_pi_running(&active, &run_id, generation) {
+                startup_error = Some(EngineError::Aborted);
+                let cleanup = begin_cleanup(&mut cleanup_budget);
+                write_abort_before_deadline(&mut started.stdin, cleanup).await;
                 PiStreamResult {
                     outcome: PiRunOutcome::Aborted,
                     terminal_event: None,
                 }
+            } else {
+                let acknowledged = if startup.take().unwrap().send(Ok(started.session)).is_err() {
+                    false
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_abort(&mut cancel) => false,
+                        acknowledged = &mut caller_acknowledgement => acknowledged.is_ok(),
+                    }
+                };
+                if acknowledged {
+                    run_rpc_loop(
+                        &mut started.stdin,
+                        &mut started.stdout,
+                        &mut started.translator,
+                        &dispatcher,
+                        &mut cancel,
+                        &mut cleanup_budget,
+                    )
+                    .await
+                } else {
+                    let cleanup = begin_cleanup(&mut cleanup_budget);
+                    write_abort_before_deadline(&mut started.stdin, cleanup).await;
+                    PiStreamResult {
+                        outcome: PiRunOutcome::Aborted,
+                        terminal_event: None,
+                    }
+                }
             }
         }
         Err(error) => {
+            let cleanup = begin_cleanup(&mut cleanup_budget);
             if let Some(stdin) = startup_stdin.as_mut() {
-                let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+                write_abort_before_deadline(stdin, cleanup).await;
             }
             let outcome = match &error {
                 EngineError::Aborted => PiRunOutcome::Aborted,
                 EngineError::ChannelClosed => PiRunOutcome::ChannelClosed,
-                EngineError::NotRunning | EngineError::Start(_) | EngineError::Unsupported(_) => {
-                    PiRunOutcome::Failed
-                }
+                EngineError::NotRunning
+                | EngineError::Start(_)
+                | EngineError::CleanupUnconfirmed
+                | EngineError::Unsupported(_) => PiRunOutcome::Failed,
             };
             startup_error = Some(error);
             PiStreamResult {
@@ -1205,10 +1236,11 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
     let allow_graceful_abort =
         matches!(stream.outcome, PiRunOutcome::Aborted | PiRunOutcome::Failed)
             || startup_error.is_some();
-    let cleanup_confirmed = spawn_cleanup_confirmed
-        && finish_pi_process_tree(process_tree.take(), allow_graceful_abort).await;
+    let cleanup_budget = begin_cleanup(&mut cleanup_budget);
+    let mut cleanup_confirmed = spawn_cleanup_confirmed
+        && finish_pi_process_tree(process_tree.take(), allow_graceful_abort, cleanup_budget).await;
     if let Some(mut stderr_task) = stderr_task
-        && tokio::time::timeout(STDERR_DRAIN_TIMEOUT, &mut stderr_task)
+        && tokio::time::timeout_at(cleanup_budget.deadline(), &mut stderr_task)
             .await
             .is_err()
     {
@@ -1237,18 +1269,21 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         outcome,
         PiRunOutcome::Aborted | PiRunOutcome::UnconfirmedCleanup
     );
-    let mut delivery = deliver_terminal(&sink, terminal_event, &mut cancel, observe_abort).await;
+    let mut delivery = dispatcher
+        .deliver_terminal(terminal_event, &mut cancel, observe_abort, cleanup_budget)
+        .await;
     if delivery == Err(EventDelivery::Aborted) {
         outcome = PiRunOutcome::Aborted;
-        delivery = deliver_terminal(
-            &sink,
-            EngineEvent::RunFailed {
-                message: "Pi run was aborted".into(),
-            },
-            &mut cancel,
-            false,
-        )
-        .await;
+        delivery = dispatcher
+            .deliver_terminal(
+                EngineEvent::RunFailed {
+                    message: "Pi run was aborted".into(),
+                },
+                &mut cancel,
+                false,
+                cleanup_budget,
+            )
+            .await;
     }
     match delivery {
         Ok(()) => {}
@@ -1258,17 +1293,29 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             }
         }
         Err(EventDelivery::TimedOut) => {
-            if cleanup_confirmed {
-                outcome = PiRunOutcome::DeliveryUnconfirmed;
-            }
+            cleanup_confirmed = false;
+            outcome = PiRunOutcome::UnconfirmedCleanup;
+        }
+        Err(EventDelivery::CapacityExceeded) => {
+            cleanup_confirmed = false;
+            outcome = PiRunOutcome::UnconfirmedCleanup;
         }
         Err(EventDelivery::Aborted) => unreachable!("abort is normalized above"),
     }
-    drop(sink);
+    drop(dispatcher);
     remove_pi_generation(&active, &run_id, generation);
     completion.complete(outcome);
     if let Some(error) = startup_error {
+        let error = startup_completion_error(error, cleanup_confirmed);
         let _ = startup.take().unwrap().send(Err(error));
+    }
+}
+
+fn startup_completion_error(error: EngineError, cleanup_confirmed: bool) -> EngineError {
+    if cleanup_confirmed {
+        error
+    } else {
+        EngineError::CleanupUnconfirmed
     }
 }
 
@@ -1324,12 +1371,13 @@ fn remove_pi_generation(active: &Weak<PiActiveRuns>, run_id: &str, generation: u
 async fn finish_pi_process_tree(
     process_tree: Option<PiProcessTree>,
     allow_graceful_abort: bool,
+    cleanup: CleanupBudget,
 ) -> bool {
     let Some(process_tree) = process_tree else {
         return true;
     };
     process_tree
-        .terminate_and_confirm(allow_graceful_abort)
+        .terminate_and_confirm(allow_graceful_abort, cleanup)
         .await
         .is_ok()
 }
@@ -1338,14 +1386,16 @@ async fn run_rpc_loop(
     stdin: &mut ChildStdin,
     stdout: &mut PiRpcRecordReader,
     translator: &mut RpcEventTranslator,
-    sink: &mpsc::Sender<EngineEvent>,
+    dispatcher: &EventDispatcher,
     cancel: &mut watch::Receiver<RunControl>,
+    cleanup_budget: &mut Option<CleanupBudget>,
 ) -> PiStreamResult {
     loop {
         tokio::select! {
             biased;
             _ = wait_for_abort(cancel) => {
-                let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+                let cleanup = begin_cleanup(cleanup_budget);
+                write_abort_before_deadline(stdin, cleanup).await;
                 return PiStreamResult {
                     outcome: PiRunOutcome::Aborted,
                     terminal_event: None,
@@ -1359,7 +1409,8 @@ async fn run_rpc_loop(
                         terminal_event: None,
                     },
                     Err(error) => {
-                        let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+                        let cleanup = begin_cleanup(cleanup_budget);
+                        write_abort_before_deadline(stdin, cleanup).await;
                         return PiStreamResult {
                             outcome: PiRunOutcome::Failed,
                             terminal_event: Some(steady_rpc_record_error(error)),
@@ -1367,7 +1418,8 @@ async fn run_rpc_loop(
                     }
                 };
                 let Ok(message) = serde_json::from_str::<Value>(&record) else {
-                    let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
+                    let cleanup = begin_cleanup(cleanup_budget);
+                    write_abort_before_deadline(stdin, cleanup).await;
                     return PiStreamResult {
                         outcome: PiRunOutcome::Failed,
                         terminal_event: Some(EngineEvent::RunFailed {
@@ -1390,9 +1442,11 @@ async fn run_rpc_loop(
                             terminal_event: Some(event),
                         };
                     }
-                    match send_rpc_event(stdin, sink, cancel, event).await {
+                    match send_rpc_event(dispatcher, cancel, event).await {
                         PiEventDelivery::Sent => {}
                         PiEventDelivery::Aborted => {
+                            let cleanup = begin_cleanup(cleanup_budget);
+                            write_abort_before_deadline(stdin, cleanup).await;
                             return PiStreamResult {
                                 outcome: PiRunOutcome::Aborted,
                                 terminal_event: None,
@@ -1418,24 +1472,16 @@ enum PiEventDelivery {
 }
 
 async fn send_rpc_event(
-    stdin: &mut ChildStdin,
-    sink: &mpsc::Sender<EngineEvent>,
+    dispatcher: &EventDispatcher,
     cancel: &mut watch::Receiver<RunControl>,
     event: EngineEvent,
 ) -> PiEventDelivery {
-    tokio::select! {
-        biased;
-        _ = wait_for_abort(cancel) => {
-            let _ = write_rpc(stdin, &json!({"type": "abort"})).await;
-            PiEventDelivery::Aborted
-        }
-        result = sink.send(event) => {
-            if result.is_ok() {
-                PiEventDelivery::Sent
-            } else {
-                PiEventDelivery::ChannelClosed
-            }
-        }
+    match dispatcher.send(event, cancel).await {
+        Ok(()) => PiEventDelivery::Sent,
+        Err(EventDelivery::Aborted) => PiEventDelivery::Aborted,
+        Err(EventDelivery::CapacityExceeded)
+        | Err(EventDelivery::ChannelClosed)
+        | Err(EventDelivery::TimedOut) => PiEventDelivery::ChannelClosed,
     }
 }
 
@@ -1458,6 +1504,45 @@ use std::os::windows::process::CommandExt as _;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cleanup_budget_uses_one_absolute_deadline_below_the_supervisor_timeout() {
+        let started = tokio::time::Instant::now();
+        let budget = super::CleanupBudget::from_start(started);
+
+        assert_eq!(
+            budget.deadline().duration_since(started),
+            super::CLEANUP_TIMEOUT
+        );
+        assert!(
+            budget.deadline() < started + std::time::Duration::from_secs(5),
+            "Pi cleanup must finish before the supervisor's five-second timeout"
+        );
+        assert_eq!(budget.deadline(), budget.deadline());
+    }
+
+    #[test]
+    fn cleanup_trigger_reuses_the_first_absolute_deadline_for_every_later_phase() {
+        let mut cleanup = None;
+
+        let process_tree = super::begin_cleanup(&mut cleanup);
+        let stderr = super::begin_cleanup(&mut cleanup);
+        let terminal = super::begin_cleanup(&mut cleanup);
+
+        assert_eq!(process_tree.deadline(), stderr.deadline());
+        assert_eq!(stderr.deadline(), terminal.deadline());
+    }
+
+    #[test]
+    fn unconfirmed_partial_spawn_cleanup_overrides_the_startup_error_with_a_typed_failure() {
+        let error = super::startup_completion_error(
+            super::EngineError::Start("original startup diagnostic".into()),
+            false,
+        );
+
+        assert!(matches!(error, super::EngineError::CleanupUnconfirmed));
+        assert!(!matches!(error, super::EngineError::NotRunning));
+    }
+
     #[test]
     fn stale_pi_generation_cleanup_cannot_remove_a_new_generation() {
         let active = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));

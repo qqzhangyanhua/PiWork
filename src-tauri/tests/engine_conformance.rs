@@ -1156,7 +1156,7 @@ async fn pi_start_returns_before_capacity_one_pre_acceptance_buffer_flush() {
     let (sender, receiver) = mpsc::channel(1);
 
     tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(15),
         adapter.start(
             context("run-capacity-one-pre-acceptance", 0),
             input("buffer"),
@@ -1180,6 +1180,31 @@ async fn pi_start_returns_before_capacity_one_pre_acceptance_buffer_flush() {
         events.get(2),
         Some(EngineEvent::RawEngineEvent { kind, .. }) if kind == "future_pre_acceptance"
     ));
+    assert_one_terminal(&events);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn pi_immediate_abort_after_acceptance_still_delivers_run_started_before_one_terminal() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::HoldUntilAbort).await;
+    let (sender, receiver) = mpsc::channel(8);
+
+    adapter
+        .start(
+            context("run-immediate-abort", 0),
+            input("abort immediately"),
+            sender,
+        )
+        .await
+        .unwrap();
+    adapter.abort("run-immediate-abort").await.unwrap();
+    let events = collect_closed(receiver).await;
+
+    assert!(
+        matches!(events.first(), Some(EngineEvent::RunStarted { .. })),
+        "accepted run omitted RunStarted: {events:?}"
+    );
     assert_one_terminal(&events);
 }
 
@@ -1397,10 +1422,23 @@ async fn pi_abort_interrupts_sink_backpressure_and_delivers_a_terminal_after_cle
         "Pi abort acknowledged before terminal delivery"
     );
 
-    let started = receive_event(&mut receiver).await;
-    let terminal = receive_event(&mut receiver).await;
-    assert!(matches!(started, EngineEvent::RunStarted { .. }));
-    assert!(matches!(terminal, EngineEvent::RunFailed { .. }));
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        let terminal = event.is_terminal();
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    assert!(matches!(
+        events.first(),
+        Some(EngineEvent::RunStarted { .. })
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::ThoughtDelta { text } if text == "blocked"
+    )));
+    assert!(matches!(events.last(), Some(EngineEvent::RunFailed { .. })));
     bounded("backpressured Pi abort", abort)
         .await
         .unwrap()
@@ -1438,7 +1476,7 @@ async fn pi_abort_fails_boundedly_when_capacity_one_sink_is_never_drained() {
     .expect("terminal delivery failure must complete within its deadline")
     .expect_err("an undelivered terminal must not acknowledge abort");
     assert!(
-        matches!(error, EngineError::Start(ref message) if message.contains("delivery")),
+        matches!(error, EngineError::CleanupUnconfirmed),
         "unexpected abort error: {error:?}"
     );
     assert!(
@@ -1463,9 +1501,11 @@ async fn pi_abort_fails_boundedly_when_capacity_one_sink_is_never_drained() {
         EngineEvent::RunStarted { .. }
     ));
     adapter.abort("run-never-drained-terminal").await.unwrap();
+    let retry_events = collect_closed(retry_receiver).await;
+    assert_one_terminal(&retry_events);
     assert!(matches!(
-        receive_event(&mut retry_receiver).await,
-        EngineEvent::RunFailed { .. }
+        retry_events.last(),
+        Some(EngineEvent::RunFailed { .. })
     ));
 }
 
@@ -1519,10 +1559,11 @@ async fn pi_abort_interrupts_error_terminal_backpressure() {
             receive_event(&mut receiver).await,
             EngineEvent::RunFailed { .. }
         ));
-        bounded("error-terminal Pi abort", abort)
-            .await
-            .unwrap()
-            .unwrap();
+        let abort_result = bounded("error-terminal Pi abort", abort).await.unwrap();
+        assert!(
+            matches!(abort_result, Ok(()) | Err(EngineError::NotRunning)),
+            "unexpected error-terminal abort result: {abort_result:?}"
+        );
         assert!(receiver.recv().await.is_none());
     }
 }

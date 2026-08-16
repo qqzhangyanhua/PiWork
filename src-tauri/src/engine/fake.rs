@@ -356,6 +356,7 @@ impl FakeEngineAdapter {
                 Err(EngineError::ChannelClosed)
                 | Err(EngineError::NotRunning)
                 | Err(EngineError::Start(_))
+                | Err(EngineError::CleanupUnconfirmed)
                 | Err(EngineError::Unsupported(_)) => FakeTaskOutcome::ChannelClosed,
             };
             #[cfg(test)]

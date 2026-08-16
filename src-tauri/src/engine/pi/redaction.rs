@@ -7,6 +7,11 @@ use super::EngineEvent;
 #[derive(Default)]
 pub(super) struct SensitiveRedactor {
     values: Vec<String>,
+    path_matchers: Vec<PathMatcher>,
+}
+
+struct PathMatcher {
+    component_alternatives: Vec<Vec<String>>,
 }
 
 impl SensitiveRedactor {
@@ -46,27 +51,40 @@ impl SensitiveRedactor {
     {
         let mut redaction_values = Vec::new();
         for value in secrets.into_iter().map(Into::into) {
-            register_sensitive_variants(&mut redaction_values, &value);
+            register_exact(&mut redaction_values, value);
         }
+        let mut path_matchers = Vec::new();
         for path in local_paths.into_iter().map(Into::into) {
             let rendered = path.to_string_lossy();
-            register_sensitive_variants(&mut redaction_values, &rendered);
-            if !is_network_path(&path) {
-                for alias in discover_aliases(&path) {
-                    register_sensitive_variants(&mut redaction_values, &alias);
+            register_path_variants(&mut redaction_values, &rendered);
+            if let Some(local_path) = local_path_for_alias_discovery(&path) {
+                let mut aliases = vec![local_path.to_string_lossy().into_owned()];
+                for alias in discover_aliases(&local_path) {
+                    register_path_variants(&mut redaction_values, &alias);
+                    aliases.push(alias);
+                }
+                register_path_variants(&mut redaction_values, &aliases[0]);
+                if let Some(matcher) = PathMatcher::from_aliases(aliases) {
+                    path_matchers.push(matcher);
                 }
             }
         }
         redaction_values.sort_by_key(|value| std::cmp::Reverse(value.len()));
         Self {
             values: redaction_values,
+            path_matchers,
         }
     }
 
     pub(super) fn redact_text(&self, text: &str) -> String {
-        self.values.iter().fold(text.to_owned(), |rendered, value| {
+        let rendered = self.values.iter().fold(text.to_owned(), |rendered, value| {
             replace_unicode_case_insensitive(&rendered, value, "[REDACTED]")
-        })
+        });
+        self.path_matchers
+            .iter()
+            .fold(rendered, |rendered, matcher| {
+                replace_path_matches(&rendered, matcher, "[REDACTED]")
+            })
     }
 
     /// Fail-closed sanitization for unknown/raw RPC messages. Sensitive-looking
@@ -210,7 +228,17 @@ impl SensitiveRedactor {
     }
 }
 
-fn register_sensitive_variants(values: &mut Vec<String>, value: &str) {
+fn register_exact(values: &mut Vec<String>, value: String) {
+    if !value.is_empty()
+        && !values
+            .iter()
+            .any(|existing| existing.to_lowercase() == value.to_lowercase())
+    {
+        values.push(value);
+    }
+}
+
+fn register_path_variants(values: &mut Vec<String>, value: &str) {
     if value.is_empty() {
         return;
     }
@@ -232,13 +260,128 @@ fn register_sensitive_variants(values: &mut Vec<String>, value: &str) {
         variants.push(format!("//?/{}", plain.replace('\\', "/")));
     }
     for variant in variants {
-        if !values
-            .iter()
-            .any(|existing| existing.to_lowercase() == variant.to_lowercase())
-        {
-            values.push(variant);
+        register_exact(values, variant);
+    }
+}
+
+impl PathMatcher {
+    fn from_aliases(aliases: impl IntoIterator<Item = String>) -> Option<Self> {
+        let mut component_alternatives: Vec<Vec<String>> = Vec::new();
+        for alias in aliases {
+            let Some(components) = local_path_components(&alias) else {
+                continue;
+            };
+            if component_alternatives.is_empty() {
+                component_alternatives = components
+                    .into_iter()
+                    .map(|component| vec![component])
+                    .collect();
+                continue;
+            }
+            if components.len() != component_alternatives.len() {
+                continue;
+            }
+            for (alternatives, component) in component_alternatives.iter_mut().zip(components) {
+                register_exact(alternatives, component);
+            }
+        }
+        (!component_alternatives.is_empty()).then_some(Self {
+            component_alternatives,
+        })
+    }
+
+    fn match_len(&self, text: &str) -> Option<usize> {
+        let mut offset = local_verbatim_prefix_len(text).unwrap_or(0);
+        for (index, alternatives) in self.component_alternatives.iter().enumerate() {
+            let matched = alternatives
+                .iter()
+                .filter_map(|alternative| {
+                    unicode_case_insensitive_prefix_len(&text[offset..], alternative)
+                })
+                .max()?;
+            offset += matched;
+            if index + 1 < self.component_alternatives.len() {
+                let separators = text[offset..]
+                    .chars()
+                    .take_while(|character| matches!(character, '\\' | '/'))
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                if separators == 0 {
+                    return None;
+                }
+                offset += separators;
+            }
+        }
+        Some(offset)
+    }
+}
+
+fn replace_path_matches(text: &str, matcher: &PathMatcher, replacement: &str) -> String {
+    let mut rendered = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut cursor = 0;
+    while cursor < text.len() {
+        if let Some(length) = matcher.match_len(&text[cursor..]) {
+            rendered.push_str(&text[copied..cursor]);
+            rendered.push_str(replacement);
+            cursor += length;
+            copied = cursor;
+        } else {
+            cursor += text[cursor..].chars().next().unwrap().len_utf8();
         }
     }
+    rendered.push_str(&text[copied..]);
+    rendered
+}
+
+fn unicode_case_insensitive_prefix_len(text: &str, expected: &str) -> Option<usize> {
+    let expected = expected.to_lowercase();
+    let mut folded = String::new();
+    for (start, character) in text.char_indices() {
+        folded.extend(character.to_lowercase());
+        if folded.len() >= expected.len() {
+            return (folded == expected).then_some(start + character.len_utf8());
+        }
+    }
+    (folded == expected).then_some(text.len())
+}
+
+fn local_path_components(path: &str) -> Option<Vec<String>> {
+    let normalized = path.replace('/', "\\");
+    let normalized = strip_local_verbatim_prefix(&normalized)?;
+    let components = normalized
+        .split('\\')
+        .filter(|component| !component.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!components.is_empty()).then_some(components)
+}
+
+fn local_verbatim_prefix_len(path: &str) -> Option<usize> {
+    let bytes = path.as_bytes();
+    (bytes.len() >= 4
+        && matches!(bytes[0], b'\\' | b'/')
+        && bytes[1] == bytes[0]
+        && bytes[2] == b'?'
+        && matches!(bytes[3], b'\\' | b'/'))
+    .then_some(4)
+}
+
+fn strip_local_verbatim_prefix(path: &str) -> Option<&str> {
+    let without_prefix = local_verbatim_prefix_len(path).map_or(path, |length| &path[length..]);
+    let lower = without_prefix.to_ascii_lowercase();
+    if lower.starts_with("unc\\")
+        || path.starts_with(r"\\") && local_verbatim_prefix_len(path).is_none()
+    {
+        None
+    } else {
+        Some(without_prefix)
+    }
+}
+
+fn local_path_for_alias_discovery(path: &Path) -> Option<PathBuf> {
+    let rendered = path.to_string_lossy().replace('/', "\\");
+    strip_local_verbatim_prefix(&rendered).map(PathBuf::from)
 }
 
 fn replace_unicode_case_insensitive(text: &str, needle: &str, replacement: &str) -> String {
@@ -309,42 +452,6 @@ fn windows_path_aliases(path: &Path) -> Vec<String> {
         if let Some(short) = &short {
             aliases.push(short.clone());
         }
-        if let (Some(long), Some(short)) = (long, short) {
-            aliases.extend(mixed_windows_path_aliases(&long, &short));
-        }
-    }
-    aliases
-}
-
-fn is_network_path(path: &Path) -> bool {
-    let rendered = path.to_string_lossy().replace('/', "\\");
-    rendered.starts_with(r"\\")
-}
-
-fn mixed_windows_path_aliases(long: &str, short: &str) -> Vec<String> {
-    let long_parts = long.split('\\').collect::<Vec<_>>();
-    let short_parts = short.split('\\').collect::<Vec<_>>();
-    if long_parts.len() != short_parts.len() {
-        return Vec::new();
-    }
-    let changed = long_parts
-        .iter()
-        .zip(&short_parts)
-        .enumerate()
-        .filter_map(|(index, (long, short))| (!long.eq_ignore_ascii_case(short)).then_some(index))
-        .collect::<Vec<_>>();
-    if changed.len() > 8 {
-        return Vec::new();
-    }
-    let mut aliases = Vec::new();
-    for mask in 1_usize..(1_usize << changed.len()).saturating_sub(1) {
-        let mut parts = long_parts.clone();
-        for (bit, index) in changed.iter().enumerate() {
-            if mask & (1 << bit) != 0 {
-                parts[*index] = short_parts[*index];
-            }
-        }
-        aliases.push(parts.join("\\"));
     }
     aliases
 }
@@ -377,20 +484,57 @@ fn windows_path_name(value: &str, short: bool) -> Option<String> {
 }
 
 fn sensitive_json_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    key == "key"
-        || key.ends_with("key")
-        || [
-            "token",
-            "secret",
-            "authorization",
-            "path",
-            "directory",
-            "session",
-            "model",
-        ]
-        .iter()
-        .any(|sensitive| key.contains(sensitive))
+    json_key_tokens(key).any(|token| {
+        matches!(
+            token.as_str(),
+            "key"
+                | "keys"
+                | "token"
+                | "tokens"
+                | "secret"
+                | "secrets"
+                | "authorization"
+                | "path"
+                | "paths"
+                | "directory"
+                | "directories"
+                | "session"
+                | "sessions"
+                | "model"
+                | "models"
+        )
+    })
+}
+
+fn json_key_tokens(key: &str) -> impl Iterator<Item = String> + '_ {
+    let characters = key.char_indices().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (position, &(index, character)) in characters.iter().enumerate() {
+        if !character.is_alphanumeric() {
+            if let Some(token_start) = start.take() {
+                tokens.push(key[token_start..index].to_ascii_lowercase());
+            }
+            continue;
+        }
+        let previous_is_lower = position
+            .checked_sub(1)
+            .and_then(|previous| characters.get(previous))
+            .is_some_and(|(_, previous)| previous.is_lowercase());
+        let next_is_lower = characters
+            .get(position + 1)
+            .is_some_and(|(_, next)| next.is_lowercase());
+        let camel_boundary = character.is_uppercase() && (previous_is_lower || next_is_lower);
+        if camel_boundary && let Some(token_start) = start.replace(index) {
+            tokens.push(key[token_start..index].to_ascii_lowercase());
+        } else if start.is_none() {
+            start = Some(index);
+        }
+    }
+    if let Some(token_start) = start {
+        tokens.push(key[token_start..].to_ascii_lowercase());
+    }
+    tokens.into_iter()
 }
 
 #[cfg(test)]
@@ -418,6 +562,26 @@ mod tests {
             redactor.redact_text("open c:\\ünicode\\秘密 now"),
             "open [REDACTED] now"
         );
+    }
+
+    #[test]
+    fn scalar_secrets_are_registered_exactly_without_path_normalization() {
+        let secret = r"abc/def\ghi";
+        let redactor = SensitiveRedactor::from_secrets([secret]);
+
+        assert_eq!(redactor.redact_text(secret), "[REDACTED]");
+        assert_eq!(redactor.redact_text(r"abc\def\ghi"), r"abc\def\ghi");
+        assert_eq!(redactor.redact_text("abc/def/ghi"), "abc/def/ghi");
+    }
+
+    #[test]
+    fn raw_key_heuristic_does_not_treat_monkey_as_a_sensitive_key() {
+        let mut value = json!({"monkey": "banana", "apiKey": "private"});
+
+        SensitiveRedactor::default().redact_raw_value(&mut value);
+
+        assert_eq!(value["monkey"], "banana");
+        assert_eq!(value["apiKey"], "[REDACTED]");
     }
 
     #[test]
@@ -455,19 +619,52 @@ mod tests {
     }
 
     #[test]
-    fn redactor_matches_bounded_mixed_component_aliases_from_the_discovery_seam() {
+    fn redactor_strips_verbatim_disk_prefix_but_rejects_verbatim_unc_before_probing() {
+        let probed = std::cell::RefCell::new(Vec::new());
+        let redactor = SensitiveRedactor::from_inputs_with_alias_discovery(
+            std::iter::empty::<String>(),
+            [
+                PathBuf::from(r"\\?\C:\private\local"),
+                PathBuf::from(r"\\?\UNC\server\share\private"),
+            ],
+            |path| {
+                probed.borrow_mut().push(path.to_path_buf());
+                Vec::new()
+            },
+        );
+
+        assert_eq!(&*probed.borrow(), &[PathBuf::from(r"C:\private\local")]);
+        assert_eq!(
+            redactor.redact_text(r"\\?\UNC\server\share\private"),
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redactor_matches_mixed_component_aliases_from_the_discovery_seam() {
         let long = r"C:\Long Component One\Long Component Two\file.txt";
         let short = r"C:\LONGCO~1\LONGCO~2\file.txt";
-        let aliases = super::mixed_windows_path_aliases(long, short);
         let mixed = r"C:\LONGCO~1\Long Component Two\file.txt";
-        assert!(aliases.iter().any(|alias| alias == mixed));
-        assert!(aliases.len() <= 254, "alias combinations must stay bounded");
 
         let redactor = SensitiveRedactor::from_inputs_with_alias_discovery(
             std::iter::empty::<String>(),
             [PathBuf::from(long)],
-            |_| aliases.clone(),
+            |_| vec![short.into()],
         );
+        assert_eq!(redactor.redact_text(mixed), "[REDACTED]");
+    }
+
+    #[test]
+    fn redactor_matches_more_than_eight_mixed_path_components_without_fail_open() {
+        let long = r"C:\Long One\Long Two\Long Three\Long Four\Long Five\Long Six\Long Seven\Long Eight\Long Nine\file.txt";
+        let short = r"C:\LONGON~1\LONGTW~1\LONGTH~1\LONGFO~1\LONGFI~1\LONGSI~1\LONGSE~1\LONGEI~1\LONGNI~1\file.txt";
+        let mixed = r"c:/LONGON~1/Long Two/LONGTH~1/Long Four/LONGFI~1/Long Six/LONGSE~1/Long Eight/LONGNI~1/file.txt";
+        let redactor = SensitiveRedactor::from_inputs_with_alias_discovery(
+            std::iter::empty::<String>(),
+            [PathBuf::from(long)],
+            |_| vec![short.into()],
+        );
+
         assert_eq!(redactor.redact_text(mixed), "[REDACTED]");
     }
 
@@ -487,14 +684,23 @@ mod tests {
         let Some(short) = super::windows_path_name(&rendered, true) else {
             return;
         };
-        let Some(mixed) = super::mixed_windows_path_aliases(&long, &short)
-            .into_iter()
-            .next()
+        let long_parts = long.split('\\').collect::<Vec<_>>();
+        let short_parts = short.split('\\').collect::<Vec<_>>();
+        if long_parts.len() != short_parts.len() {
+            return;
+        }
+        let Some(changed) = long_parts
+            .iter()
+            .zip(&short_parts)
+            .position(|(long, short)| !long.eq_ignore_ascii_case(short))
         else {
             // 8.3 naming can be disabled per volume. That platform has no real
             // short alias to exercise and should not rely on a fabricated one.
             return;
         };
+        let mut mixed_parts = long_parts;
+        mixed_parts[changed] = short_parts[changed];
+        let mixed = mixed_parts.join("\\");
         let redactor =
             SensitiveRedactor::from_secrets_and_local_paths(std::iter::empty::<String>(), [path]);
 

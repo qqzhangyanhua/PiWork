@@ -1,15 +1,15 @@
 //! Ownership boundary for the production Pi process and its containment handle.
 //!
-//! Pi is bundled and supported as a Windows sidecar. Windows Job Objects give
-//! us a containment primitive whose emptiness can be confirmed. Other targets
-//! deliberately fail closed instead of claiming process-tree cleanup that a
-//! process group cannot provide for detached descendants.
+//! The production contract is the Windows NSIS bundle running Pi through its
+//! bundled `node.exe`. Windows Job Objects give that sidecar a containment
+//! primitive whose emptiness can be confirmed. Other targets deliberately fail
+//! closed instead of claiming cleanup for descendants that could detach.
 
 use std::io;
 
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
-use super::PROCESS_TREE_TERMINATION_TIMEOUT;
+use super::CleanupBudget;
 
 pub(super) struct PiProcessStdio {
     pub(super) stdin: ChildStdin,
@@ -20,6 +20,7 @@ pub(super) struct PiProcessStdio {
 pub(super) struct PiProcessSpawnError {
     _source: io::Error,
     cleanup_confirmed: bool,
+    cleanup_budget: Option<CleanupBudget>,
 }
 
 impl PiProcessSpawnError {
@@ -27,18 +28,28 @@ impl PiProcessSpawnError {
         Self {
             _source: source,
             cleanup_confirmed: true,
+            cleanup_budget: None,
         }
     }
 
-    fn after_child(source: io::Error, cleanup_confirmed: bool) -> Self {
+    fn after_child(
+        source: io::Error,
+        cleanup_confirmed: bool,
+        cleanup_budget: CleanupBudget,
+    ) -> Self {
         Self {
             _source: source,
             cleanup_confirmed,
+            cleanup_budget: Some(cleanup_budget),
         }
     }
 
     pub(super) fn cleanup_confirmed(&self) -> bool {
         self.cleanup_confirmed
+    }
+
+    pub(super) fn cleanup_budget(&self) -> Option<CleanupBudget> {
+        self.cleanup_budget
     }
 }
 
@@ -50,13 +61,13 @@ mod platform {
         mem::size_of,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
         ptr,
-        sync::Arc,
+        sync::{Arc, Mutex},
     };
 
     use async_trait::async_trait;
     use tokio::process::{Child, Command};
 
-    use super::{PROCESS_TREE_TERMINATION_TIMEOUT, PiProcessSpawnError, PiProcessStdio};
+    use super::{CleanupBudget, PiProcessSpawnError, PiProcessStdio};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
@@ -203,11 +214,16 @@ mod platform {
         fn resume(&self, process: RawHandle) -> io::Result<()>;
         fn snapshot_processes(&self) -> io::Result<Vec<OwnedHandle>>;
         fn terminate(&self) -> io::Result<()>;
-        async fn confirm_terminated(&self, processes: &[OwnedHandle]) -> io::Result<()>;
+        async fn confirm_terminated(
+            &self,
+            processes: &[OwnedHandle],
+            cleanup: CleanupBudget,
+        ) -> io::Result<()>;
+        fn close(&self);
     }
 
     struct WindowsJobOperations {
-        job: OwnedHandle,
+        job: Mutex<Option<OwnedHandle>>,
     }
 
     impl WindowsJobOperations {
@@ -230,16 +246,22 @@ mod platform {
             if configured == 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self { job })
+            Ok(Self {
+                job: Mutex::new(Some(job)),
+            })
         }
 
         fn process_ids(&self) -> io::Result<Vec<u32>> {
+            let job = self.job.lock().unwrap();
+            let job = job
+                .as_ref()
+                .ok_or_else(|| io::Error::other("Pi Job handle is closed"))?;
             let mut word_capacity = 64_usize;
             loop {
                 let mut buffer = vec![0_usize; word_capacity];
                 let queried = unsafe {
                     query_information_job_object(
-                        self.job.as_raw_handle(),
+                        job.as_raw_handle(),
                         JOB_OBJECT_BASIC_PROCESS_ID_LIST_CLASS,
                         buffer.as_mut_ptr().cast(),
                         (buffer.len() * size_of::<usize>()) as u32,
@@ -289,11 +311,15 @@ mod platform {
             }
         }
 
-        fn active_processes(&self) -> io::Result<u32> {
+        fn active_processes(&self) -> io::Result<Option<u32>> {
+            let job = self.job.lock().unwrap();
+            let Some(job) = job.as_ref() else {
+                return Ok(None);
+            };
             let mut information = JobObjectBasicAccountingInformation::default();
             let queried = unsafe {
                 query_information_job_object(
-                    self.job.as_raw_handle(),
+                    job.as_raw_handle(),
                     JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION_CLASS,
                     ptr::from_mut(&mut information).cast(),
                     size_of::<JobObjectBasicAccountingInformation>() as u32,
@@ -303,14 +329,18 @@ mod platform {
             if queried == 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(information.active_processes)
+            Ok(Some(information.active_processes))
         }
     }
 
     #[async_trait]
     impl ProcessTreeOperations for WindowsJobOperations {
         fn assign(&self, process: RawHandle) -> io::Result<()> {
-            if unsafe { assign_process_to_job_object(self.job.as_raw_handle(), process) } == 0 {
+            let job = self.job.lock().unwrap();
+            let job = job
+                .as_ref()
+                .ok_or_else(|| io::Error::other("Pi Job handle is closed"))?;
+            if unsafe { assign_process_to_job_object(job.as_raw_handle(), process) } == 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
@@ -343,14 +373,22 @@ mod platform {
         }
 
         fn terminate(&self) -> io::Result<()> {
-            if unsafe { terminate_job_object(self.job.as_raw_handle(), 1) } == 0 {
+            let job = self.job.lock().unwrap();
+            let job = job
+                .as_ref()
+                .ok_or_else(|| io::Error::other("Pi Job handle is closed"))?;
+            if unsafe { terminate_job_object(job.as_raw_handle(), 1) } == 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         }
 
-        async fn confirm_terminated(&self, processes: &[OwnedHandle]) -> io::Result<()> {
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, async {
+        async fn confirm_terminated(
+            &self,
+            processes: &[OwnedHandle],
+            cleanup: CleanupBudget,
+        ) -> io::Result<()> {
+            tokio::time::timeout_at(cleanup.deadline(), async {
                 loop {
                     let mut all_signaled = true;
                     for process in processes {
@@ -360,7 +398,7 @@ mod platform {
                             _ => return Err(io::Error::last_os_error()),
                         }
                     }
-                    if all_signaled && self.active_processes()? == 0 {
+                    if all_signaled && self.active_processes()?.is_none_or(|active| active == 0) {
                         return Ok(());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -368,6 +406,10 @@ mod platform {
             })
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Pi Job did not empty"))?
+        }
+
+        fn close(&self) {
+            drop(self.job.lock().unwrap().take());
         }
     }
 
@@ -391,38 +433,29 @@ mod platform {
             child: Box<dyn ChildProcess>,
             operations: Arc<dyn ProcessTreeOperations>,
         ) -> Result<Self, PiProcessSpawnError> {
-            let mut tree = Self { child, operations };
+            let tree = Self { child, operations };
             let Some(process) = tree.child.raw_handle() else {
                 let error = io::Error::new(
                     io::ErrorKind::NotFound,
                     "spawned Pi process has no process handle",
                 );
-                return Err(match tree.kill_direct_child_and_wait().await {
-                    Ok(()) => PiProcessSpawnError::after_child(error, true),
-                    Err(cleanup_error) => PiProcessSpawnError::after_child(cleanup_error, false),
-                });
+                return Err(tree.cleanup_spawn_failure(error).await);
             };
             if let Err(error) = tree.operations.assign(process) {
-                return Err(match tree.kill_direct_child_and_wait().await {
-                    Ok(()) => PiProcessSpawnError::after_child(error, true),
-                    Err(cleanup_error) => PiProcessSpawnError::after_child(cleanup_error, false),
-                });
+                return Err(tree.cleanup_spawn_failure(error).await);
             }
             if let Err(error) = tree.operations.resume(process) {
-                return Err(match tree.kill_direct_child_and_wait().await {
-                    Ok(()) => PiProcessSpawnError::after_child(error, true),
-                    Err(cleanup_error) => PiProcessSpawnError::after_child(cleanup_error, false),
-                });
+                return Err(tree.cleanup_spawn_failure(error).await);
             }
             Ok(tree)
         }
 
-        async fn kill_direct_child_and_wait(&mut self) -> io::Result<()> {
-            self.child.start_kill()?;
-            tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, self.child.wait())
-                .await
-                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Pi child did not exit"))??;
-            Ok(())
+        async fn cleanup_spawn_failure(self, source: io::Error) -> PiProcessSpawnError {
+            let cleanup = CleanupBudget::new();
+            match self.terminate_and_confirm(false, cleanup).await {
+                Ok(()) => PiProcessSpawnError::after_child(source, true, cleanup),
+                Err(error) => PiProcessSpawnError::after_child(error, false, cleanup),
+            }
         }
 
         pub(crate) fn take_stdio(&mut self) -> io::Result<PiProcessStdio> {
@@ -432,27 +465,73 @@ mod platform {
         pub(crate) async fn terminate_and_confirm(
             mut self,
             allow_graceful_exit: bool,
+            cleanup: CleanupBudget,
         ) -> io::Result<()> {
+            let mut cleanup_errors = Vec::new();
             let mut child_reaped = false;
-            if allow_graceful_exit
-                && matches!(
-                    tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, self.child.wait()).await,
-                    Ok(Ok(()))
-                )
-            {
-                child_reaped = true;
+            if allow_graceful_exit {
+                match tokio::time::timeout_at(cleanup.deadline(), self.child.wait()).await {
+                    Ok(Ok(())) => child_reaped = true,
+                    Ok(Err(error)) => cleanup_errors.push(error),
+                    Err(_) => {}
+                }
             }
 
-            let processes = self.operations.snapshot_processes()?;
-            self.operations.terminate()?;
-            if !child_reaped {
-                tokio::time::timeout(PROCESS_TREE_TERMINATION_TIMEOUT, self.child.wait())
-                    .await
-                    .map_err(|_| {
-                        io::Error::new(io::ErrorKind::TimedOut, "Pi child did not exit")
-                    })??;
+            let processes = match self.operations.snapshot_processes() {
+                Ok(processes) => processes,
+                Err(error) => {
+                    cleanup_errors.push(error);
+                    Vec::new()
+                }
+            };
+            let mut job_closed = false;
+            if let Err(error) = self.operations.terminate() {
+                cleanup_errors.push(error);
+                self.operations.close();
+                job_closed = true;
             }
-            self.operations.confirm_terminated(&processes).await
+            if !child_reaped {
+                if let Err(error) = self.child.start_kill() {
+                    cleanup_errors.push(error);
+                }
+                match tokio::time::timeout_at(cleanup.deadline(), self.child.wait()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => cleanup_errors.push(error),
+                    Err(_) => cleanup_errors.push(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Pi child did not exit",
+                    )),
+                }
+            }
+            if let Err(error) = self
+                .operations
+                .confirm_terminated(&processes, cleanup)
+                .await
+            {
+                cleanup_errors.push(error);
+                if !job_closed {
+                    self.operations.close();
+                    job_closed = true;
+                    if let Err(error) = self
+                        .operations
+                        .confirm_terminated(&processes, cleanup)
+                        .await
+                    {
+                        cleanup_errors.push(error);
+                    }
+                }
+            }
+            if !job_closed {
+                self.operations.close();
+            }
+
+            if cleanup_errors.is_empty() {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "Pi process cleanup could not be confirmed",
+                ))
+            }
         }
     }
 
@@ -466,7 +545,9 @@ mod platform {
 
         use async_trait::async_trait;
 
-        use super::{ChildProcess, PiProcessStdio, PiProcessTree, ProcessTreeOperations};
+        use super::{
+            ChildProcess, CleanupBudget, PiProcessStdio, PiProcessTree, ProcessTreeOperations,
+        };
 
         #[derive(Clone, Copy)]
         enum Failure {
@@ -568,9 +649,17 @@ mod platform {
                 }
             }
 
-            async fn confirm_terminated(&self, _processes: &[OwnedHandle]) -> io::Result<()> {
+            async fn confirm_terminated(
+                &self,
+                _processes: &[OwnedHandle],
+                _cleanup: CleanupBudget,
+            ) -> io::Result<()> {
                 self.calls.lock().unwrap().push("confirm");
                 Ok(())
+            }
+
+            fn close(&self) {
+                self.calls.lock().unwrap().push("close");
             }
         }
 
@@ -603,7 +692,17 @@ mod platform {
             );
             assert_eq!(
                 &*calls.lock().unwrap(),
-                &["assign", "kill", "wait", "drop_child", "drop_operations"]
+                &[
+                    "assign",
+                    "query",
+                    "terminate",
+                    "kill",
+                    "wait",
+                    "confirm",
+                    "close",
+                    "drop_child",
+                    "drop_operations"
+                ]
             );
         }
 
@@ -620,8 +719,12 @@ mod platform {
                 &[
                     "assign",
                     "resume",
+                    "query",
+                    "terminate",
                     "kill",
                     "wait",
+                    "confirm",
+                    "close",
                     "drop_child",
                     "drop_operations"
                 ]
@@ -639,7 +742,17 @@ mod platform {
             assert!(!error.cleanup_confirmed());
             assert_eq!(
                 &*calls.lock().unwrap(),
-                &["assign", "kill", "wait", "drop_child", "drop_operations"]
+                &[
+                    "assign",
+                    "query",
+                    "terminate",
+                    "kill",
+                    "wait",
+                    "confirm",
+                    "close",
+                    "drop_child",
+                    "drop_operations"
+                ]
             );
         }
 
@@ -647,10 +760,23 @@ mod platform {
         async fn process_tree_reports_unconfirmed_when_terminate_fails() {
             let (child, operations, calls) = scripted_parts(Failure::Terminate);
             let tree = PiProcessTree { child, operations };
-            assert!(tree.terminate_and_confirm(false).await.is_err());
+            assert!(
+                tree.terminate_and_confirm(false, CleanupBudget::new())
+                    .await
+                    .is_err()
+            );
             assert_eq!(
                 &*calls.lock().unwrap(),
-                &["query", "terminate", "drop_child", "drop_operations"]
+                &[
+                    "query",
+                    "terminate",
+                    "close",
+                    "kill",
+                    "wait",
+                    "confirm",
+                    "drop_child",
+                    "drop_operations"
+                ]
             );
         }
 
@@ -658,10 +784,23 @@ mod platform {
         async fn process_tree_reports_unconfirmed_when_query_fails() {
             let (child, operations, calls) = scripted_parts(Failure::Query);
             let tree = PiProcessTree { child, operations };
-            assert!(tree.terminate_and_confirm(false).await.is_err());
+            assert!(
+                tree.terminate_and_confirm(false, CleanupBudget::new())
+                    .await
+                    .is_err()
+            );
             assert_eq!(
                 &*calls.lock().unwrap(),
-                &["query", "drop_child", "drop_operations"]
+                &[
+                    "query",
+                    "terminate",
+                    "kill",
+                    "wait",
+                    "confirm",
+                    "close",
+                    "drop_child",
+                    "drop_operations"
+                ]
             );
         }
 
@@ -669,14 +808,18 @@ mod platform {
         async fn process_tree_drops_all_handles_before_reporting_cleanup_success() {
             let (child, operations, calls) = scripted_parts(Failure::None);
             let tree = PiProcessTree { child, operations };
-            tree.terminate_and_confirm(false).await.unwrap();
+            tree.terminate_and_confirm(false, CleanupBudget::new())
+                .await
+                .unwrap();
             assert_eq!(
                 &*calls.lock().unwrap(),
                 &[
                     "query",
                     "terminate",
+                    "kill",
                     "wait",
                     "confirm",
+                    "close",
                     "drop_child",
                     "drop_operations"
                 ]
@@ -709,7 +852,11 @@ mod platform {
             ))
         }
 
-        pub(crate) async fn terminate_and_confirm(self, _allow_graceful: bool) -> io::Result<()> {
+        pub(crate) async fn terminate_and_confirm(
+            self,
+            _allow_graceful: bool,
+            _cleanup: super::CleanupBudget,
+        ) -> io::Result<()> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "production Pi process containment is supported only on Windows",
