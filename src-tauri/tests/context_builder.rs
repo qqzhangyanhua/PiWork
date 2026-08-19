@@ -1,6 +1,9 @@
 use chrono::{TimeZone, Utc};
 use piwork_lib::{
-    collaboration::ledger::project_work_ledger,
+    collaboration::{
+        context::{build_assignment_context, ContextBuildInput, ContextSectionKind},
+        ledger::project_work_ledger,
+    },
     domain::{
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{PermissionMode, WorkStatus, WorkSummary},
@@ -185,4 +188,64 @@ fn ledger_accumulates_artifacts_validation_and_last_delivery() {
     assert_eq!(ledger.artifacts, vec!["src/main.rs", "notes.md"]);
     assert_eq!(ledger.validation, vec!["cargo test"]);
     assert_eq!(ledger.last_delivery.as_deref(), Some("Delivered"));
+}
+
+#[test]
+fn context_builder_produces_the_fixed_eight_section_order() {
+    let input = ContextBuildInput::default();
+    let built = build_assignment_context(input);
+
+    let kinds: Vec<ContextSectionKind> = built.sections.iter().map(|section| section.kind).collect();
+    assert_eq!(kinds, ContextSectionKind::ALL.to_vec());
+
+    let mut cursor = 0usize;
+    for (index, section) in built.sections.iter().enumerate() {
+        let header = format!("== {} ==", title_of(section.kind));
+        let position = built.rendered_prompt[cursor..].find(&header);
+        assert!(position.is_some(), "section {index} header is missing or out of order");
+        cursor += position.unwrap();
+    }
+}
+
+#[test]
+fn lead_and_member_base_protocols_differ() {
+    let lead = build_assignment_context(ContextBuildInput { is_lead: true, ..ContextBuildInput::default() });
+    let member = build_assignment_context(ContextBuildInput { is_lead: false, ..ContextBuildInput::default() });
+
+    let lead_base = lead.sections[0].content.clone();
+    let member_base = member.sections[0].content.clone();
+    assert!(lead_base.contains("Delegate"));
+    assert!(member_base.contains("must not delegate"));
+    assert_ne!(lead_base, member_base);
+}
+
+#[test]
+fn context_builder_truncates_later_sections_first() {
+    let mut input = ContextBuildInput::default();
+    input.budget_chars = 500;
+    input.explicit_files = vec![
+        piwork_lib::collaboration::context::ExplicitContextFile {
+            path: "a.txt".into(),
+            content: "x".repeat(2000),
+        },
+    ];
+    let built = build_assignment_context(input);
+    assert!(built.manifest.truncated, "tight budget must truncate");
+    assert!(built.manifest.total_chars <= 500, "rendered prompt respects the budget");
+    // The base protocol (first section) must survive truncation.
+    assert!(!built.sections[0].truncated);
+    assert!(!built.sections[0].content.is_empty());
+}
+
+fn title_of(kind: ContextSectionKind) -> &'static str {
+    match kind {
+        ContextSectionKind::BaseProtocol => "PiWork Base Protocol",
+        ContextSectionKind::AgentDefinition => "Agent Definition",
+        ContextSectionKind::CapabilityPack => "Capability Pack",
+        ContextSectionKind::AgentMemory => "Agent Core Memory",
+        ContextSectionKind::WorkBrief => "Work Brief",
+        ContextSectionKind::AssignmentPacket => "Current Assignment Packet",
+        ContextSectionKind::DependencyResults => "Dependency Result Envelopes",
+        ContextSectionKind::ExplicitContext => "Explicit Files, Attachments and Recent Messages",
+    }
 }
