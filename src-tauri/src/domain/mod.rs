@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod assignment;
+pub mod collaboration;
 pub mod environment;
 pub mod event;
 pub mod resource;
@@ -22,6 +23,14 @@ mod tests {
             AgentSessionStatus, AgentSessionSummary, AssignmentKind, AssignmentSideEffect,
             AssignmentStatus, AssignmentSummary, InterruptWorkInput, QueueControlMode,
             QueueWorkInput, SteerAssignmentInput, UserMessageSummary,
+        },
+        collaboration::{
+            CompleteWorkDeliveryInput, DelegateAssignmentInput, DelegationRequest, HostToolCall,
+            LedgerDecision, LedgerPlanStep, LedgerPlanStepStatus, MemoryCandidateInput,
+            MemoryCandidateStatus, MemoryCandidateSummary, RecordWorkDecisionInput,
+            RequestClarificationInput, ResultArtifact, ResultEnvelope, ResultEvidence,
+            ResultFinding, ResultStatus, ResultValidation, SubmitAssignmentResultInput,
+            UpdateWorkPlanInput, WorkLedger,
         },
         environment::{RuntimeCheck, RuntimeStatus},
         event::{
@@ -134,6 +143,27 @@ mod tests {
         LivenessState::export().unwrap();
         WorkEventEnvelope::export().unwrap();
         WorkEventPayload::export().unwrap();
+        ResultStatus::export().unwrap();
+        MemoryCandidateStatus::export().unwrap();
+        LedgerPlanStepStatus::export().unwrap();
+        ResultFinding::export().unwrap();
+        ResultEvidence::export().unwrap();
+        ResultArtifact::export().unwrap();
+        ResultValidation::export().unwrap();
+        DelegationRequest::export().unwrap();
+        MemoryCandidateInput::export().unwrap();
+        ResultEnvelope::export().unwrap();
+        LedgerPlanStep::export().unwrap();
+        LedgerDecision::export().unwrap();
+        WorkLedger::export().unwrap();
+        MemoryCandidateSummary::export().unwrap();
+        DelegateAssignmentInput::export().unwrap();
+        RecordWorkDecisionInput::export().unwrap();
+        UpdateWorkPlanInput::export().unwrap();
+        CompleteWorkDeliveryInput::export().unwrap();
+        SubmitAssignmentResultInput::export().unwrap();
+        RequestClarificationInput::export().unwrap();
+        HostToolCall::export().unwrap();
 
         for (type_name, before) in agent_bindings_before {
             let after =
@@ -193,6 +223,27 @@ mod tests {
             "PermissionOutcome",
             "SessionTransition",
             "LivenessState",
+            "ResultStatus",
+            "MemoryCandidateStatus",
+            "LedgerPlanStepStatus",
+            "ResultFinding",
+            "ResultEvidence",
+            "ResultArtifact",
+            "ResultValidation",
+            "DelegationRequest",
+            "MemoryCandidateInput",
+            "ResultEnvelope",
+            "LedgerPlanStep",
+            "LedgerDecision",
+            "WorkLedger",
+            "MemoryCandidateSummary",
+            "DelegateAssignmentInput",
+            "RecordWorkDecisionInput",
+            "UpdateWorkPlanInput",
+            "CompleteWorkDeliveryInput",
+            "SubmitAssignmentResultInput",
+            "RequestClarificationInput",
+            "HostToolCall",
         ] {
             assert!(
                 output_dir.join(format!("{type_name}.ts")).is_file(),
@@ -295,6 +346,16 @@ mod tests {
             "assignmentDeadLettered",
             "assignmentRecoveryRequired",
             "queueControlApplied",
+            "assignmentDelegated",
+            "assignmentResultSubmitted",
+            "assignmentResultRejected",
+            "delegationRequested",
+            "workDecisionRecorded",
+            "workPlanUpdated",
+            "workDeliveryCompleted",
+            "memoryCandidateProposed",
+            "memoryCandidateResolved",
+            "leadResumed",
         ] {
             assert!(
                 payload.contains(&format!("\"type\": \"{discriminator}\"")),

@@ -539,6 +539,18 @@ const processActivityEventIntoDraft = (
     case "assignmentDeadLettered":
     case "assignmentRecoveryRequired":
     case "queueControlApplied":
+    // Collaboration events are projected with salience once the lead/expert
+    // loop lands; the wire contract is defined ahead of that projection.
+    case "assignmentDelegated":
+    case "assignmentResultSubmitted":
+    case "assignmentResultRejected":
+    case "delegationRequested":
+    case "workDecisionRecorded":
+    case "workPlanUpdated":
+    case "workDeliveryCompleted":
+    case "memoryCandidateProposed":
+    case "memoryCandidateResolved":
+    case "leadResumed":
       return;
   }
 

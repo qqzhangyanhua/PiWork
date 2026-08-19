@@ -297,6 +297,64 @@ pub enum WorkEventPayload {
         replaced_assignment_id: Option<String>,
         summary: String,
     },
+    AssignmentDelegated {
+        assignment_id: String,
+        parent_assignment_id: String,
+        assigned_agent_id: String,
+        title: String,
+    },
+    AssignmentResultSubmitted {
+        assignment_id: String,
+        agent_instance_id: String,
+        status: super::collaboration::ResultStatus,
+        summary: String,
+    },
+    AssignmentResultRejected {
+        assignment_id: String,
+        agent_instance_id: String,
+        reason: String,
+    },
+    DelegationRequested {
+        assignment_id: String,
+        agent_instance_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        suggested_agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        capability_pack_id: Option<String>,
+        reason: String,
+    },
+    WorkDecisionRecorded {
+        decision_id: String,
+        summary: String,
+        version: u32,
+    },
+    WorkPlanUpdated {
+        plan_id: String,
+        revision: u32,
+        text: String,
+    },
+    WorkDeliveryCompleted {
+        summary: String,
+        artifacts: Vec<String>,
+        validation: Vec<String>,
+        limitations: Vec<String>,
+    },
+    MemoryCandidateProposed {
+        candidate_id: String,
+        author_agent_id: String,
+        content: String,
+    },
+    MemoryCandidateResolved {
+        candidate_id: String,
+        status: super::collaboration::MemoryCandidateStatus,
+        resolved_by: String,
+    },
+    LeadResumed {
+        assignment_id: String,
+        dependency_generation: u32,
+    },
 }
 
 #[cfg(test)]
