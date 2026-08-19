@@ -13,10 +13,15 @@ use crate::{
     domain::{
         agent::WorkAgentSummary,
         assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus, AssignmentSummary},
-        collaboration::{DelegateAssignmentInput, ResultEnvelope},
+        collaboration::{
+            CompleteWorkDeliveryInput, DelegateAssignmentInput, RecordWorkDecisionInput,
+            ResultEnvelope, UpdateWorkPlanInput,
+        },
         event::WorkEventPayload,
+        work::WorkStatus,
     },
     error::AppError,
+    work::repository::WorkRepository,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +33,7 @@ pub struct DelegateResult {
 #[derive(Clone)]
 pub struct LeadToolService {
     repository: AssignmentRepository,
+    work_repository: WorkRepository,
     agent_repository: AgentRepository,
     scheduler: AssignmentSchedulerHandle,
 }
@@ -35,11 +41,13 @@ pub struct LeadToolService {
 impl LeadToolService {
     pub fn new(
         repository: AssignmentRepository,
+        work_repository: WorkRepository,
         agent_repository: AgentRepository,
         scheduler: AssignmentSchedulerHandle,
     ) -> Self {
         Self {
             repository,
+            work_repository,
             agent_repository,
             scheduler,
         }
@@ -205,6 +213,119 @@ impl LeadToolService {
             .ok_or_else(|| AppError::invalid_input("assignmentId", "assignment not found"))?;
         self.scheduler.wake()?;
         Ok(cancelled)
+    }
+
+    /// Records a Work decision with a monotonic version and writes the event.
+    pub async fn record_work_decision(
+        &self,
+        lead_assignment_id: &str,
+        input: RecordWorkDecisionInput,
+    ) -> Result<(), AppError> {
+        let lead = self
+            .repository
+            .get_assignment(lead_assignment_id)
+            .await?
+            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+        if lead.kind != AssignmentKind::Lead {
+            return Err(AppError::invalid_input(
+                "leadAssignmentId",
+                "only the Lead assignment can record decisions",
+            ));
+        }
+        let version = self
+            .repository
+            .next_collaboration_revision(&lead.work_id, "version")
+            .await?;
+        self.repository
+            .emit_collaboration_event(
+                &lead.id,
+                WorkEventPayload::WorkDecisionRecorded {
+                    decision_id: uuid::Uuid::new_v4().to_string(),
+                    summary: input.summary,
+                    version,
+                },
+            )
+            .await
+    }
+
+    /// Updates the Work plan with a monotonic revision and writes the event.
+    pub async fn update_work_plan(
+        &self,
+        lead_assignment_id: &str,
+        input: UpdateWorkPlanInput,
+    ) -> Result<(), AppError> {
+        let lead = self
+            .repository
+            .get_assignment(lead_assignment_id)
+            .await?
+            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+        if lead.kind != AssignmentKind::Lead {
+            return Err(AppError::invalid_input(
+                "leadAssignmentId",
+                "only the Lead assignment can update the plan",
+            ));
+        }
+        let revision = self
+            .repository
+            .next_collaboration_revision(&lead.work_id, "revision")
+            .await?;
+        let text = input
+            .plan
+            .iter()
+            .map(|step| step.title.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.repository
+            .emit_collaboration_event(
+                &lead.id,
+                WorkEventPayload::WorkPlanUpdated {
+                    plan_id: "work-plan".to_owned(),
+                    revision,
+                    text,
+                },
+            )
+            .await
+    }
+
+    /// Completes the final delivery: writes the event, completes the Lead
+    /// Assignment, and marks the Work completed.
+    pub async fn complete_work_delivery(
+        &self,
+        lead_assignment_id: &str,
+        runtime_owner: &str,
+        input: CompleteWorkDeliveryInput,
+    ) -> Result<AssignmentSummary, AppError> {
+        let lead = self
+            .repository
+            .get_assignment(lead_assignment_id)
+            .await?
+            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+        if lead.kind != AssignmentKind::Lead {
+            return Err(AppError::invalid_input(
+                "leadAssignmentId",
+                "only the Lead assignment can complete delivery",
+            ));
+        }
+        self.repository
+            .emit_collaboration_event(
+                &lead.id,
+                WorkEventPayload::WorkDeliveryCompleted {
+                    summary: input.summary.clone(),
+                    artifacts: input.artifacts.clone(),
+                    validation: input.validation.clone(),
+                    limitations: input.limitations.clone(),
+                },
+            )
+            .await?;
+        let completed = self
+            .repository
+            .complete_by_assignment(&lead.id, &input.summary, runtime_owner)
+            .await?;
+        let _ = self
+            .work_repository
+            .set_work_status(&lead.work_id, WorkStatus::Completed)
+            .await;
+        Ok(completed)
     }
 }
 

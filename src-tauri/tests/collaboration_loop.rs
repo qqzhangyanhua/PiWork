@@ -169,7 +169,7 @@ async fn lead_delegates_a_single_level_member_assignment() {
 
     let scheduler = AssignmentScheduler::new(
         repository.clone(),
-        work_repository,
+        work_repository.clone(),
         agent_repository.clone(),
         engine,
         Arc::clone(&publisher) as _,
@@ -177,7 +177,7 @@ async fn lead_delegates_a_single_level_member_assignment() {
         "Pi",
     );
     let handle = scheduler.spawn();
-    let service = LeadToolService::new(repository.clone(), agent_repository, handle);
+    let service = LeadToolService::new(repository.clone(), work_repository, agent_repository, handle);
 
     let lead_id = accept_lead(&repository, "work-delegate").await;
     let result = service
@@ -245,7 +245,7 @@ async fn lead_cannot_delegate_to_itself_or_outside_the_team() {
     let agent_repository = AgentRepository::new(pool.clone());
     let scheduler = AssignmentScheduler::new(
         repository.clone(),
-        work_repository,
+        work_repository.clone(),
         agent_repository.clone(),
         Arc::new(FakeEngineAdapter::new(Duration::ZERO)),
         Arc::clone(&publisher) as _,
@@ -253,7 +253,7 @@ async fn lead_cannot_delegate_to_itself_or_outside_the_team() {
         "Pi",
     );
     let handle = scheduler.spawn();
-    let service = LeadToolService::new(repository.clone(), agent_repository, handle);
+    let service = LeadToolService::new(repository.clone(), work_repository, agent_repository, handle);
 
     let lead_id = accept_lead(&repository, "work-guard").await;
     let delegate_to = |assigned: String| {
@@ -540,5 +540,105 @@ async fn memory_candidates_require_confirmation_and_reject_secrets() {
         .await
         .unwrap();
     assert_eq!(memory, vec!["The queue uses a BTreeMap for fair ordering".to_owned()]);
+}
+
+#[tokio::test]
+async fn lead_records_decisions_plan_and_delivery() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-delivery", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let work_repository = WorkRepository::new(pool.clone());
+    let agent_repository = AgentRepository::new(pool.clone());
+
+    // Seed and run the lead before the scheduler starts so they do not race.
+    let lead_id = accept_lead(&repository, "work-delivery").await;
+    let now = Utc::now();
+    repository.claim(&lead_id, "delivery-owner", now).await.unwrap();
+    let run = repository.begin_attempt(&lead_id, "fake", "Pi").await.unwrap();
+    repository
+        .mark_running(&lead_id, &run.id, "lead-session", "delivery-owner", now)
+        .await
+        .unwrap();
+    // Advance the Work so delivery can complete it.
+    let _ = work_repository
+        .set_work_status("work-delivery", piwork_lib::domain::work::WorkStatus::Queued)
+        .await;
+    let _ = work_repository
+        .set_work_status("work-delivery", piwork_lib::domain::work::WorkStatus::Running)
+        .await;
+
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        work_repository.clone(),
+        agent_repository.clone(),
+        Arc::new(FakeEngineAdapter::new(Duration::ZERO)),
+        Arc::clone(&publisher) as _,
+        "delivery-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    let service = LeadToolService::new(repository.clone(), work_repository, agent_repository, handle);
+
+    service
+        .record_work_decision(
+            &lead_id,
+            piwork_lib::domain::collaboration::RecordWorkDecisionInput {
+                summary: "Adopt the queue".into(),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .update_work_plan(
+            &lead_id,
+            piwork_lib::domain::collaboration::UpdateWorkPlanInput {
+                plan: vec![
+                    piwork_lib::domain::collaboration::LedgerPlanStep {
+                        id: "step-1".into(),
+                        title: "Investigate".into(),
+                        status: piwork_lib::domain::collaboration::LedgerPlanStepStatus::InProgress,
+                    },
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    let completed = service
+        .complete_work_delivery(
+            &lead_id,
+            "delivery-owner",
+            piwork_lib::domain::collaboration::CompleteWorkDeliveryInput {
+                summary: "Delivered".into(),
+                artifacts: vec!["notes.md".into()],
+                validation: vec!["cargo test".into()],
+                limitations: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status, AssignmentStatus::Completed);
+
+    let work_status: String = sqlx::query_scalar("SELECT status FROM works WHERE id = 'work-delivery'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(work_status, "completed");
+
+    for event_type in ["workDecisionRecorded", "workPlanUpdated", "workDeliveryCompleted"] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE work_id = 'work-delivery' AND json_extract(payload, '$.type') = ?",
+        )
+        .bind(event_type)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "missing {event_type}");
+    }
 }
 

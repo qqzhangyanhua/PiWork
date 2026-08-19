@@ -1571,6 +1571,40 @@ impl AssignmentRepository {
         .await
     }
 
+    /// The next monotonic decision version or plan revision for a Work, derived
+    /// from the committed collaboration events.
+    pub async fn next_collaboration_revision(
+        &self,
+        work_id: &str,
+        field: &str,
+    ) -> Result<u32, AppError> {
+        let work_id = validate_id("workId", work_id)?;
+        let event_type = match field {
+            "version" => "workDecisionRecorded",
+            "revision" => "workPlanUpdated",
+            other => {
+                return Err(AppError::invalid_input(
+                    "field",
+                    format!("unknown collaboration revision field {other:?}"),
+                ))
+            }
+        };
+        let max: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT COALESCE(MAX(CAST(json_extract(payload, ?) AS INTEGER)), 0) \
+             FROM events WHERE work_id = ? AND json_extract(payload, '$.type') = ?",
+        )
+        .bind(format!("$.{field}"))
+        .bind(&work_id)
+        .bind(event_type)
+        .fetch_one(&self.pool)
+        .await?
+        .or(Some(0));
+        let next = max.unwrap_or(0).checked_add(1).ok_or_else(|| {
+            AppError::invalid_input("revision", "collaboration revision limit exceeded")
+        })?;
+        Ok(u32::try_from(next).expect("bounded revision"))
+    }
+
     async fn latest_active_run(&self, assignment_id: &str) -> Result<RunRow, AppError> {
         let assignment_id = validate_id("assignmentId", assignment_id)?;
         let mut connection = self.pool.acquire().await?;
