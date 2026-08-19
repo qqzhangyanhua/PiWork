@@ -585,6 +585,55 @@ impl AssignmentRepository {
         Ok(assignment.summary)
     }
 
+    /// Cancels a running Assignment and stops its Run, using the Run's attached
+    /// agent session for the audit event. Used by interrupt/replace so the
+    /// abandoned engine attempt never retries.
+    pub async fn cancel(
+        &self,
+        assignment_id: &str,
+        run_id: &str,
+        runtime_owner: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<AssignmentSummary, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
+        let reason = validate_text("reason", reason)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
+        validate_active_identity(&assignment, &run, &runtime_owner, None)?;
+        if assignment.status != AssignmentStatus::Running || run.status != RunStatus::Running {
+            return Err(invalid_assignment_state("assignment is not running"));
+        }
+        sqlx::query("UPDATE assignments SET status = 'cancelled', completed_at = ?, updated_at = ? WHERE id = ?")
+            .bind(now).bind(now).bind(&assignment_id).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE runs SET status = 'stopped', completed_at = ?, updated_at = ? WHERE id = ?")
+            .bind(now).bind(now).bind(&run_id).execute(&mut *transaction).await?;
+        assignment.status = AssignmentStatus::Cancelled;
+        assignment.completed_at = Some(now);
+        assignment.updated_at = now;
+        assignment_event(
+            &mut transaction,
+            &assignment,
+            Some(&run_id),
+            run.engine_session_id.clone(),
+            now,
+            WorkEventPayload::AssignmentCancelled {
+                assignment_id: assignment.id.clone(),
+                agent_instance_id: assignment.assigned_agent_id.clone(),
+                agent_session_id: run.engine_session_id.clone(),
+                run_id: Some(run_id.clone()),
+                reason,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        self.drain_after_commit().await;
+        Ok(assignment.summary)
+    }
+
     pub async fn complete(
         &self,
         assignment_id: &str,

@@ -4,7 +4,7 @@ use crate::{
     app_state::AppState,
     assignment::repository::AssignmentRepository,
     domain::{
-        assignment::{AssignmentSummary, QueueWorkInput},
+        assignment::{AssignmentSummary, InterruptWorkInput, QueueWorkInput},
         work::StartWorkOutput,
     },
     error::AppError,
@@ -53,6 +53,18 @@ pub async fn confirm_assignment_recovery(
         .await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub async fn interrupt_and_replace(
+    state: State<'_, AppState>,
+    work_id: String,
+    input: InterruptWorkInput,
+) -> Result<StartWorkOutput, AppError> {
+    state
+        .assignment_service()
+        .interrupt_and_replace(&work_id, input.replacement)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -61,5 +73,6 @@ mod tests {
         let _ = super::list_work_assignments;
         let _ = super::queue_work_input;
         let _ = super::confirm_assignment_recovery;
+        let _ = super::interrupt_and_replace;
     }
 }

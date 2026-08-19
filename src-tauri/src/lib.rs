@@ -319,6 +319,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             assignment::commands::list_work_assignments,
             assignment::commands::queue_work_input,
             assignment::commands::confirm_assignment_recovery,
+            assignment::commands::interrupt_and_replace,
             model::commands::get_model_configuration_status,
             model::commands::list_model_configurations,
             model::commands::test_model_connection,

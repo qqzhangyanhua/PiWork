@@ -8,7 +8,7 @@
 //! persisted as `queued` with a `next_attempt_at` and re-hydrated on a later
 //! cycle.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{TimeDelta, Utc};
 use tokio::sync::{mpsc, Mutex};
@@ -37,6 +37,7 @@ const HYDRATE_LIMIT: u32 = 256;
 #[derive(Debug, Clone)]
 pub enum SchedulerCommand {
     Wake,
+    Interrupt { work_id: String },
     Shutdown,
 }
 
@@ -49,6 +50,14 @@ impl AssignmentSchedulerHandle {
     pub fn wake(&self) -> Result<(), AppError> {
         self.commands
             .try_send(SchedulerCommand::Wake)
+            .map_err(|_| AppError::engine("assignment scheduler is not running"))
+    }
+
+    pub fn interrupt(&self, work_id: &str) -> Result<(), AppError> {
+        self.commands
+            .try_send(SchedulerCommand::Interrupt {
+                work_id: work_id.to_owned(),
+            })
             .map_err(|_| AppError::engine("assignment scheduler is not running"))
     }
 
@@ -67,6 +76,7 @@ pub struct AssignmentScheduler {
     owner_id: String,
     model_label: String,
     limits: QueueLimits,
+    active_runs: Arc<Mutex<HashMap<String, (String, String)>>>,
 }
 
 impl AssignmentScheduler {
@@ -94,6 +104,7 @@ impl AssignmentScheduler {
             owner_id: owner_id.into(),
             model_label: model_label.into(),
             limits: default_limits(),
+            active_runs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -138,6 +149,9 @@ impl AssignmentScheduler {
                             return;
                         }
                         Some(SchedulerCommand::Wake) => {}
+                        Some(SchedulerCommand::Interrupt { work_id }) => {
+                            scheduler.interrupt_work(&work_id).await;
+                        }
                     }
                 }
                 _ = completed_rx.recv() => {}
@@ -196,6 +210,10 @@ impl AssignmentScheduler {
             .repository
             .begin_attempt(&assignment.id, self.engine.kind(), &model_label)
             .await?;
+        self.active_runs.lock().await.insert(
+            assignment.work_id.clone(),
+            (assignment.id.clone(), run.id.clone()),
+        );
         let agent = self
             .agent_repository
             .get_agent_instance(&assignment.assigned_agent_id)
@@ -249,6 +267,15 @@ impl AssignmentScheduler {
         outcome: Result<AssignmentExecutionOutcome, AppError>,
     ) {
         let now = Utc::now();
+        {
+            let mut active = self.active_runs.lock().await;
+            if active
+                .get(&claim.work_id)
+                .is_some_and(|(assignment_id, _)| assignment_id == &claim.item.id)
+            {
+                active.remove(&claim.work_id);
+            }
+        }
         let queue_outcome = match &outcome {
             Ok(AssignmentExecutionOutcome::Stopped) => QueueOutcome::Interrupted,
             Ok(AssignmentExecutionOutcome::Completed { .. })
@@ -263,6 +290,20 @@ impl AssignmentScheduler {
         };
         let _ = queue.lock().await.release(completion);
         self.reflect_work_terminal(&claim.work_id, &outcome).await;
+    }
+
+    /// Aborts the engine and cancels the currently running assignment for a
+    /// Work so a replacement can be queued without a stale retry.
+    async fn interrupt_work(&self, work_id: &str) {
+        let key = self.active_runs.lock().await.remove(work_id);
+        let Some((assignment_id, run_id)) = key else {
+            return;
+        };
+        let _ = self.engine.abort(&run_id).await;
+        let _ = self
+            .repository
+            .cancel(&assignment_id, &run_id, &self.owner_id, "interrupted", Utc::now())
+            .await;
     }
 
     async fn reflect_work_terminal(

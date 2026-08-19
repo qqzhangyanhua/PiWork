@@ -313,3 +313,52 @@ async fn start_lead_assignment_persists_then_schedules_to_completion() {
             .unwrap();
     assert_eq!(message_count, 1);
 }
+
+#[tokio::test]
+async fn cancel_stops_the_run_and_marks_the_assignment_cancelled() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_schedulable_work(&pool, "work-cancel", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let assignment_id = accept_lead(&repository, "work-cancel").await;
+    let now = Utc::now();
+    repository
+        .claim(&assignment_id, "owner-1", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment_id, "fake", "Pi")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&assignment_id, &run.id, "session-1", "owner-1", now)
+        .await
+        .unwrap();
+
+    let cancelled = repository
+        .cancel(&assignment_id, &run.id, "owner-1", "user interrupt", now)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, AssignmentStatus::Cancelled);
+
+    let run_status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = ?")
+        .bind(&run.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(run_status, "stopped");
+
+    let cancelled_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE assignment_id = ? AND json_extract(payload, '$.type') = 'assignmentCancelled'",
+    )
+    .bind(&assignment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cancelled_events, 1);
+}

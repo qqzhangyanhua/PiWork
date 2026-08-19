@@ -129,4 +129,21 @@ impl AssignmentService {
         }
         Ok(assignment)
     }
+
+    /// Cancels the currently running Assignment and queues a replacement Lead
+    /// Assignment at the front of the Work.
+    pub async fn interrupt_and_replace(
+        &self,
+        work_id: &str,
+        replacement: crate::domain::assignment::QueueWorkInput,
+    ) -> Result<StartWorkOutput, AppError> {
+        self.scheduler.interrupt(work_id)?;
+        self.start_lead_assignment(
+            work_id,
+            replacement.instruction,
+            replacement.referenced_files,
+            replacement.resource_ids,
+        )
+        .await
+    }
 }
