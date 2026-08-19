@@ -10,6 +10,7 @@ use piwork_lib::{
     assignment::{
         repository::{AcceptAssignmentInput, AssignmentEventSink, AssignmentRepository},
         scheduler::AssignmentScheduler,
+        service::AssignmentService,
     },
     domain::{
         assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus},
@@ -143,11 +144,17 @@ async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
     let assignment_id = accept_lead(&repository, "work-scheduler").await;
     handle.wake().unwrap();
 
-    // Poll until the assignment reaches a terminal state.
+    // Poll until the assignment reaches a terminal state and the scheduler has
+    // reflected the Work's terminal status.
     let mut completed = false;
     for _ in 0..200 {
         let status = assignment_status(&pool, &assignment_id).await;
-        if status == "completed" {
+        let work_status: String =
+            sqlx::query_scalar("SELECT status FROM works WHERE id = 'work-scheduler'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if status == "completed" && work_status == "completed" {
             completed = true;
             break;
         }
@@ -163,19 +170,13 @@ async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
     handle.shutdown().await;
     assert!(completed, "lead assignment should complete via the scheduler");
 
-    // The Run must carry real identity and the Work must have advanced.
+    // The Run must carry real identity.
     let run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE assignment_id = ?")
         .bind(&assignment_id)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(run_count, 1);
-
-    let work_status: String = sqlx::query_scalar("SELECT status FROM works WHERE id = 'work-scheduler'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(work_status, "completed");
 
     // Every engine event must carry the agent and assignment identity.
     let missing_identity: i64 = sqlx::query_scalar(
@@ -257,4 +258,58 @@ async fn scheduler_marks_recovery_confirmation_for_unknown_side_effects() {
         "recovery_confirmation_required",
         "an uncertain write from a dead owner must require explicit confirmation"
     );
+}
+
+#[tokio::test]
+async fn start_lead_assignment_persists_then_schedules_to_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_schedulable_work(&pool, "work-service", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let work_repository = WorkRepository::new(pool.clone());
+    let agent_repository = AgentRepository::new(pool.clone());
+    let engine = Arc::new(FakeEngineAdapter::new(Duration::ZERO));
+
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        work_repository.clone(),
+        agent_repository,
+        engine,
+        Arc::clone(&publisher) as _,
+        "scheduler-test-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    let service = AssignmentService::new(repository.clone(), work_repository, handle.clone());
+
+    let started = service
+        .start_lead_assignment("work-service", "Inspect the tree".into(), vec![], vec![])
+        .await
+        .unwrap();
+    assert!(started.run.is_none(), "dispatch is asynchronous");
+    assert_eq!(started.user_message.assignment_id, Some(started.assignment.id.clone()));
+    assert_eq!(started.assignment.assigned_agent_id, "agent-instance:piwork-lead");
+
+    let mut completed = false;
+    for _ in 0..200 {
+        if assignment_status(&pool, &started.assignment.id).await == "completed" {
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    handle.shutdown().await;
+    assert!(completed, "lead assignment should complete through the scheduler");
+
+    let message_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE work_id = 'work-service'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(message_count, 1);
 }
