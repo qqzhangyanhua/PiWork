@@ -445,7 +445,8 @@
     "send": "Send",
     "continue": "Send",
     "stop": "Stop working",
-    "runActive": "Pi is working on the previous instruction. You can send when it finishes"
+    "queueNext": "Queue next",
+    "runActive": "Pi is working on the previous instruction. You can queue the next one or stop"
   },
   "mentions": {
     "files": "Project files",

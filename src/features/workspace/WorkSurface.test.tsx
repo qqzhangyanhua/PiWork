@@ -504,11 +504,13 @@ describe("WorkSurface", () => {
     await user.type(composer, "完成后补充单元测试");
 
     expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
+    const queue = screen.getByRole("button", { name: "排在下一步" });
     const stop = screen.getByRole("button", { name: "停止处理" });
+    expect(queue).toBeEnabled();
     expect(stop).toBeEnabled();
     expect(composer).toHaveTextContent("完成后补充单元测试");
     expect(client.startWork).not.toHaveBeenCalled();
-    expect(screen.getByText("Pi 正在处理上一条指令，完成后即可继续发送")).toBeInTheDocument();
+    expect(screen.getByText("Pi 正在处理上一条指令，你可以排队下一条或停止")).toBeInTheDocument();
     expect(screen.queryByText(/已排队/u)).not.toBeInTheDocument();
 
     client.stopWork.mockResolvedValueOnce({

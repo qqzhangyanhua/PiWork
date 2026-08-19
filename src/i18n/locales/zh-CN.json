@@ -445,7 +445,8 @@
     "send": "发送",
     "continue": "发送",
     "stop": "停止处理",
-    "runActive": "Pi 正在处理上一条指令，完成后即可继续发送"
+    "queueNext": "排在下一步",
+    "runActive": "Pi 正在处理上一条指令，你可以排队下一条或停止"
   },
   "mentions": {
     "files": "项目文件",

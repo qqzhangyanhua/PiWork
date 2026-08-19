@@ -66,7 +66,6 @@ export function WorkComposer({
   const submit = async () => {
     const instruction = prompt.trim();
     if (!instruction && readyResourceIds.length === 0) return;
-    if (runActive) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -140,14 +139,25 @@ export function WorkComposer({
           />
           <ComposerModelIndicator modelLabel={modelLabel} />
           <button
-            aria-label={runActive ? t("composer.stop") : actionLabel}
-            className={`button button--primary composer-submit${runActive ? " composer-submit--stop" : ""}`}
+            aria-label={runActive ? t("composer.queueNext") : actionLabel}
+            className={`button button--primary composer-submit${runActive ? " composer-submit--queue" : ""}`}
             type="button"
-            disabled={runActive ? stopping || loading : !canSubmit || submitting || loading}
-            onClick={() => void (runActive ? stop() : submit())}
+            disabled={!canSubmit || submitting || loading}
+            onClick={() => void submit()}
           >
-            {runActive ? <Square aria-hidden="true" fill="currentColor" size={11} /> : <ArrowUp aria-hidden="true" size={16} />}
+            <ArrowUp aria-hidden="true" size={16} />
           </button>
+          {runActive && (
+            <button
+              aria-label={t("composer.stop")}
+              className="button composer-submit--stop"
+              type="button"
+              disabled={stopping || loading}
+              onClick={() => void stop()}
+            >
+              <Square aria-hidden="true" fill="currentColor" size={11} />
+            </button>
+          )}
         </div>
       </div>
     </footer>
