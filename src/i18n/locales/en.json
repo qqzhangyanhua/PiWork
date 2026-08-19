@@ -476,7 +476,7 @@
   "inspector": {
     "label": "Conversation inspector", "open": "Open inspector", "close": "Close inspector",
     "title": "Inspector", "resize": "Resize inspector", "resizeHint": "Drag to resize; double-click to reset",
-    "delivery": "Delivery", "attachments": "Attachments", "team": "Team", "assignments": "Assignments", "artifacts": "Artifacts", "validation": "Validation", "logs": "Raw activity",
+    "delivery": "Delivery", "attachments": "Attachments", "team": "Team", "assignments": "Assignments", "plan": "Plan", "artifacts": "Artifacts", "validation": "Validation", "logs": "Raw activity",
     "noValidation": "Validation results will appear here when checks finish. There are no records yet.",
     "noDeliveries": "Artifacts will appear here after files are created. Start by entering an instruction below.",
     "noArtifacts": "The latest execution has no artifacts. Continue the conversation and create a file to make it available here.",

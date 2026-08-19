@@ -791,7 +791,7 @@ describe("WorkSurface", () => {
     await screen.findByText("交付完成");
     await user.click(await screen.findByRole("button", { name: "打开检查器" }));
     const tabs = await screen.findByRole("tablist", { name: "对话检查器" });
-    expect(within(tabs).getAllByRole("tab")).toHaveLength(6);
+    expect(within(tabs).getAllByRole("tab")).toHaveLength(7);
     expect(within(tabs).queryByRole("tab", { name: "变更" })).not.toBeInTheDocument();
     const delivery = within(tabs).getByRole("tab", { name: "交付" });
     await user.click(delivery);
