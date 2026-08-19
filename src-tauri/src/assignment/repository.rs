@@ -1484,6 +1484,104 @@ impl AssignmentRepository {
         Ok(())
     }
 
+    /// Emits a collaboration event with the Assignment's product identity.
+    pub async fn emit_collaboration_event(
+        &self,
+        assignment_id: &str,
+        payload: WorkEventPayload,
+    ) -> Result<(), AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        assignment_event(
+            &mut transaction,
+            &assignment,
+            None,
+            None,
+            Utc::now(),
+            payload,
+        )
+        .await?;
+        transaction.commit().await?;
+        self.drain_after_commit().await;
+        Ok(())
+    }
+
+    /// Persists one Result submission row for audit and repair accounting.
+    pub async fn record_result(
+        &self,
+        assignment_id: &str,
+        author_agent_id: &str,
+        envelope_json: &str,
+        status: &str,
+        repair_attempt: u32,
+    ) -> Result<(), AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let author_agent_id = validate_id("authorAgentId", author_agent_id)?;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO assignment_results (id, assignment_id, author_agent_id, envelope_json, schema_version, repair_attempt, status, created_at) \
+             VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&assignment_id)
+        .bind(&author_agent_id)
+        .bind(envelope_json)
+        .bind(i64::from(repair_attempt))
+        .bind(status)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The number of prior repair requests recorded for an Assignment.
+    pub async fn latest_repair_attempt(&self, assignment_id: &str) -> Result<u32, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let attempts: i64 = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT COALESCE(MAX(repair_attempt), 0) FROM assignment_results WHERE assignment_id = ?",
+        )
+        .bind(assignment_id)
+        .fetch_one(&self.pool)
+        .await?
+        .unwrap_or(0);
+        Ok(u32::try_from(attempts).expect("bounded repair attempt"))
+    }
+
+    /// Completes an Assignment using its latest active Run's session identity.
+    pub async fn complete_by_assignment(
+        &self,
+        assignment_id: &str,
+        result_summary: &str,
+        runtime_owner: &str,
+    ) -> Result<AssignmentSummary, AppError> {
+        let run = self.latest_active_run(assignment_id).await?;
+        let session_id = run.engine_session_id.clone().unwrap_or_default();
+        self.complete(
+            assignment_id,
+            &run.id,
+            &session_id,
+            runtime_owner,
+            result_summary,
+            Utc::now(),
+        )
+        .await
+    }
+
+    async fn latest_active_run(&self, assignment_id: &str) -> Result<RunRow, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let mut connection = self.pool.acquire().await?;
+        sqlx::query_as::<_, RunRow>(
+            "SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status, attempt_number \
+             FROM runs WHERE assignment_id = ? AND status IN ('queued', 'running', 'waiting') \
+             ORDER BY attempt_number DESC LIMIT 1",
+        )
+        .bind(assignment_id)
+        .fetch_optional(&mut *connection)
+        .await?
+        .ok_or_else(|| AppError::invalid_input("assignmentId", "assignment has no active run"))
+    }
+
     pub async fn events_for_assignment(
         &self,
         assignment_id: &str,

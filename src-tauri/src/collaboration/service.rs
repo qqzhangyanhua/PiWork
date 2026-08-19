@@ -9,10 +9,12 @@ use crate::{
         repository::{AcceptAssignmentInput, AssignmentRepository},
         scheduler::AssignmentSchedulerHandle,
     },
+    collaboration::result::{repair_decision, validate_result, RepairDecision, ResultSubmissionContext},
     domain::{
         agent::WorkAgentSummary,
         assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus, AssignmentSummary},
-        collaboration::DelegateAssignmentInput,
+        collaboration::{DelegateAssignmentInput, ResultEnvelope},
+        event::WorkEventPayload,
     },
     error::AppError,
 };
@@ -204,4 +206,138 @@ impl LeadToolService {
         self.scheduler.wake()?;
         Ok(cancelled)
     }
+}
+
+/// MemberResultService: a Member submits one structured Result, which is
+/// validated and either accepted (completing the Assignment), repaired once, or
+/// rejected and escalated to the Lead.
+#[derive(Clone)]
+pub struct MemberResultService {
+    repository: AssignmentRepository,
+    scheduler: AssignmentSchedulerHandle,
+}
+
+impl MemberResultService {
+    pub fn new(repository: AssignmentRepository, scheduler: AssignmentSchedulerHandle) -> Self {
+        Self {
+            repository,
+            scheduler,
+        }
+    }
+
+    pub async fn submit_assignment_result(
+        &self,
+        submission: MemberResultSubmission,
+    ) -> Result<SubmitOutcome, AppError> {
+        let envelope_json = serde_json::to_string(&submission.envelope)
+            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
+        let context = ResultSubmissionContext {
+            work_id: submission.work_id.clone(),
+            assignment_id: submission.assignment_id.clone(),
+            run_id: submission.run_id.clone(),
+            author_agent_id: submission.author_agent_id.clone(),
+        };
+
+        match validate_result(&context, submission.envelope) {
+            Ok(valid) => {
+                self.repository
+                    .record_result(
+                        &submission.assignment_id,
+                        &submission.author_agent_id,
+                        &envelope_json,
+                        "valid",
+                        0,
+                    )
+                    .await?;
+                let summary = valid.envelope.summary.clone();
+                let status = valid.envelope.status;
+                let assignment = self
+                    .repository
+                    .complete_by_assignment(
+                        &submission.assignment_id,
+                        &summary,
+                        &submission.runtime_owner,
+                    )
+                    .await?;
+                self.repository
+                    .emit_collaboration_event(
+                        &submission.assignment_id,
+                        WorkEventPayload::AssignmentResultSubmitted {
+                            assignment_id: submission.assignment_id.clone(),
+                            agent_instance_id: submission.author_agent_id.clone(),
+                            status,
+                            summary,
+                        },
+                    )
+                    .await?;
+                self.scheduler.wake()?;
+                Ok(SubmitOutcome::Accepted { assignment })
+            }
+            Err(diagnostics) => {
+                let prior = self
+                    .repository
+                    .latest_repair_attempt(&submission.assignment_id)
+                    .await?;
+                match repair_decision(prior, diagnostics) {
+                    RepairDecision::RequestRepair { diagnostics } => {
+                        self.repository
+                            .record_result(
+                                &submission.assignment_id,
+                                &submission.author_agent_id,
+                                &envelope_json,
+                                "repair_requested",
+                                prior,
+                            )
+                            .await?;
+                        Ok(SubmitOutcome::RepairRequested { diagnostics })
+                    }
+                    RepairDecision::Reject { diagnostics } => {
+                        self.repository
+                            .record_result(
+                                &submission.assignment_id,
+                                &submission.author_agent_id,
+                                &envelope_json,
+                                "rejected",
+                                prior,
+                            )
+                            .await?;
+                        self.repository
+                            .emit_collaboration_event(
+                                &submission.assignment_id,
+                                WorkEventPayload::AssignmentResultRejected {
+                                    assignment_id: submission.assignment_id.clone(),
+                                    agent_instance_id: submission.author_agent_id.clone(),
+                                    reason: diagnostics.join("; "),
+                                },
+                            )
+                            .await?;
+                        self.scheduler.wake()?;
+                        Ok(SubmitOutcome::Rejected { diagnostics })
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub struct MemberResultSubmission {
+    pub work_id: String,
+    pub assignment_id: String,
+    pub run_id: String,
+    pub author_agent_id: String,
+    pub runtime_owner: String,
+    pub envelope: ResultEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SubmitOutcome {
+    Accepted {
+        assignment: AssignmentSummary,
+    },
+    RepairRequested {
+        diagnostics: Vec<String>,
+    },
+    Rejected {
+        diagnostics: Vec<String>,
+    },
 }

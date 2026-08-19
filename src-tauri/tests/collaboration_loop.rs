@@ -13,7 +13,7 @@ use piwork_lib::{
         service::LeadToolService,
     },
     domain::{
-        assignment::{AssignmentKind, AssignmentSideEffect},
+        assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus},
         collaboration::{DelegateAssignmentInput, ResultEnvelope, ResultStatus},
         event::WorkEventEnvelope,
     },
@@ -282,5 +282,136 @@ async fn lead_cannot_delegate_to_itself_or_outside_the_team() {
 
     assert!(delegate_to("agent-instance:piwork-lead".into()).await.is_err());
     assert!(delegate_to("agent-instance:piwork-reviewer".into()).await.is_err());
+}
+
+async fn seed_running_member_assignment(
+    repository: &AssignmentRepository,
+    pool: &sqlx::SqlitePool,
+    work_id: &str,
+) -> String {
+    let child = repository
+        .accept(AcceptAssignmentInput {
+            id: None,
+            work_id: work_id.into(),
+            parent_assignment_id: None,
+            created_by_agent_id: None,
+            assigned_agent_id: "agent-instance:piwork-researcher".into(),
+            capability_pack_id: None,
+            kind: AssignmentKind::Member,
+            side_effect: AssignmentSideEffect::ReadOnly,
+            title: "Investigate".into(),
+            instruction: "Inspect the queue".into(),
+            context_manifest: json!({}),
+            expected_result_schema: json!({}),
+            acceptance_criteria: json!([]),
+            permission_scope: json!({"mode": "read_only"}),
+            priority: 5,
+            max_attempts: 2,
+            not_before: None,
+        })
+        .await
+        .unwrap();
+    let now = Utc::now();
+    repository
+        .claim(&child.id, "member-owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&child.id, "fake", "Pi")
+        .await
+        .unwrap();
+    repository
+        .mark_running(&child.id, &run.id, "session-1", "member-owner", now)
+        .await
+        .unwrap();
+    let _ = pool;
+    child.id
+}
+
+fn valid_result_envelope() -> ResultEnvelope {
+    ResultEnvelope {
+        status: ResultStatus::Completed,
+        summary: "Inspected the queue".into(),
+        findings: vec![],
+        evidence: vec![piwork_lib::domain::collaboration::ResultEvidence {
+            description: "Read the source".into(),
+            source_event_id: None,
+            source_resource_id: None,
+            source_path: Some("src/assignment/queue.rs".into()),
+            author_agent_id: "agent-instance:piwork-researcher".into(),
+            assignment_id: "".into(),
+            occurred_at: None,
+        }],
+        artifacts: vec![],
+        validation: vec![],
+        decisions_recommended: vec![],
+        uncertainties: vec![],
+        delegation_requests: vec![],
+        memory_candidates: vec![],
+        limitations: vec![],
+        extensions: BTreeMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn member_submits_a_valid_result_and_completes() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-member", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let work_repository = WorkRepository::new(pool.clone());
+    let agent_repository = AgentRepository::new(pool.clone());
+
+    // Seed and run the member assignment before the scheduler starts so the two
+    // do not race to claim the same queued Assignment.
+    let child_id = seed_running_member_assignment(&repository, &pool, "work-member").await;
+
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        work_repository,
+        agent_repository,
+        Arc::new(FakeEngineAdapter::new(Duration::ZERO)),
+        Arc::clone(&publisher) as _,
+        "member-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    let service = piwork_lib::collaboration::service::MemberResultService::new(
+        repository.clone(),
+        handle,
+    );
+
+    let mut envelope = valid_result_envelope();
+    envelope.evidence[0].assignment_id = child_id.clone();
+
+    let outcome = service
+        .submit_assignment_result(piwork_lib::collaboration::service::MemberResultSubmission {
+            work_id: "work-member".into(),
+            assignment_id: child_id.clone(),
+            run_id: "run-1".into(),
+            author_agent_id: "agent-instance:piwork-researcher".into(),
+            runtime_owner: "member-owner".into(),
+            envelope,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(outcome, piwork_lib::collaboration::service::SubmitOutcome::Accepted { .. }));
+
+    let child = repository.get_assignment(&child_id).await.unwrap().unwrap();
+    assert_eq!(child.status, AssignmentStatus::Completed);
+
+    let result_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM assignment_results WHERE assignment_id = ? AND status = 'valid'",
+    )
+    .bind(&child_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(result_rows, 1);
 }
 
