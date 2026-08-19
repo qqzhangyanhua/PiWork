@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    agent::service::AgentService, model::ModelService, resource::service::ResourceService,
-    work::service::WorkService,
+    agent::service::AgentService, assignment::service::AssignmentService, model::ModelService,
+    resource::service::ResourceService, work::service::WorkService,
 };
 
 pub struct AppState {
@@ -10,6 +10,7 @@ pub struct AppState {
     model_service: Option<Arc<ModelService>>,
     resource_service: Option<Arc<ResourceService>>,
     agent_service: Arc<AgentService>,
+    assignment_service: Option<Arc<AssignmentService>>,
 }
 
 impl AppState {
@@ -19,6 +20,7 @@ impl AppState {
             model_service: None,
             resource_service: None,
             agent_service,
+            assignment_service: None,
         }
     }
 
@@ -32,6 +34,7 @@ impl AppState {
             model_service: Some(model_service),
             resource_service: None,
             agent_service,
+            assignment_service: None,
         }
     }
 
@@ -46,7 +49,13 @@ impl AppState {
             model_service: Some(model_service),
             resource_service: Some(resource_service),
             agent_service,
+            assignment_service: None,
         }
+    }
+
+    pub fn with_assignment_service(mut self, assignment_service: Arc<AssignmentService>) -> Self {
+        self.assignment_service = Some(assignment_service);
+        self
     }
 
     pub fn work_service(&self) -> &Arc<WorkService> {
@@ -67,5 +76,11 @@ impl AppState {
 
     pub fn agent_service(&self) -> &Arc<AgentService> {
         &self.agent_service
+    }
+
+    pub fn assignment_service(&self) -> &Arc<AssignmentService> {
+        self.assignment_service
+            .as_ref()
+            .expect("production AppState must include AssignmentService")
     }
 }

@@ -107,4 +107,26 @@ impl AssignmentService {
             user_message,
         })
     }
+
+    pub async fn list_work_assignments(
+        &self,
+        work_id: &str,
+    ) -> Result<Vec<crate::domain::assignment::AssignmentSummary>, AppError> {
+        self.repository.list_for_work(work_id).await
+    }
+
+    pub async fn confirm_assignment_recovery(
+        &self,
+        assignment_id: &str,
+        resume: bool,
+    ) -> Result<crate::domain::assignment::AssignmentSummary, AppError> {
+        let assignment = self
+            .repository
+            .confirm_recovery(assignment_id, resume, chrono::Utc::now())
+            .await?;
+        if resume {
+            self.scheduler.wake()?;
+        }
+        Ok(assignment)
+    }
 }

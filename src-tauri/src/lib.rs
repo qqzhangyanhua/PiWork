@@ -274,19 +274,22 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     let service =
                         Arc::new(work::service::WorkService::with_assignment_service(
                             repository,
-                            assignment_service,
+                            Arc::clone(&assignment_service),
                         ));
                     let agent_service = Arc::new(agent::service::AgentService::new(
                         agent_repository,
                         production_agent_tools(),
                         production_agent_engine_capabilities(),
                     ));
-                    if !app.manage(app_state::AppState::with_services(
-                        service,
-                        model_service,
-                        resource_service,
-                        agent_service,
-                    )) {
+                    if !app.manage(
+                        app_state::AppState::with_services(
+                            service,
+                            model_service,
+                            resource_service,
+                            agent_service,
+                        )
+                        .with_assignment_service(assignment_service),
+                    ) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             "PiWork application state is already managed",
@@ -313,6 +316,9 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             work::commands::start_work,
             work::commands::stop_work,
             assignment::commands::drain_assignment_event_outbox,
+            assignment::commands::list_work_assignments,
+            assignment::commands::queue_work_input,
+            assignment::commands::confirm_assignment_recovery,
             model::commands::get_model_configuration_status,
             model::commands::list_model_configurations,
             model::commands::test_model_connection,
