@@ -55,6 +55,12 @@ fn assignment_outbox_migration_uses_stable_lf_line_endings() {
     assert!(!migration.contains('\r'));
 }
 
+#[test]
+fn work_memory_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0008_work_memory_and_results.sql");
+    assert!(!migration.contains('\r'));
+}
+
 #[tokio::test]
 async fn assignment_outbox_has_explicit_global_ordinal_and_delivery_metadata() {
     let database = Database::open_in_memory().await.unwrap();
@@ -3025,4 +3031,65 @@ async fn assignment_migration_failure_rolls_back_legacy_resources_atomically() {
         .await
         .unwrap();
     assert_eq!(quick_check, "ok");
+}
+
+#[tokio::test]
+async fn collaboration_migration_creates_memory_and_result_tables() {
+    let database = Database::open_in_memory().await.unwrap();
+    insert_work(&database, "work-collab").await;
+
+    for table in [
+        "agent_memory",
+        "work_memory",
+        "assignment_results",
+        "memory_candidates",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
+                .bind(table)
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "missing collaboration table {table}");
+    }
+
+    // work_memory is one projection row per (work, revision).
+    sqlx::query(
+        "INSERT INTO work_memory (id, work_id, revision, ledger_json, source_sequence, created_at, updated_at) \
+         VALUES ('wm-1', 'work-collab', 1, '{}', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let duplicate = sqlx::query(
+        "INSERT INTO work_memory (id, work_id, revision, ledger_json, source_sequence, created_at, updated_at) \
+         VALUES ('wm-2', 'work-collab', 1, '{}', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+    )
+    .execute(database.pool())
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "work_memory must be unique per (work, revision)"
+    );
+
+    // memory_candidates rejects unknown statuses and a confirmed candidate
+    // without a resolver.
+    let bad_status = sqlx::query(
+        "INSERT INTO memory_candidates (id, source_work_id, author_agent_id, content, reason, version, status, created_at) \
+         VALUES ('mc-1', 'work-collab', 'agent-1', 'content', 'reason', 1, 'bogus', '2026-01-01T00:00:00Z')",
+    )
+    .execute(database.pool())
+    .await;
+    assert!(bad_status.is_err(), "memory candidate status must be constrained");
+
+    let bad_resolve = sqlx::query(
+        "INSERT INTO memory_candidates (id, source_work_id, author_agent_id, content, reason, version, status, created_at) \
+         VALUES ('mc-2', 'work-collab', 'agent-1', 'content', 'reason', 1, 'confirmed', '2026-01-01T00:00:00Z')",
+    )
+    .execute(database.pool())
+    .await;
+    assert!(
+        bad_resolve.is_err(),
+        "confirmed candidates require resolved_at and resolved_by"
+    );
 }
