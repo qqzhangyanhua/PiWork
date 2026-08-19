@@ -24,7 +24,10 @@ pub async fn list_work_assignments(
     state: State<'_, AppState>,
     work_id: String,
 ) -> Result<Vec<AssignmentSummary>, AppError> {
-    state.assignment_service().list_work_assignments(&work_id).await
+    state
+        .assignment_service()
+        .list_work_assignments(&work_id)
+        .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -33,12 +36,15 @@ pub async fn queue_work_input(
     work_id: String,
     input: QueueWorkInput,
 ) -> Result<StartWorkOutput, AppError> {
-    state.assignment_service().start_lead_assignment(
-        &work_id,
-        input.instruction,
-        input.referenced_files,
-        input.resource_ids,
-    ).await
+    state
+        .assignment_service()
+        .start_lead_assignment(
+            &work_id,
+            input.instruction,
+            input.referenced_files,
+            input.resource_ids,
+        )
+        .await
 }
 
 #[tauri::command(rename_all = "camelCase")]

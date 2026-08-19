@@ -131,7 +131,8 @@ fn complete_body(buffer: &[u8]) -> Option<&[u8]> {
         })
         .unwrap_or(0);
     let body_start = header_end + 4;
-    (buffer.len() >= body_start + content_length).then(|| &buffer[body_start..body_start + content_length])
+    (buffer.len() >= body_start + content_length)
+        .then(|| &buffer[body_start..body_start + content_length])
 }
 
 fn handle_body(
@@ -163,8 +164,14 @@ fn handle_body(
         return respond(403, json_error("tool not authorized for this run"));
     }
     match dispatch(tool, &context, arguments) {
-        Ok(value) => respond(200, &serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned())),
-        Err(error) => respond(500, &serde_json::to_string(&json_error(&error.to_string())).unwrap()),
+        Ok(value) => respond(
+            200,
+            &serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned()),
+        ),
+        Err(error) => respond(
+            500,
+            &serde_json::to_string(&json_error(&error.to_string())).unwrap(),
+        ),
     }
 }
 
@@ -247,7 +254,11 @@ mod tests {
             body.to_string().len(),
             body
         );
-        let addr = endpoint.strip_prefix("http://").unwrap().strip_suffix("/tool").unwrap();
+        let addr = endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/tool")
+            .unwrap();
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();
@@ -273,9 +284,8 @@ mod tests {
             },
             "http://127.0.0.1:0/tool".into(),
         );
-        let dispatch: Arc<ToolDispatch> = Arc::new(|_tool, _context, _args| {
-            Ok(serde_json::json!({ "ok": true }))
-        });
+        let dispatch: Arc<ToolDispatch> =
+            Arc::new(|_tool, _context, _args| Ok(serde_json::json!({ "ok": true })));
         let server = HostToolServer::bind(registry, dispatch).unwrap();
         let endpoint = server.endpoint().to_owned();
 
@@ -290,7 +300,11 @@ mod tests {
             body.to_string().len(),
             body
         );
-        let addr = endpoint.strip_prefix("http://").unwrap().strip_suffix("/tool").unwrap();
+        let addr = endpoint
+            .strip_prefix("http://")
+            .unwrap()
+            .strip_suffix("/tool")
+            .unwrap();
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         let mut response = String::new();

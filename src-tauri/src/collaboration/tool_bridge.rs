@@ -6,11 +6,7 @@
 //! The loopback HTTP transport that consumes these leases is layered on top so
 //! the security core stays independently testable.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::Mutex,
-};
+use std::{collections::HashMap, fmt, sync::Mutex};
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
@@ -140,7 +136,10 @@ impl HostToolRegistry {
 
     #[cfg(test)]
     fn stores_plaintext(&self, token: &HostToolToken) -> bool {
-        let leases = self.leases.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         leases
             .values()
             .any(|(digest, _context)| digest.as_slice() == token.0.as_slice())

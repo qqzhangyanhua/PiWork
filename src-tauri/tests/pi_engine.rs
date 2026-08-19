@@ -768,12 +768,11 @@ fn pi_launch_arguments_bind_the_workspace_session_and_builtin_tools() {
             .windows(2)
             .any(|pair| pair == ["--session-id", "agent-session-contract"])
     );
-    assert!(
-        arguments
-            .values()
-            .windows(2)
-            .any(|pair| pair == ["--session-dir", session_directory.to_string_lossy().as_ref()])
-    );
+    assert!(arguments.values().windows(2).any(|pair| pair
+        == [
+            "--session-dir",
+            session_directory.to_string_lossy().as_ref()
+        ]));
     assert!(
         arguments
             .values()

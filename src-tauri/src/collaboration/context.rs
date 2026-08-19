@@ -48,7 +48,9 @@ impl ContextSectionKind {
             ContextSectionKind::WorkBrief => "Work Brief",
             ContextSectionKind::AssignmentPacket => "Current Assignment Packet",
             ContextSectionKind::DependencyResults => "Dependency Result Envelopes",
-            ContextSectionKind::ExplicitContext => "Explicit Files, Attachments and Recent Messages",
+            ContextSectionKind::ExplicitContext => {
+                "Explicit Files, Attachments and Recent Messages"
+            }
         }
     }
 }
@@ -275,7 +277,9 @@ pub fn build_assignment_context(input: ContextBuildInput) -> BuiltAssignmentCont
         let header = section_header(section.kind);
         let section_len = chars + header.chars().count();
         if total + section_len > input.budget_chars {
-            let remaining = input.budget_chars.saturating_sub(total + header.chars().count());
+            let remaining = input
+                .budget_chars
+                .saturating_sub(total + header.chars().count());
             section.content = truncate_chars(&section.content, remaining);
             section.truncated = true;
             truncated = true;

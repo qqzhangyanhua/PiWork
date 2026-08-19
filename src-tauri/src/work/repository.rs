@@ -738,10 +738,7 @@ impl WorkRepository {
     /// advancing Work or Run status. Assignment-aware execution owns terminal
     /// transitions through `AssignmentRepository`, so this journal must not
     /// silently complete or fail a Run on a terminal payload.
-    pub async fn journal_engine_event(
-        &self,
-        envelope: &WorkEventEnvelope,
-    ) -> Result<(), AppError> {
+    pub async fn journal_engine_event(&self, envelope: &WorkEventEnvelope) -> Result<(), AppError> {
         let event_id = envelope.event_id.as_deref().ok_or_else(|| {
             AppError::invalid_input("eventId", "new Work events require an event id")
         })?;

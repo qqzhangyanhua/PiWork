@@ -11,7 +11,7 @@
 use std::{collections::BTreeMap, collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{TimeDelta, Utc};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     agent::repository::AgentRepository,
@@ -22,14 +22,12 @@ use crate::{
         },
         repository::AssignmentRepository,
     },
-    collaboration::context::{build_assignment_context, ContextBuildInput},
-    domain::{
-        agent::RoleKind,
-        assignment::AssignmentSummary,
-    },
+    collaboration::context::{ContextBuildInput, build_assignment_context},
+    domain::{agent::RoleKind, assignment::AssignmentSummary},
     engine::{
+        EngineAdapter, EngineInput,
         harness::{AssignmentExecutionOutcome, AssignmentExecutionRequest, EngineHarness},
-        publisher::EventPublisher, EngineAdapter, EngineInput,
+        publisher::EventPublisher,
     },
     error::AppError,
     work::repository::WorkRepository,
@@ -222,7 +220,9 @@ impl AssignmentScheduler {
             .agent_repository
             .get_agent_instance(&assignment.assigned_agent_id)
             .await?
-            .ok_or_else(|| AppError::invalid_input("assignedAgentId", "agent instance not found"))?;
+            .ok_or_else(|| {
+                AppError::invalid_input("assignedAgentId", "agent instance not found")
+            })?;
         let work = self
             .work_repository
             .get(&assignment.work_id)
@@ -257,11 +257,20 @@ impl AssignmentScheduler {
         match work.summary.status {
             WorkStatus::Running => {}
             WorkStatus::Queued => {
-                let _ = self.work_repository.set_work_status(work_id, WorkStatus::Running).await;
+                let _ = self
+                    .work_repository
+                    .set_work_status(work_id, WorkStatus::Running)
+                    .await;
             }
             _ => {
-                let _ = self.work_repository.set_work_status(work_id, WorkStatus::Queued).await;
-                let _ = self.work_repository.set_work_status(work_id, WorkStatus::Running).await;
+                let _ = self
+                    .work_repository
+                    .set_work_status(work_id, WorkStatus::Queued)
+                    .await;
+                let _ = self
+                    .work_repository
+                    .set_work_status(work_id, WorkStatus::Running)
+                    .await;
             }
         }
     }
@@ -308,7 +317,13 @@ impl AssignmentScheduler {
         let _ = self.engine.abort(&run_id).await;
         let _ = self
             .repository
-            .cancel(&assignment_id, &run_id, &self.owner_id, "interrupted", Utc::now())
+            .cancel(
+                &assignment_id,
+                &run_id,
+                &self.owner_id,
+                "interrupted",
+                Utc::now(),
+            )
             .await;
     }
 

@@ -60,7 +60,11 @@ pub fn validate_result(
         "decisionsRecommended",
         envelope.decisions_recommended.len(),
     );
-    check_array(&mut diagnostics, "uncertainties", envelope.uncertainties.len());
+    check_array(
+        &mut diagnostics,
+        "uncertainties",
+        envelope.uncertainties.len(),
+    );
     check_array(
         &mut diagnostics,
         "delegationRequests",
@@ -122,10 +126,30 @@ fn validate_finding(
     finding: &ResultFinding,
     index: usize,
 ) {
-    check_text(diagnostics, &finding.title, &format!("findings[{index}].title"));
-    check_text(diagnostics, &finding.detail, &format!("findings[{index}].detail"));
-    check_author(diagnostics, context, &finding.author_agent_id, index, "finding");
-    check_assignment(diagnostics, context, &finding.assignment_id, index, "finding");
+    check_text(
+        diagnostics,
+        &finding.title,
+        &format!("findings[{index}].title"),
+    );
+    check_text(
+        diagnostics,
+        &finding.detail,
+        &format!("findings[{index}].detail"),
+    );
+    check_author(
+        diagnostics,
+        context,
+        &finding.author_agent_id,
+        index,
+        "finding",
+    );
+    check_assignment(
+        diagnostics,
+        context,
+        &finding.assignment_id,
+        index,
+        "finding",
+    );
 }
 
 fn validate_evidence(
@@ -139,8 +163,20 @@ fn validate_evidence(
         &evidence.description,
         &format!("evidence[{index}].description"),
     );
-    check_author(diagnostics, context, &evidence.author_agent_id, index, "evidence");
-    check_assignment(diagnostics, context, &evidence.assignment_id, index, "evidence");
+    check_author(
+        diagnostics,
+        context,
+        &evidence.author_agent_id,
+        index,
+        "evidence",
+    );
+    check_assignment(
+        diagnostics,
+        context,
+        &evidence.assignment_id,
+        index,
+        "evidence",
+    );
     let has_source = evidence.source_event_id.is_some()
         || evidence.source_resource_id.is_some()
         || evidence.source_path.is_some();
@@ -157,9 +193,25 @@ fn validate_artifact(
     artifact: &ResultArtifact,
     index: usize,
 ) {
-    check_text(diagnostics, &artifact.path, &format!("artifacts[{index}].path"));
-    check_author(diagnostics, context, &artifact.author_agent_id, index, "artifact");
-    check_assignment(diagnostics, context, &artifact.assignment_id, index, "artifact");
+    check_text(
+        diagnostics,
+        &artifact.path,
+        &format!("artifacts[{index}].path"),
+    );
+    check_author(
+        diagnostics,
+        context,
+        &artifact.author_agent_id,
+        index,
+        "artifact",
+    );
+    check_assignment(
+        diagnostics,
+        context,
+        &artifact.assignment_id,
+        index,
+        "artifact",
+    );
 }
 
 fn validate_validation(
@@ -173,15 +225,23 @@ fn validate_validation(
         &validation.command,
         &format!("validation[{index}].command"),
     );
-    check_author(diagnostics, context, &validation.author_agent_id, index, "validation");
-    check_assignment(diagnostics, context, &validation.assignment_id, index, "validation");
+    check_author(
+        diagnostics,
+        context,
+        &validation.author_agent_id,
+        index,
+        "validation",
+    );
+    check_assignment(
+        diagnostics,
+        context,
+        &validation.assignment_id,
+        index,
+        "validation",
+    );
 }
 
-fn validate_delegation(
-    diagnostics: &mut Vec<String>,
-    request: &DelegationRequest,
-    index: usize,
-) {
+fn validate_delegation(diagnostics: &mut Vec<String>, request: &DelegationRequest, index: usize) {
     check_text(
         diagnostics,
         &request.reason,
@@ -333,7 +393,11 @@ mod tests {
         let mut envelope = valid_envelope();
         envelope.evidence[0].source_path = None;
         let diagnostics = validate_result(&context(), envelope).unwrap_err();
-        assert!(diagnostics.iter().any(|d| d.contains("must reference a source")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("must reference a source"))
+        );
     }
 
     #[test]
@@ -341,12 +405,20 @@ mod tests {
         let mut envelope = valid_envelope();
         envelope.findings[0].author_agent_id = "agent-2".into();
         let diagnostics = validate_result(&context(), envelope).unwrap_err();
-        assert!(diagnostics.iter().any(|d| d.contains("does not match the submitter")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("does not match the submitter"))
+        );
 
         let mut envelope = valid_envelope();
         envelope.artifacts[0].assignment_id = "assignment-2".into();
         let diagnostics = validate_result(&context(), envelope).unwrap_err();
-        assert!(diagnostics.iter().any(|d| d.contains("does not match the submission")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("does not match the submission"))
+        );
     }
 
     #[test]
@@ -362,7 +434,9 @@ mod tests {
         let diagnostics = vec!["bad".to_owned()];
         assert_eq!(
             repair_decision(0, diagnostics.clone()),
-            RepairDecision::RequestRepair { diagnostics: diagnostics.clone() }
+            RepairDecision::RequestRepair {
+                diagnostics: diagnostics.clone()
+            }
         );
         assert_eq!(
             repair_decision(1, diagnostics.clone()),

@@ -623,8 +623,14 @@ impl AssignmentRepository {
         }
         sqlx::query("UPDATE assignments SET status = 'cancelled', completed_at = ?, updated_at = ? WHERE id = ?")
             .bind(now).bind(now).bind(&assignment_id).execute(&mut *transaction).await?;
-        sqlx::query("UPDATE runs SET status = 'stopped', completed_at = ?, updated_at = ? WHERE id = ?")
-            .bind(now).bind(now).bind(&run_id).execute(&mut *transaction).await?;
+        sqlx::query(
+            "UPDATE runs SET status = 'stopped', completed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&run_id)
+        .execute(&mut *transaction)
+        .await?;
         assignment.status = AssignmentStatus::Cancelled;
         assignment.completed_at = Some(now);
         assignment.updated_at = now;
@@ -1266,9 +1272,13 @@ impl AssignmentRepository {
             .fetch_one(&mut *transaction)
             .await?;
             let generation = u32::try_from(current_generation)
-                .map_err(|_| AppError::invalid_input("generation", "stored session generation is invalid"))?
+                .map_err(|_| {
+                    AppError::invalid_input("generation", "stored session generation is invalid")
+                })?
                 .checked_add(1)
-                .ok_or_else(|| AppError::invalid_input("generation", "session generation limit exceeded"))?;
+                .ok_or_else(|| {
+                    AppError::invalid_input("generation", "session generation limit exceeded")
+                })?;
             let session = AgentSessionSummary {
                 id: Uuid::new_v4().to_string(),
                 work_id: work_id.clone(),
@@ -1310,12 +1320,14 @@ impl AssignmentRepository {
         let session_id = validate_id("sessionId", session_id)?;
         let opaque_ref = validate_label("engineReference", opaque_ref)?;
         let now = Utc::now();
-        let updated = sqlx::query("UPDATE agent_sessions SET engine_reference = ?, updated_at = ? WHERE id = ?")
-            .bind(&opaque_ref)
-            .bind(now)
-            .bind(&session_id)
-            .execute(&self.pool)
-            .await?;
+        let updated = sqlx::query(
+            "UPDATE agent_sessions SET engine_reference = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&opaque_ref)
+        .bind(now)
+        .bind(&session_id)
+        .execute(&self.pool)
+        .await?;
         if updated.rows_affected() != 1 {
             return Err(AppError::invalid_input(
                 "sessionId",
@@ -1372,10 +1384,9 @@ impl AssignmentRepository {
                 "agent session is already invalidated",
             ));
         }
-        let next_generation = current
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| AppError::invalid_input("generation", "session generation limit exceeded"))?;
+        let next_generation = current.generation.checked_add(1).ok_or_else(|| {
+            AppError::invalid_input("generation", "session generation limit exceeded")
+        })?;
         sqlx::query("UPDATE agent_sessions SET status = 'invalidated', invalidated_at = ?, rotation_reason = ?, runtime_owner_id = NULL, updated_at = ? WHERE id = ?")
             .bind(now).bind(&reason).bind(now).bind(&session_id)
             .execute(&mut *transaction).await?;
@@ -1630,7 +1641,7 @@ impl AssignmentRepository {
                 return Err(AppError::invalid_input(
                     "field",
                     format!("unknown collaboration revision field {other:?}"),
-                ))
+                ));
             }
         };
         let max: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
@@ -2080,8 +2091,9 @@ impl TryFrom<AgentSessionRow> for AgentSessionSummary {
             work_id: row.work_id,
             agent_instance_id: row.agent_instance_id,
             engine_kind: row.engine_kind,
-            generation: u32::try_from(row.generation)
-                .map_err(|_| AppError::invalid_input("generation", "stored session generation is invalid"))?,
+            generation: u32::try_from(row.generation).map_err(|_| {
+                AppError::invalid_input("generation", "stored session generation is invalid")
+            })?,
             current_assignment_id: row.current_assignment_id,
             last_successful_turn_id: row.last_successful_turn_id,
             rotation_reason: row.rotation_reason,
@@ -2097,14 +2109,12 @@ async fn load_agent_session(
     connection: &mut sqlx::SqliteConnection,
     session_id: &str,
 ) -> Result<AgentSessionSummary, AppError> {
-    let row = sqlx::query_as::<_, AgentSessionRow>(&format!(
-        "{} WHERE id = ?",
-        AGENT_SESSION_SELECT
-    ))
-    .bind(session_id)
-    .fetch_optional(connection)
-    .await?
-    .ok_or_else(|| AppError::invalid_input("sessionId", "agent session was not found"))?;
+    let row =
+        sqlx::query_as::<_, AgentSessionRow>(&format!("{} WHERE id = ?", AGENT_SESSION_SELECT))
+            .bind(session_id)
+            .fetch_optional(connection)
+            .await?
+            .ok_or_else(|| AppError::invalid_input("sessionId", "agent session was not found"))?;
     AgentSessionSummary::try_from(row)
 }
 

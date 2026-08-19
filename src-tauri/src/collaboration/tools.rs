@@ -48,11 +48,20 @@ pub const MEMBER_TOOLS: [&str; 3] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecisionSource {
-    WorkPolicy { mode: PermissionMode },
-    AgentPolicy { policy: PermissionPolicy },
-    CapabilityPack { pack_id: String, required_tools: Vec<String> },
+    WorkPolicy {
+        mode: PermissionMode,
+    },
+    AgentPolicy {
+        policy: PermissionPolicy,
+    },
+    CapabilityPack {
+        pack_id: String,
+        required_tools: Vec<String>,
+    },
     AssignmentOverride,
-    EngineCapability { capability: String },
+    EngineCapability {
+        capability: String,
+    },
     FailClosed,
 }
 
@@ -76,7 +85,9 @@ pub fn resolve_effective_permission(
 ) -> EffectivePermission {
     let mut sources = vec![
         PermissionDecisionSource::WorkPolicy { mode: work_mode },
-        PermissionDecisionSource::AgentPolicy { policy: agent_policy },
+        PermissionDecisionSource::AgentPolicy {
+            policy: agent_policy,
+        },
     ];
 
     let mode = match agent_policy {
@@ -123,10 +134,7 @@ pub fn resolve_effective_permission(
 
 /// Authorizes a single tool name against the effective permission. Deny by
 /// default: an unknown tool or one outside the resolved set is rejected.
-pub fn authorize_tool(
-    permission: &EffectivePermission,
-    tool: &str,
-) -> Result<(), AppError> {
+pub fn authorize_tool(permission: &EffectivePermission, tool: &str) -> Result<(), AppError> {
     if permission.tools.contains(tool) {
         Ok(())
     } else {
@@ -161,7 +169,10 @@ mod tests {
         }
         assert!(member.contains(TOOL_SUBMIT_ASSIGNMENT_RESULT));
         assert!(!lead.contains(TOOL_SUBMIT_ASSIGNMENT_RESULT));
-        assert!(lead.contains(TOOL_GET_ASSIGNMENT_STATUS) && member.contains(TOOL_GET_ASSIGNMENT_STATUS));
+        assert!(
+            lead.contains(TOOL_GET_ASSIGNMENT_STATUS)
+                && member.contains(TOOL_GET_ASSIGNMENT_STATUS)
+        );
     }
 
     #[test]

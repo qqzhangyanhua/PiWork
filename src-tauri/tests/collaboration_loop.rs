@@ -9,7 +9,7 @@ use piwork_lib::{
         scheduler::AssignmentScheduler,
     },
     collaboration::{
-        result::{repair_decision, validate_result, RepairDecision, ResultSubmissionContext},
+        result::{RepairDecision, ResultSubmissionContext, repair_decision, validate_result},
         service::LeadToolService,
     },
     domain::{
@@ -177,7 +177,12 @@ async fn lead_delegates_a_single_level_member_assignment() {
         "Pi",
     );
     let handle = scheduler.spawn();
-    let service = LeadToolService::new(repository.clone(), work_repository, agent_repository, handle);
+    let service = LeadToolService::new(
+        repository.clone(),
+        work_repository,
+        agent_repository,
+        handle,
+    );
 
     let lead_id = accept_lead(&repository, "work-delegate").await;
     let result = service
@@ -207,7 +212,10 @@ async fn lead_delegates_a_single_level_member_assignment() {
         .unwrap()
         .unwrap();
     assert_eq!(child.kind, AssignmentKind::Member);
-    assert_eq!(child.parent_assignment_id.as_deref(), Some(lead_id.as_str()));
+    assert_eq!(
+        child.parent_assignment_id.as_deref(),
+        Some(lead_id.as_str())
+    );
     assert_eq!(child.assigned_agent_id, "agent-instance:piwork-researcher");
 
     let dependency: i64 = sqlx::query_scalar(
@@ -253,7 +261,12 @@ async fn lead_cannot_delegate_to_itself_or_outside_the_team() {
         "Pi",
     );
     let handle = scheduler.spawn();
-    let service = LeadToolService::new(repository.clone(), work_repository, agent_repository, handle);
+    let service = LeadToolService::new(
+        repository.clone(),
+        work_repository,
+        agent_repository,
+        handle,
+    );
 
     let lead_id = accept_lead(&repository, "work-guard").await;
     let delegate_to = |assigned: String| {
@@ -280,8 +293,16 @@ async fn lead_cannot_delegate_to_itself_or_outside_the_team() {
         }
     };
 
-    assert!(delegate_to("agent-instance:piwork-lead".into()).await.is_err());
-    assert!(delegate_to("agent-instance:piwork-reviewer".into()).await.is_err());
+    assert!(
+        delegate_to("agent-instance:piwork-lead".into())
+            .await
+            .is_err()
+    );
+    assert!(
+        delegate_to("agent-instance:piwork-reviewer".into())
+            .await
+            .is_err()
+    );
 }
 
 async fn seed_running_member_assignment(
@@ -381,10 +402,8 @@ async fn member_submits_a_valid_result_and_completes() {
         "Pi",
     );
     let handle = scheduler.spawn();
-    let service = piwork_lib::collaboration::service::MemberResultService::new(
-        repository.clone(),
-        handle,
-    );
+    let service =
+        piwork_lib::collaboration::service::MemberResultService::new(repository.clone(), handle);
 
     let mut envelope = valid_result_envelope();
     envelope.evidence[0].assignment_id = child_id.clone();
@@ -400,7 +419,10 @@ async fn member_submits_a_valid_result_and_completes() {
         })
         .await
         .unwrap();
-    assert!(matches!(outcome, piwork_lib::collaboration::service::SubmitOutcome::Accepted { .. }));
+    assert!(matches!(
+        outcome,
+        piwork_lib::collaboration::service::SubmitOutcome::Accepted { .. }
+    ));
 
     let child = repository.get_assignment(&child_id).await.unwrap().unwrap();
     assert_eq!(child.status, AssignmentStatus::Completed);
@@ -430,8 +452,14 @@ async fn child_completion_resumes_a_waiting_lead() {
     // Lead accepts, runs, then delegates and waits.
     let lead_id = accept_lead(&repository, "work-resume").await;
     let now = Utc::now();
-    repository.claim(&lead_id, "resume-owner", now).await.unwrap();
-    let lead_run = repository.begin_attempt(&lead_id, "fake", "Pi").await.unwrap();
+    repository
+        .claim(&lead_id, "resume-owner", now)
+        .await
+        .unwrap();
+    let lead_run = repository
+        .begin_attempt(&lead_id, "fake", "Pi")
+        .await
+        .unwrap();
     repository
         .mark_running(&lead_id, &lead_run.id, "lead-session", "resume-owner", now)
         .await
@@ -460,21 +488,43 @@ async fn child_completion_resumes_a_waiting_lead() {
         })
         .await
         .unwrap();
-    repository.add_dependency(&lead_id, &child.id).await.unwrap();
+    repository
+        .add_dependency(&lead_id, &child.id)
+        .await
+        .unwrap();
 
     // The waiting handshake: the Lead run ends waiting on the child.
     repository
-        .mark_waiting(&lead_id, &lead_run.id, "lead-session", "resume-owner", "waiting_on_assignments", now)
+        .mark_waiting(
+            &lead_id,
+            &lead_run.id,
+            "lead-session",
+            "resume-owner",
+            "waiting_on_assignments",
+            now,
+        )
         .await
         .unwrap();
 
     // Child runs and completes (fresh timestamps: the child was created after
     // the captured `now`).
     let child_now = Utc::now();
-    repository.claim(&child.id, "resume-owner", child_now).await.unwrap();
-    let child_run = repository.begin_attempt(&child.id, "fake", "Pi").await.unwrap();
     repository
-        .mark_running(&child.id, &child_run.id, "child-session", "resume-owner", child_now)
+        .claim(&child.id, "resume-owner", child_now)
+        .await
+        .unwrap();
+    let child_run = repository
+        .begin_attempt(&child.id, "fake", "Pi")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &child.id,
+            &child_run.id,
+            "child-session",
+            "resume-owner",
+            child_now,
+        )
         .await
         .unwrap();
     repository
@@ -483,7 +533,11 @@ async fn child_completion_resumes_a_waiting_lead() {
         .unwrap();
 
     let lead = repository.get_assignment(&lead_id).await.unwrap().unwrap();
-    assert_eq!(lead.status, AssignmentStatus::Queued, "lead should resume after the child terminal");
+    assert_eq!(
+        lead.status,
+        AssignmentStatus::Queued,
+        "lead should resume after the child terminal"
+    );
 
     let resumed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM events WHERE assignment_id = ? AND json_extract(payload, '$.type') = 'leadResumed'",
@@ -526,20 +580,29 @@ async fn memory_candidates_require_confirmation_and_reject_secrets() {
 
     let candidates = service.list_work_candidates("work-memory").await.unwrap();
     assert_eq!(candidates.len(), 1);
-    assert_eq!(candidates[0].status, piwork_lib::domain::collaboration::MemoryCandidateStatus::Proposed);
+    assert_eq!(
+        candidates[0].status,
+        piwork_lib::domain::collaboration::MemoryCandidateStatus::Proposed
+    );
 
     let candidate_id = candidates[0].id.clone();
     let resolved = service
         .resolve_candidate(&candidate_id, true, "agent-instance:piwork-lead")
         .await
         .unwrap();
-    assert_eq!(resolved.status, piwork_lib::domain::collaboration::MemoryCandidateStatus::Confirmed);
+    assert_eq!(
+        resolved.status,
+        piwork_lib::domain::collaboration::MemoryCandidateStatus::Confirmed
+    );
 
     let memory = service
         .list_agent_memory("agent-instance:piwork-researcher", 1024)
         .await
         .unwrap();
-    assert_eq!(memory, vec!["The queue uses a BTreeMap for fair ordering".to_owned()]);
+    assert_eq!(
+        memory,
+        vec!["The queue uses a BTreeMap for fair ordering".to_owned()]
+    );
 }
 
 #[tokio::test]
@@ -559,18 +622,30 @@ async fn lead_records_decisions_plan_and_delivery() {
     // Seed and run the lead before the scheduler starts so they do not race.
     let lead_id = accept_lead(&repository, "work-delivery").await;
     let now = Utc::now();
-    repository.claim(&lead_id, "delivery-owner", now).await.unwrap();
-    let run = repository.begin_attempt(&lead_id, "fake", "Pi").await.unwrap();
+    repository
+        .claim(&lead_id, "delivery-owner", now)
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&lead_id, "fake", "Pi")
+        .await
+        .unwrap();
     repository
         .mark_running(&lead_id, &run.id, "lead-session", "delivery-owner", now)
         .await
         .unwrap();
     // Advance the Work so delivery can complete it.
     let _ = work_repository
-        .set_work_status("work-delivery", piwork_lib::domain::work::WorkStatus::Queued)
+        .set_work_status(
+            "work-delivery",
+            piwork_lib::domain::work::WorkStatus::Queued,
+        )
         .await;
     let _ = work_repository
-        .set_work_status("work-delivery", piwork_lib::domain::work::WorkStatus::Running)
+        .set_work_status(
+            "work-delivery",
+            piwork_lib::domain::work::WorkStatus::Running,
+        )
         .await;
 
     let scheduler = AssignmentScheduler::new(
@@ -583,7 +658,12 @@ async fn lead_records_decisions_plan_and_delivery() {
         "Pi",
     );
     let handle = scheduler.spawn();
-    let service = LeadToolService::new(repository.clone(), work_repository, agent_repository, handle);
+    let service = LeadToolService::new(
+        repository.clone(),
+        work_repository,
+        agent_repository,
+        handle,
+    );
 
     service
         .record_work_decision(
@@ -598,13 +678,11 @@ async fn lead_records_decisions_plan_and_delivery() {
         .update_work_plan(
             &lead_id,
             piwork_lib::domain::collaboration::UpdateWorkPlanInput {
-                plan: vec![
-                    piwork_lib::domain::collaboration::LedgerPlanStep {
-                        id: "step-1".into(),
-                        title: "Investigate".into(),
-                        status: piwork_lib::domain::collaboration::LedgerPlanStepStatus::InProgress,
-                    },
-                ],
+                plan: vec![piwork_lib::domain::collaboration::LedgerPlanStep {
+                    id: "step-1".into(),
+                    title: "Investigate".into(),
+                    status: piwork_lib::domain::collaboration::LedgerPlanStepStatus::InProgress,
+                }],
             },
         )
         .await
@@ -624,13 +702,18 @@ async fn lead_records_decisions_plan_and_delivery() {
         .unwrap();
     assert_eq!(completed.status, AssignmentStatus::Completed);
 
-    let work_status: String = sqlx::query_scalar("SELECT status FROM works WHERE id = 'work-delivery'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let work_status: String =
+        sqlx::query_scalar("SELECT status FROM works WHERE id = 'work-delivery'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(work_status, "completed");
 
-    for event_type in ["workDecisionRecorded", "workPlanUpdated", "workDeliveryCompleted"] {
+    for event_type in [
+        "workDecisionRecorded",
+        "workPlanUpdated",
+        "workDeliveryCompleted",
+    ] {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM events WHERE work_id = 'work-delivery' AND json_extract(payload, '$.type') = ?",
         )
@@ -641,4 +724,3 @@ async fn lead_records_decisions_plan_and_delivery() {
         assert_eq!(count, 1, "missing {event_type}");
     }
 }
-

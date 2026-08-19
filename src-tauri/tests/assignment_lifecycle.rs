@@ -3137,7 +3137,10 @@ async fn session_same_agent_and_work_resume_same_ready_generation() {
         .await
         .unwrap();
     assert_eq!(first.generation, 1);
-    assert_eq!(first.status, piwork_lib::domain::assignment::AgentSessionStatus::Running);
+    assert_eq!(
+        first.status,
+        piwork_lib::domain::assignment::AgentSessionStatus::Running
+    );
     let first_id = first.id.clone();
 
     repository
@@ -3155,9 +3158,15 @@ async fn session_same_agent_and_work_resume_same_ready_generation() {
         .await
         .unwrap();
 
-    assert_eq!(second.id, first_id, "ready session must be claimed in place");
+    assert_eq!(
+        second.id, first_id,
+        "ready session must be claimed in place"
+    );
     assert_eq!(second.generation, 1, "claim must not bump the generation");
-    assert_eq!(second.status, piwork_lib::domain::assignment::AgentSessionStatus::Running);
+    assert_eq!(
+        second.status,
+        piwork_lib::domain::assignment::AgentSessionStatus::Running
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_sessions")
             .fetch_one(database.pool())
@@ -3171,11 +3180,21 @@ async fn session_same_agent_and_work_resume_same_ready_generation() {
 async fn session_different_agents_never_share_session_or_directory() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-session-agents").await;
-    seed_work_member(database.pool(), "work-session-agents", "agent-instance:piwork-researcher").await;
+    seed_work_member(
+        database.pool(),
+        "work-session-agents",
+        "agent-instance:piwork-researcher",
+    )
+    .await;
     let repository = AssignmentRepository::new(database.pool().clone());
 
     let lead = repository
-        .claim_or_create_session("agent-instance:piwork-lead", "work-session-agents", "pi_rpc", "owner-1")
+        .claim_or_create_session(
+            "agent-instance:piwork-lead",
+            "work-session-agents",
+            "pi_rpc",
+            "owner-1",
+        )
         .await
         .unwrap();
     let researcher = repository
@@ -3200,11 +3219,21 @@ async fn session_same_agent_in_different_works_never_shares_session() {
     let repository = AssignmentRepository::new(database.pool().clone());
 
     let in_a = repository
-        .claim_or_create_session("agent-instance:piwork-lead", "work-session-a", "pi_rpc", "owner-1")
+        .claim_or_create_session(
+            "agent-instance:piwork-lead",
+            "work-session-a",
+            "pi_rpc",
+            "owner-1",
+        )
         .await
         .unwrap();
     let in_b = repository
-        .claim_or_create_session("agent-instance:piwork-lead", "work-session-b", "pi_rpc", "owner-1")
+        .claim_or_create_session(
+            "agent-instance:piwork-lead",
+            "work-session-b",
+            "pi_rpc",
+            "owner-1",
+        )
         .await
         .unwrap();
 
@@ -3221,7 +3250,12 @@ async fn session_rotate_invalidates_old_generation_without_changing_identity() {
     let repository = AssignmentRepository::new(database.pool().clone());
 
     let first = repository
-        .claim_or_create_session("agent-instance:piwork-lead", "work-session-rotate", "pi_rpc", "owner-1")
+        .claim_or_create_session(
+            "agent-instance:piwork-lead",
+            "work-session-rotate",
+            "pi_rpc",
+            "owner-1",
+        )
         .await
         .unwrap();
     let rotated = repository.rotate(&first.id, "context limit").await.unwrap();
@@ -3237,11 +3271,12 @@ async fn session_rotate_invalidates_old_generation_without_changing_identity() {
         piwork_lib::domain::assignment::AgentSessionStatus::Ready
     );
 
-    let row: (String, Option<String>) = sqlx::query_as("SELECT status, rotation_reason FROM agent_sessions WHERE id = ?")
-        .bind(&first.id)
-        .fetch_one(database.pool())
-        .await
-        .unwrap();
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT status, rotation_reason FROM agent_sessions WHERE id = ?")
+            .bind(&first.id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
     assert_eq!(row.0, "invalidated");
     assert_eq!(row.1.as_deref(), Some("context limit"));
 }
@@ -3250,11 +3285,21 @@ async fn session_rotate_invalidates_old_generation_without_changing_identity() {
 async fn session_process_crash_invalidates_all_owned_sessions() {
     let database = Database::open_in_memory().await.unwrap();
     seed_work(database.pool(), "work-session-crash").await;
-    seed_work_member(database.pool(), "work-session-crash", "agent-instance:piwork-researcher").await;
+    seed_work_member(
+        database.pool(),
+        "work-session-crash",
+        "agent-instance:piwork-researcher",
+    )
+    .await;
     let repository = AssignmentRepository::new(database.pool().clone());
 
     repository
-        .claim_or_create_session("agent-instance:piwork-lead", "work-session-crash", "pi_rpc", "owner-crash")
+        .claim_or_create_session(
+            "agent-instance:piwork-lead",
+            "work-session-crash",
+            "pi_rpc",
+            "owner-crash",
+        )
         .await
         .unwrap();
     repository
@@ -3308,7 +3353,12 @@ async fn session_attach_engine_reference_stores_only_opaque_ref() {
     let repository = AssignmentRepository::new(database.pool().clone());
 
     let session = repository
-        .claim_or_create_session("agent-instance:piwork-lead", "work-session-ref", "pi_rpc", "owner-1")
+        .claim_or_create_session(
+            "agent-instance:piwork-lead",
+            "work-session-ref",
+            "pi_rpc",
+            "owner-1",
+        )
         .await
         .unwrap();
 
@@ -3341,7 +3391,10 @@ async fn session_rejects_non_member_agent_and_missing_identity() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(error, AppError::Database(_) | AppError::InvalidInput { .. }));
+    assert!(matches!(
+        error,
+        AppError::Database(_) | AppError::InvalidInput { .. }
+    ));
 
     let error = repository
         .claim_or_create_session(" ", "work-session-member", "pi_rpc", "owner-1")

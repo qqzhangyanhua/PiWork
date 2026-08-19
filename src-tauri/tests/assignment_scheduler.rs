@@ -41,11 +41,7 @@ impl EventPublisher for RecordingPublisher {
     }
 }
 
-async fn seed_schedulable_work(
-    pool: &sqlx::SqlitePool,
-    work_id: &str,
-    root_path: &str,
-) {
+async fn seed_schedulable_work(pool: &sqlx::SqlitePool, work_id: &str, root_path: &str) {
     let now = Utc.with_ymd_and_hms(2026, 8, 16, 10, 0, 0).unwrap();
     sqlx::query(
         "INSERT INTO works (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
@@ -78,10 +74,7 @@ async fn seed_schedulable_work(
     .unwrap();
 }
 
-async fn accept_lead(
-    repository: &AssignmentRepository,
-    work_id: &str,
-) -> String {
+async fn accept_lead(repository: &AssignmentRepository, work_id: &str) -> String {
     let assignment = repository
         .accept(AcceptAssignmentInput {
             id: None,
@@ -158,17 +151,17 @@ async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
             completed = true;
             break;
         }
-        if matches!(
-            status.as_str(),
-            "failed" | "dead_letter" | "cancelled"
-        ) {
+        if matches!(status.as_str(), "failed" | "dead_letter" | "cancelled") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
     handle.shutdown().await;
-    assert!(completed, "lead assignment should complete via the scheduler");
+    assert!(
+        completed,
+        "lead assignment should complete via the scheduler"
+    );
 
     // The Run must carry real identity.
     let run_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE assignment_id = ?")
@@ -254,8 +247,7 @@ async fn scheduler_marks_recovery_confirmation_for_unknown_side_effects() {
 
     let status = assignment_status(&pool, "assignment-crash").await;
     assert_eq!(
-        status,
-        "recovery_confirmation_required",
+        status, "recovery_confirmation_required",
         "an uncertain write from a dead owner must require explicit confirmation"
     );
 }
@@ -292,8 +284,14 @@ async fn start_lead_assignment_persists_then_schedules_to_completion() {
         .await
         .unwrap();
     assert!(started.run.is_none(), "dispatch is asynchronous");
-    assert_eq!(started.user_message.assignment_id, Some(started.assignment.id.clone()));
-    assert_eq!(started.assignment.assigned_agent_id, "agent-instance:piwork-lead");
+    assert_eq!(
+        started.user_message.assignment_id,
+        Some(started.assignment.id.clone())
+    );
+    assert_eq!(
+        started.assignment.assigned_agent_id,
+        "agent-instance:piwork-lead"
+    );
 
     let mut completed = false;
     for _ in 0..200 {
@@ -304,7 +302,10 @@ async fn start_lead_assignment_persists_then_schedules_to_completion() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     handle.shutdown().await;
-    assert!(completed, "lead assignment should complete through the scheduler");
+    assert!(
+        completed,
+        "lead assignment should complete through the scheduler"
+    );
 
     let message_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE work_id = 'work-service'")

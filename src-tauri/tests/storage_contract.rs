@@ -3044,12 +3044,13 @@ async fn collaboration_migration_creates_memory_and_result_tables() {
         "assignment_results",
         "memory_candidates",
     ] {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
-                .bind(table)
-                .fetch_one(database.pool())
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
         assert_eq!(count, 1, "missing collaboration table {table}");
     }
 
@@ -3080,7 +3081,10 @@ async fn collaboration_migration_creates_memory_and_result_tables() {
     )
     .execute(database.pool())
     .await;
-    assert!(bad_status.is_err(), "memory candidate status must be constrained");
+    assert!(
+        bad_status.is_err(),
+        "memory candidate status must be constrained"
+    );
 
     let bad_resolve = sqlx::query(
         "INSERT INTO memory_candidates (id, source_work_id, author_agent_id, content, reason, version, status, created_at) \

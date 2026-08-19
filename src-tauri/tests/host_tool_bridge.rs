@@ -1,7 +1,7 @@
 use piwork_lib::{
     collaboration::tools::{
-        authorize_tool, resolve_effective_permission, TOOL_COMPLETE_WORK_DELIVERY,
-        TOOL_DELEGATE_ASSIGNMENT, TOOL_SUBMIT_ASSIGNMENT_RESULT,
+        TOOL_COMPLETE_WORK_DELIVERY, TOOL_DELEGATE_ASSIGNMENT, TOOL_SUBMIT_ASSIGNMENT_RESULT,
+        authorize_tool, resolve_effective_permission,
     },
     domain::{
         agent::{PermissionPolicy, RoleKind},

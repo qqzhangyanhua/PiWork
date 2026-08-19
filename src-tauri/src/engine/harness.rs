@@ -22,8 +22,8 @@ use crate::{
         work::{PermissionMode, RunSummary, WorkSummary},
     },
     engine::{
-        publisher::EventPublisher, EngineAdapter, EngineEvent, EngineInput, EngineRunContext,
-        EngineRunIdentity, EngineSessionRef,
+        EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineRunIdentity,
+        EngineSessionRef, publisher::EventPublisher,
     },
     error::AppError,
     work::repository::WorkRepository,
@@ -108,12 +108,7 @@ impl EngineHarness {
 
         let session = self
             .assignment_repository
-            .claim_or_create_session(
-                &agent.id,
-                &work.id,
-                self.engine.kind(),
-                &runtime_owner,
-            )
+            .claim_or_create_session(&agent.id, &work.id, self.engine.kind(), &runtime_owner)
             .await?;
 
         let identity = EngineRunIdentity::new(
@@ -199,7 +194,13 @@ impl EngineHarness {
             .attach_engine_reference(&session.id, &session_ref.session_id)
             .await?;
         self.assignment_repository
-            .mark_running(&assignment.id, &run.id, &session.id, &runtime_owner, Utc::now())
+            .mark_running(
+                &assignment.id,
+                &run.id,
+                &session.id,
+                &runtime_owner,
+                Utc::now(),
+            )
             .await?;
 
         let mut sequence = self.work_repository.next_run_sequence(&run.id).await?;
@@ -258,7 +259,14 @@ impl EngineHarness {
                 .mark_ready(&session.id, &run.id)
                 .await?;
             self.assignment_repository
-                .complete(&assignment.id, &run.id, &session.id, &runtime_owner, &summary, now)
+                .complete(
+                    &assignment.id,
+                    &run.id,
+                    &session.id,
+                    &runtime_owner,
+                    &summary,
+                    now,
+                )
                 .await?;
             Ok(AssignmentExecutionOutcome::Completed {
                 result_summary: summary,
@@ -267,9 +275,8 @@ impl EngineHarness {
                 limitations,
             })
         } else {
-            let message = failed.unwrap_or_else(|| {
-                "engine event stream closed before a terminal event".to_owned()
-            });
+            let message = failed
+                .unwrap_or_else(|| "engine event stream closed before a terminal event".to_owned());
             self.assignment_repository
                 .mark_ready(&session.id, &run.id)
                 .await?;
@@ -306,7 +313,14 @@ impl EngineHarness {
             .await;
         if retried.is_err() {
             self.assignment_repository
-                .dead_letter(&assignment.id, &run.id, &session.id, runtime_owner, message, now)
+                .dead_letter(
+                    &assignment.id,
+                    &run.id,
+                    &session.id,
+                    runtime_owner,
+                    message,
+                    now,
+                )
                 .await?;
         }
         Ok(())

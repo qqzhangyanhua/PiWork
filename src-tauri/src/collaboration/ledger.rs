@@ -43,25 +43,23 @@ pub fn project_work_ledger(work: &WorkSummary, events: &[WorkEventEnvelope]) -> 
         }
         match &event.payload {
             WorkEventPayload::AssignmentQueued { assignment_id, .. }
-            | WorkEventPayload::AssignmentClaimed {
-                assignment_id, ..
-            }
+            | WorkEventPayload::AssignmentClaimed { assignment_id, .. }
             | WorkEventPayload::AssignmentStarted { assignment_id, .. } => {
                 upsert(&mut active, assignment_id);
             }
-            WorkEventPayload::AssignmentWaiting { assignment_id, reason, .. } => {
+            WorkEventPayload::AssignmentWaiting {
+                assignment_id,
+                reason,
+                ..
+            } => {
                 remove(&mut active, assignment_id);
                 upsert(&mut waiting, assignment_id);
                 if !open_questions.contains(reason) {
                     open_questions.push(reason.clone());
                 }
             }
-            WorkEventPayload::AssignmentCompleted {
-                assignment_id, ..
-            }
-            | WorkEventPayload::AssignmentCancelled {
-                assignment_id, ..
-            }
+            WorkEventPayload::AssignmentCompleted { assignment_id, .. }
+            | WorkEventPayload::AssignmentCancelled { assignment_id, .. }
             | WorkEventPayload::AssignmentFailed { assignment_id, .. }
             | WorkEventPayload::AssignmentDeadLettered { assignment_id, .. }
             | WorkEventPayload::AssignmentInterrupted { assignment_id, .. } => {
@@ -120,7 +118,9 @@ pub fn project_work_ledger(work: &WorkSummary, events: &[WorkEventEnvelope]) -> 
                 }
             }
             WorkEventPayload::WorkDeliveryCompleted {
-                summary, artifacts: delivery_artifacts, ..
+                summary,
+                artifacts: delivery_artifacts,
+                ..
             } => {
                 last_delivery = Some(summary.clone());
                 for path in delivery_artifacts {
@@ -186,7 +186,10 @@ fn replace_decision(decisions: &mut Vec<LedgerDecision>, id: &str, summary: &str
 }
 
 fn permission_label(mode: crate::domain::work::PermissionMode) -> String {
-    serde_json::to_string(&mode).expect("permission mode serializes").trim_matches('"').to_owned()
+    serde_json::to_string(&mode)
+        .expect("permission mode serializes")
+        .trim_matches('"')
+        .to_owned()
 }
 
 /// Persists the Ledger projection as a Work cache row. A later read can always
@@ -207,11 +210,7 @@ impl WorkLedgerRepository {
         events: &[WorkEventEnvelope],
     ) -> Result<WorkLedger, AppError> {
         let ledger = project_work_ledger(work, events);
-        let source_sequence = events
-            .iter()
-            .map(|event| event.sequence)
-            .max()
-            .unwrap_or(0);
+        let source_sequence = events.iter().map(|event| event.sequence).max().unwrap_or(0);
         let now = Utc::now();
         let revision: i64 = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT COALESCE(MAX(revision), 0) FROM work_memory WHERE work_id = ?",

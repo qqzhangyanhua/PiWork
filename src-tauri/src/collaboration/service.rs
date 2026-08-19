@@ -9,7 +9,9 @@ use crate::{
         repository::{AcceptAssignmentInput, AssignmentRepository},
         scheduler::AssignmentSchedulerHandle,
     },
-    collaboration::result::{repair_decision, validate_result, RepairDecision, ResultSubmissionContext},
+    collaboration::result::{
+        RepairDecision, ResultSubmissionContext, repair_decision, validate_result,
+    },
     domain::{
         agent::WorkAgentSummary,
         assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus, AssignmentSummary},
@@ -98,7 +100,10 @@ impl LeadToolService {
                 "only the parent Lead can retry this child",
             ));
         }
-        let retried = self.repository.retry_assignment(child_assignment_id).await?;
+        let retried = self
+            .repository
+            .retry_assignment(child_assignment_id)
+            .await?;
         self.scheduler.wake()?;
         Ok(retried)
     }
@@ -127,7 +132,9 @@ impl LeadToolService {
             .repository
             .get_assignment(lead_assignment_id)
             .await?
-            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+            .ok_or_else(|| {
+                AppError::invalid_input("leadAssignmentId", "lead assignment not found")
+            })?;
         if lead.kind != AssignmentKind::Lead {
             return Err(AppError::invalid_input(
                 "leadAssignmentId",
@@ -186,16 +193,9 @@ impl LeadToolService {
             })
             .await?;
 
+        self.repository.add_dependency(&lead.id, &child.id).await?;
         self.repository
-            .add_dependency(&lead.id, &child.id)
-            .await?;
-        self.repository
-            .record_delegation(
-                &lead.id,
-                &child.id,
-                &input.assigned_agent_id,
-                &input.title,
-            )
+            .record_delegation(&lead.id, &child.id, &input.assigned_agent_id, &input.title)
             .await?;
         self.scheduler.wake()?;
 
@@ -261,7 +261,9 @@ impl LeadToolService {
             .repository
             .get_assignment(lead_assignment_id)
             .await?
-            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+            .ok_or_else(|| {
+                AppError::invalid_input("leadAssignmentId", "lead assignment not found")
+            })?;
         if lead.kind != AssignmentKind::Lead {
             return Err(AppError::invalid_input(
                 "leadAssignmentId",
@@ -294,7 +296,9 @@ impl LeadToolService {
             .repository
             .get_assignment(lead_assignment_id)
             .await?
-            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+            .ok_or_else(|| {
+                AppError::invalid_input("leadAssignmentId", "lead assignment not found")
+            })?;
         if lead.kind != AssignmentKind::Lead {
             return Err(AppError::invalid_input(
                 "leadAssignmentId",
@@ -335,7 +339,9 @@ impl LeadToolService {
             .repository
             .get_assignment(lead_assignment_id)
             .await?
-            .ok_or_else(|| AppError::invalid_input("leadAssignmentId", "lead assignment not found"))?;
+            .ok_or_else(|| {
+                AppError::invalid_input("leadAssignmentId", "lead assignment not found")
+            })?;
         if lead.kind != AssignmentKind::Lead {
             return Err(AppError::invalid_input(
                 "leadAssignmentId",
@@ -488,15 +494,9 @@ pub struct MemberResultSubmission {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum SubmitOutcome {
-    Accepted {
-        assignment: AssignmentSummary,
-    },
-    RepairRequested {
-        diagnostics: Vec<String>,
-    },
-    Rejected {
-        diagnostics: Vec<String>,
-    },
+    Accepted { assignment: AssignmentSummary },
+    RepairRequested { diagnostics: Vec<String> },
+    Rejected { diagnostics: Vec<String> },
 }
 
 /// Dispatches an authenticated Host Tool call to the Lead or Member service.
@@ -531,7 +531,10 @@ impl HostToolDispatcher {
                 }
                 crate::collaboration::tools::TOOL_INSPECT_CAPABILITY_PACKS => {
                     let ids: Vec<String> = serde_json::from_value(
-                        arguments.get("ids").cloned().unwrap_or(serde_json::Value::Null),
+                        arguments
+                            .get("ids")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
                     )
                     .unwrap_or_default();
                     let packs = self.lead.inspect_capability_packs(ids).await?;
@@ -548,7 +551,10 @@ impl HostToolDispatcher {
                 }
                 crate::collaboration::tools::TOOL_GET_ASSIGNMENT_STATUS => {
                     let ids: Vec<String> = serde_json::from_value(
-                        arguments.get("assignmentIds").cloned().unwrap_or(serde_json::Value::Null),
+                        arguments
+                            .get("assignmentIds")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
                     )
                     .unwrap_or_default();
                     let statuses = self.lead.get_assignment_status(ids).await?;
@@ -607,7 +613,10 @@ impl HostToolDispatcher {
                 }
                 crate::collaboration::tools::TOOL_SUBMIT_ASSIGNMENT_RESULT => {
                     let envelope: ResultEnvelope = serde_json::from_value(
-                        arguments.get("envelope").cloned().unwrap_or(serde_json::Value::Null),
+                        arguments
+                            .get("envelope")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
                     )
                     .map_err(decode_error)?;
                     let outcome = self

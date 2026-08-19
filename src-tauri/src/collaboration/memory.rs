@@ -213,7 +213,7 @@ impl TryFrom<MemoryCandidateRow> for MemoryCandidateSummary {
                 return Err(AppError::invalid_input(
                     "status",
                     format!("unknown memory candidate status {other:?}"),
-                ))
+                ));
             }
         };
         Ok(MemoryCandidateSummary {

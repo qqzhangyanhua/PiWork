@@ -271,7 +271,11 @@ pub struct RequestClarificationInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "tool", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "tool",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 #[ts(
     tag = "tool",
     rename_all = "camelCase",
@@ -351,7 +355,10 @@ mod tests {
         assert_eq!(value["status"], "completed");
         assert_eq!(value["summary"], "Investigated the queue state machine");
         assert_eq!(value["findings"][0]["authorAgentId"], "agent-1");
-        assert_eq!(value["evidence"][0]["sourcePath"], "src/assignment/queue.rs");
+        assert_eq!(
+            value["evidence"][0]["sourcePath"],
+            "src/assignment/queue.rs"
+        );
         assert_eq!(value["artifacts"][0]["path"], "notes.md");
         assert_eq!(value["validation"][0]["command"], "cargo test");
         assert_eq!(value["extensions"], json!({}));
@@ -379,7 +386,9 @@ mod tests {
         assert_eq!(value["assignedAgentId"], "agent-2");
         let round_trip: HostToolCall = serde_json::from_value(value).unwrap();
         match round_trip {
-            HostToolCall::DelegateAssignment(input) => assert_eq!(input.assigned_agent_id, "agent-2"),
+            HostToolCall::DelegateAssignment(input) => {
+                assert_eq!(input.assigned_agent_id, "agent-2")
+            }
             _ => panic!("expected delegateAssignment"),
         }
     }

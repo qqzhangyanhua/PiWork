@@ -1,7 +1,7 @@
 use chrono::{TimeZone, Utc};
 use piwork_lib::{
     collaboration::{
-        context::{build_assignment_context, ContextBuildInput, ContextSectionKind},
+        context::{ContextBuildInput, ContextSectionKind, build_assignment_context},
         ledger::project_work_ledger,
     },
     domain::{
@@ -91,7 +91,11 @@ fn ledger_projects_goal_and_assignment_states() {
     assert!(ledger.active_assignments.is_empty());
     assert!(ledger.waiting_assignments.is_empty());
     assert_eq!(ledger.completed_assignments, vec!["a1"]);
-    assert!(ledger.open_questions.contains(&"awaiting review".to_owned()));
+    assert!(
+        ledger
+            .open_questions
+            .contains(&"awaiting review".to_owned())
+    );
 }
 
 #[test]
@@ -195,22 +199,32 @@ fn context_builder_produces_the_fixed_eight_section_order() {
     let input = ContextBuildInput::default();
     let built = build_assignment_context(input);
 
-    let kinds: Vec<ContextSectionKind> = built.sections.iter().map(|section| section.kind).collect();
+    let kinds: Vec<ContextSectionKind> =
+        built.sections.iter().map(|section| section.kind).collect();
     assert_eq!(kinds, ContextSectionKind::ALL.to_vec());
 
     let mut cursor = 0usize;
     for (index, section) in built.sections.iter().enumerate() {
         let header = format!("== {} ==", title_of(section.kind));
         let position = built.rendered_prompt[cursor..].find(&header);
-        assert!(position.is_some(), "section {index} header is missing or out of order");
+        assert!(
+            position.is_some(),
+            "section {index} header is missing or out of order"
+        );
         cursor += position.unwrap();
     }
 }
 
 #[test]
 fn lead_and_member_base_protocols_differ() {
-    let lead = build_assignment_context(ContextBuildInput { is_lead: true, ..ContextBuildInput::default() });
-    let member = build_assignment_context(ContextBuildInput { is_lead: false, ..ContextBuildInput::default() });
+    let lead = build_assignment_context(ContextBuildInput {
+        is_lead: true,
+        ..ContextBuildInput::default()
+    });
+    let member = build_assignment_context(ContextBuildInput {
+        is_lead: false,
+        ..ContextBuildInput::default()
+    });
 
     let lead_base = lead.sections[0].content.clone();
     let member_base = member.sections[0].content.clone();
@@ -223,15 +237,16 @@ fn lead_and_member_base_protocols_differ() {
 fn context_builder_truncates_later_sections_first() {
     let mut input = ContextBuildInput::default();
     input.budget_chars = 500;
-    input.explicit_files = vec![
-        piwork_lib::collaboration::context::ExplicitContextFile {
-            path: "a.txt".into(),
-            content: "x".repeat(2000),
-        },
-    ];
+    input.explicit_files = vec![piwork_lib::collaboration::context::ExplicitContextFile {
+        path: "a.txt".into(),
+        content: "x".repeat(2000),
+    }];
     let built = build_assignment_context(input);
     assert!(built.manifest.truncated, "tight budget must truncate");
-    assert!(built.manifest.total_chars <= 500, "rendered prompt respects the budget");
+    assert!(
+        built.manifest.total_chars <= 500,
+        "rendered prompt respects the budget"
+    );
     // The base protocol (first section) must survive truncation.
     assert!(!built.sections[0].truncated);
     assert!(!built.sections[0].content.is_empty());

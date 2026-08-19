@@ -390,10 +390,8 @@ pub fn resolve_session_directory(
 ) -> Result<PathBuf, EngineError> {
     let new_directory = session_directory(sessions_root, agent_instance_id, work_id, generation)?;
     let legacy = sessions_root.join(validated_session_segment("work", work_id)?);
-    let use_legacy = is_builtin_lead
-        && generation <= 1
-        && !new_directory_exists
-        && legacy_directory_exists;
+    let use_legacy =
+        is_builtin_lead && generation <= 1 && !new_directory_exists && legacy_directory_exists;
     Ok(if use_legacy { legacy } else { new_directory })
 }
 
@@ -1968,9 +1966,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             non_lead,
-            std::path::Path::new(
-                r"D:\sessions\pi\agent-instance_local_researcher\work-legacy\1"
-            )
+            std::path::Path::new(r"D:\sessions\pi\agent-instance_local_researcher\work-legacy\1")
         );
     }
 }
