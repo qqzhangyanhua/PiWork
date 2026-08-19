@@ -22,7 +22,11 @@ use crate::{
         },
         repository::AssignmentRepository,
     },
-    domain::assignment::AssignmentSummary,
+    collaboration::context::{build_assignment_context, ContextBuildInput},
+    domain::{
+        agent::RoleKind,
+        assignment::AssignmentSummary,
+    },
     engine::{
         harness::{AssignmentExecutionOutcome, AssignmentExecutionRequest, EngineHarness},
         publisher::EventPublisher, EngineAdapter, EngineInput,
@@ -227,13 +231,15 @@ impl AssignmentScheduler {
 
         self.ensure_work_running(&work.summary.id).await;
 
+        let message = build_engine_prompt(&agent, &work.summary, &assignment);
+
         let request = AssignmentExecutionRequest {
             assignment: assignment.clone(),
             work: work.summary.clone(),
             agent,
             run: run.clone(),
             input: EngineInput {
-                message: assignment.instruction.clone(),
+                message,
                 images: Vec::new(),
                 documents: Vec::new(),
             },
@@ -334,6 +340,24 @@ fn queue_item(assignment: &AssignmentSummary) -> QueueItem {
             created_at: assignment.created_at,
         }],
     }
+}
+
+/// Builds the fixed eight-layer context for the Assignment and returns the
+/// rendered, budget-bounded engine prompt.
+fn build_engine_prompt(
+    agent: &crate::domain::agent::AgentInstanceSummary,
+    work: &crate::domain::work::WorkSummary,
+    assignment: &AssignmentSummary,
+) -> String {
+    let input = ContextBuildInput {
+        is_lead: agent.definition.role_kind == RoleKind::Lead,
+        agent_definition: agent.definition.clone(),
+        capability_packs: agent.definition.capability_packs.clone(),
+        work: work.clone(),
+        assignment: assignment.clone(),
+        ..ContextBuildInput::default()
+    };
+    build_assignment_context(input).rendered_prompt
 }
 
 fn effective_permission(assignment: &AssignmentSummary) -> crate::domain::work::PermissionMode {
