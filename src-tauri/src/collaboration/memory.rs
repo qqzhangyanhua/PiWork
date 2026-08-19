@@ -115,7 +115,7 @@ impl MemoryService {
             .bind(&candidate.author_agent_id)
             .bind(&candidate.content)
             .bind(&candidate.reason)
-            .bind(i64::from(candidate.version))
+            .bind(candidate.version)
             .bind(now)
             .execute(&self.pool)
             .await?;

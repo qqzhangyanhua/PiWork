@@ -282,6 +282,7 @@ pub struct RequestClarificationInput {
     rename_all_fields = "camelCase",
     export_to = binding_path!()
 )]
+#[allow(clippy::large_enum_variant)] // wire DTO, not a hot-loop type
 pub enum HostToolCall {
     ListWorkMembers,
     InspectCapabilityPacks { ids: Vec<String> },

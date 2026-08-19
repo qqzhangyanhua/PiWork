@@ -493,6 +493,7 @@ pub struct MemberResultSubmission {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[allow(clippy::large_enum_variant)] // wire DTO, not a hot-loop type
 pub enum SubmitOutcome {
     Accepted { assignment: AssignmentSummary },
     RepairRequested { diagnostics: Vec<String> },

@@ -36,11 +36,10 @@ pub fn project_work_ledger(work: &WorkSummary, events: &[WorkEventEnvelope]) -> 
     let mut seen_events: HashSet<String> = HashSet::new();
 
     for event in events {
-        if let Some(event_id) = &event.event_id {
-            if !seen_events.insert(event_id.clone()) {
+        if let Some(event_id) = &event.event_id
+            && !seen_events.insert(event_id.clone()) {
                 continue;
             }
-        }
         match &event.payload {
             WorkEventPayload::AssignmentQueued { assignment_id, .. }
             | WorkEventPayload::AssignmentClaimed { assignment_id, .. }

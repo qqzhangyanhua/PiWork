@@ -34,6 +34,8 @@ const STARTUP_EVENT_BUFFER_CAP: usize = 1000;
 const RETRY_BASE: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
+type TerminalOutcome = (String, Vec<String>, Vec<String>, Vec<String>);
+
 /// Everything the Harness needs to execute one Assignment; the Scheduler
 /// assembles this after a successful claim + attempt begin.
 #[derive(Debug, Clone)]
@@ -148,7 +150,7 @@ impl EngineHarness {
                                 .await;
                             return Err(AppError::engine_start_failed_with_reason(
                                 &work.id,
-                                &format!("engine failed to start: {error}"),
+                                format!("engine failed to start: {error}"),
                             ));
                         }
                     }
@@ -205,7 +207,7 @@ impl EngineHarness {
 
         let mut sequence = self.work_repository.next_run_sequence(&run.id).await?;
         let mut previous_event_id: Option<String> = None;
-        let mut terminal: Option<(String, Vec<String>, Vec<String>, Vec<String>)> = None;
+        let mut terminal: Option<TerminalOutcome> = None;
         let mut failed: Option<String> = None;
 
         loop {

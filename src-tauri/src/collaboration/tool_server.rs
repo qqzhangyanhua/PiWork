@@ -166,17 +166,17 @@ fn handle_body(
     match dispatch(tool, &context, arguments) {
         Ok(value) => respond(
             200,
-            &serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned()),
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned()),
         ),
         Err(error) => respond(
             500,
-            &serde_json::to_string(&json_error(&error.to_string())).unwrap(),
+            serde_json::to_string(&json_error(&error.to_string())).unwrap(),
         ),
     }
 }
 
 fn decode_hex(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     (0..hex.len())

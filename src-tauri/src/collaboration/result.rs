@@ -44,11 +44,10 @@ pub fn validate_result(
 ) -> Result<ValidatedResultEnvelope, Vec<String>> {
     let mut diagnostics = Vec::new();
 
-    if let Ok(bytes) = serde_json::to_vec(&envelope) {
-        if bytes.len() > MAX_ENVELOPE_BYTES {
+    if let Ok(bytes) = serde_json::to_vec(&envelope)
+        && bytes.len() > MAX_ENVELOPE_BYTES {
             diagnostics.push("envelope exceeds 256 KiB UTF-8".to_owned());
         }
-    }
 
     check_summary(&mut diagnostics, &envelope.summary);
     check_array(&mut diagnostics, "findings", envelope.findings.len());
