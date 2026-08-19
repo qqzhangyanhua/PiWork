@@ -25,6 +25,7 @@ export type ActivityFeedProps = {
 type ThoughtOrPlan = Extract<ActivityItem, { type: "thought" | "plan" }>;
 type ToolItem = Extract<ActivityItem, { type: "tool" }>;
 type LifecycleItem = Extract<ActivityItem, { type: "lifecycle" }>;
+type AssignmentItem = Extract<ActivityItem, { type: "assignment" }>;
 
 const toolStatusKey: Record<ToolStatus, string> = {
   pending: "activity.toolPending",
@@ -222,6 +223,27 @@ function LifecycleRow({ item }: { item: LifecycleItem }) {
   );
 }
 
+function AssignmentRow({ item }: { item: AssignmentItem }) {
+  const isError = item.renderClass === "error";
+  const Icon = isError ? CircleAlert : Check;
+  return (
+    <li
+      className={`activity-feed__entry activity-feed__entry--${isError ? "error" : "status"}`}
+    >
+      <article
+        className="activity-feed__lifecycle"
+        data-kind={item.activityKind}
+        role={isError ? undefined : "status"}
+      >
+        <Icon aria-hidden="true" />
+        <div>
+          <strong>{item.detail ?? item.activityKind}</strong>
+        </div>
+      </article>
+    </li>
+  );
+}
+
 export const isActivityFeedItem = (item: ActivityItem): boolean => {
   if (
     item.type === "message" ||
@@ -255,6 +277,7 @@ function ActivityItemRow({
     return <PermissionRow item={item} requestRole={permissionRequestRole} />;
   }
   if (item.type === "lifecycle") return <LifecycleRow item={item} />;
+  if (item.type === "assignment") return <AssignmentRow item={item} />;
   return null;
 }
 

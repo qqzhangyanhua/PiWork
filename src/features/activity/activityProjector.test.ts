@@ -606,6 +606,70 @@ describe("projectActivity", () => {
     expect(copiedMapCount).toBeLessThanOrEqual(1);
     expect(iteratedArrayCount).toBeLessThanOrEqual(2);
   });
+
+  it("aggregates assignment lifecycle events into one item per assignment", () => {
+    const items = projectActivity([
+      event(1, {
+        type: "assignmentQueued",
+        assignmentId: "a1",
+        assignedAgentId: "lead",
+        title: "Research",
+        priority: 10,
+      }),
+      event(2, {
+        type: "assignmentStarted",
+        assignmentId: "a1",
+        agentInstanceId: "lead",
+        agentSessionId: "s1",
+        runId: "run-1",
+      }),
+      event(3, {
+        type: "assignmentCompleted",
+        assignmentId: "a1",
+        agentInstanceId: "lead",
+        agentSessionId: "s1",
+        resultSummary: "done",
+      }),
+    ]);
+
+    const assignments = items.filter((item) => item.type === "assignment");
+    expect(assignments).toHaveLength(1);
+    expect(assignments[0]).toMatchObject({
+      type: "assignment",
+      assignmentId: "a1",
+      activityKind: "completed",
+      detail: "done",
+    });
+  });
+
+  it("projects delegation result and delivery as status items", () => {
+    const items = projectActivity([
+      event(1, {
+        type: "assignmentDelegated",
+        assignmentId: "a2",
+        parentAssignmentId: "a1",
+        assignedAgentId: "researcher",
+        title: "Investigate",
+      }),
+      event(2, {
+        type: "workDeliveryCompleted",
+        summary: "Delivered",
+        artifacts: ["notes.md"],
+        validation: [],
+        limitations: [],
+      }),
+    ]);
+
+    const delegated = items.find(
+      (item) => item.type === "assignment" && item.activityKind === "delegated",
+    );
+    expect(delegated).toMatchObject({ detail: "委派了「Investigate」" });
+
+    const delivery = items.find(
+      (item) => item.type === "assignment" && item.activityKind === "deliveryCompleted",
+    );
+    expect(delivery).toMatchObject({ detail: "Delivered" });
+  });
 });
 
 describe("processActivityEvent", () => {

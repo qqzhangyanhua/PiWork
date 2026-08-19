@@ -33,6 +33,27 @@ export type ActivityLifecycleKind =
   | "runCompleted"
   | "runFailed";
 
+export type ActivityAssignmentKind =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "deadLetter"
+  | "retryScheduled"
+  | "recoveryRequired"
+  | "delegated"
+  | "resultSubmitted"
+  | "resultRejected"
+  | "leadResumed"
+  | "decision"
+  | "planUpdated"
+  | "deliveryCompleted"
+  | "queueControl";
+
 export type ActivityIdentity = {
   workId: string;
   runId: string | null;
@@ -116,5 +137,12 @@ export type ActivityItem = ActivityBase &
         renderClass: "raw-rail" | "suppressed";
         kind: string;
         payloadJson: string;
+      }
+    | {
+        type: "assignment";
+        renderClass: "status" | "error";
+        activityKind: ActivityAssignmentKind;
+        detail: string | null;
+        assignmentId: string;
       }
   );

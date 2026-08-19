@@ -8,6 +8,7 @@
 import type { WorkEventEnvelope, WorkEventPayload } from "../../bindings";
 
 import type {
+  ActivityAssignmentKind,
   ActivityDescriptor,
   ActivityIdentity,
   ActivityItem,
@@ -231,6 +232,64 @@ const lifecycleItem = (
 
 const assertNever = (value: never): never => {
   throw new Error(`Unhandled WorkEventPayload: ${JSON.stringify(value)}`);
+};
+
+type AssignmentProjection = {
+  assignmentId: string | null;
+  kind: ActivityAssignmentKind;
+  renderClass: "status" | "error";
+  detail: string | null;
+};
+
+const projectAssignment = (payload: WorkEventPayload): AssignmentProjection => {
+  switch (payload.type) {
+    case "assignmentQueued":
+      return { assignmentId: payload.assignmentId, kind: "queued", renderClass: "status", detail: `任务已排队：${payload.title}` };
+    case "assignmentClaimed":
+      return { assignmentId: payload.assignmentId, kind: "claimed", renderClass: "status", detail: "任务已领取" };
+    case "assignmentStarted":
+      return { assignmentId: payload.assignmentId, kind: "running", renderClass: "status", detail: "任务开始执行" };
+    case "assignmentWaiting":
+      return { assignmentId: payload.assignmentId, kind: "waiting", renderClass: "status", detail: `等待：${payload.reason}` };
+    case "assignmentCompleted":
+      return { assignmentId: payload.assignmentId, kind: "completed", renderClass: "status", detail: payload.resultSummary };
+    case "assignmentFailed":
+      return { assignmentId: payload.assignmentId, kind: "failed", renderClass: "error", detail: payload.error };
+    case "assignmentCancelled":
+      return { assignmentId: payload.assignmentId, kind: "cancelled", renderClass: "status", detail: payload.reason };
+    case "assignmentInterrupted":
+      return { assignmentId: payload.assignmentId, kind: "interrupted", renderClass: "status", detail: payload.reason };
+    case "assignmentDeadLettered":
+      return { assignmentId: payload.assignmentId, kind: "deadLetter", renderClass: "error", detail: payload.error };
+    case "assignmentRetryScheduled":
+      return { assignmentId: payload.assignmentId, kind: "retryScheduled", renderClass: "status", detail: `第 ${payload.attemptCount} 次重试已安排` };
+    case "assignmentRecoveryRequired":
+      return { assignmentId: payload.assignmentId, kind: "recoveryRequired", renderClass: "status", detail: payload.recoveryReason };
+    case "assignmentDelegated":
+      return { assignmentId: payload.assignmentId, kind: "delegated", renderClass: "status", detail: `委派了「${payload.title}」` };
+    case "assignmentResultSubmitted":
+      return { assignmentId: payload.assignmentId, kind: "resultSubmitted", renderClass: "status", detail: payload.summary };
+    case "assignmentResultRejected":
+      return { assignmentId: payload.assignmentId, kind: "resultRejected", renderClass: "error", detail: payload.reason };
+    case "delegationRequested":
+      return { assignmentId: payload.assignmentId, kind: "delegated", renderClass: "status", detail: payload.reason };
+    case "leadResumed":
+      return { assignmentId: payload.assignmentId, kind: "leadResumed", renderClass: "status", detail: "主理人已恢复" };
+    case "workDecisionRecorded":
+      return { assignmentId: null, kind: "decision", renderClass: "status", detail: payload.summary };
+    case "workPlanUpdated":
+      return { assignmentId: null, kind: "planUpdated", renderClass: "status", detail: null };
+    case "workDeliveryCompleted":
+      return { assignmentId: null, kind: "deliveryCompleted", renderClass: "status", detail: payload.summary };
+    case "memoryCandidateProposed":
+      return { assignmentId: null, kind: "decision", renderClass: "status", detail: "提出了记忆候选" };
+    case "memoryCandidateResolved":
+      return { assignmentId: null, kind: "decision", renderClass: "status", detail: "记忆候选已确认/拒绝" };
+    case "queueControlApplied":
+      return { assignmentId: payload.assignmentId, kind: "queueControl", renderClass: "status", detail: payload.summary };
+    default:
+      return { assignmentId: null, kind: "queued", renderClass: "status", detail: null };
+  }
 };
 
 const processActivityEventIntoDraft = (
@@ -539,8 +598,6 @@ const processActivityEventIntoDraft = (
     case "assignmentDeadLettered":
     case "assignmentRecoveryRequired":
     case "queueControlApplied":
-    // Collaboration events are projected with salience once the lead/expert
-    // loop lands; the wire contract is defined ahead of that projection.
     case "assignmentDelegated":
     case "assignmentResultSubmitted":
     case "assignmentResultRejected":
@@ -550,8 +607,21 @@ const processActivityEventIntoDraft = (
     case "workDeliveryCompleted":
     case "memoryCandidateProposed":
     case "memoryCandidateResolved":
-    case "leadResumed":
+    case "leadResumed": {
+      const projected = projectAssignment(payload);
+      const id = projected.assignmentId
+        ? `assignment:${projected.assignmentId}`
+        : `assignment:${eventIdentity(event)}:${payload.type}`;
+      putItem(draft, {
+        ...baseFrom(event, id),
+        type: "assignment",
+        renderClass: projected.renderClass,
+        activityKind: projected.kind,
+        detail: projected.detail,
+        assignmentId: projected.assignmentId ?? eventIdentity(event),
+      });
       return;
+    }
   }
 
   return assertNever(payload);
