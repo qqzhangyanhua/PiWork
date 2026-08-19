@@ -41,6 +41,7 @@ export function WorkComposer({
   const submittingRef = useRef(false);
   const startWork = useWorkStore((state) => state.startWork);
   const stopWork = useWorkStore((state) => state.stopWork);
+  const interruptWork = useWorkStore((state) => state.interruptWork);
   const loading = useWorkStore((state) => state.loading);
   const runActive = queueStatuses.includes(work.status);
   const actionLabel = continueStatuses.includes(work.status)
@@ -92,6 +93,24 @@ export function WorkComposer({
       // The store exposes the normalized error in the product UI.
     } finally {
       setStopping(false);
+    }
+  };
+
+  const interrupt = async () => {
+    const instruction = prompt.trim();
+    if (!instruction && readyResourceIds.length === 0) return;
+    if (!runActive || submittingRef.current) return;
+    if (!window.confirm(t("composer.interruptConfirm"))) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await interruptWork(work.id, instruction, referencedFiles, readyResourceIds);
+      clearDraft();
+    } catch {
+      // The store exposes the normalized error in the product UI.
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
@@ -147,6 +166,17 @@ export function WorkComposer({
           >
             <ArrowUp aria-hidden="true" size={16} />
           </button>
+          {runActive && (
+            <button
+              aria-label={t("composer.interrupt")}
+              className="button composer-submit--interrupt"
+              type="button"
+              disabled={submitting || loading || !canSubmit}
+              onClick={() => void interrupt()}
+            >
+              {t("composer.interrupt")}
+            </button>
+          )}
           {runActive && (
             <button
               aria-label={t("composer.stop")}

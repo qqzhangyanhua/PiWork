@@ -446,6 +446,8 @@
     "continue": "发送",
     "stop": "停止处理",
     "queueNext": "排在下一步",
+    "interrupt": "中断并替换",
+    "interruptConfirm": "取消当前任务并改为执行这条指令？",
     "runActive": "Pi 正在处理上一条指令，你可以排队下一条或停止"
   },
   "mentions": {

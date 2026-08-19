@@ -446,6 +446,8 @@
     "continue": "Send",
     "stop": "Stop working",
     "queueNext": "Queue next",
+    "interrupt": "Interrupt & replace",
+    "interruptConfirm": "Cancel the current task and start this instruction instead?",
     "runActive": "Pi is working on the previous instruction. You can queue the next one or stop"
   },
   "mentions": {

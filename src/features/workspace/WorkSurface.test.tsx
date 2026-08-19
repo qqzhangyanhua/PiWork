@@ -521,6 +521,57 @@ describe("WorkSurface", () => {
     expect(client.stopWork).toHaveBeenCalledWith("work-1");
   });
 
+  it("运行时中断当前任务并用新指令替换", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail("running"));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    client.interruptAndReplace.mockResolvedValue({
+      assignment: assignmentSummary({ id: "assignment-2", workId: "work-1" }),
+      run: {
+        id: "run-2",
+        workId: "work-1",
+        assignmentId: "assignment-2",
+        agentInstanceId: "agent-1",
+        engineKind: "fake",
+        engineSessionId: "session-2",
+        modelLabel: "Fake model",
+        status: "running",
+        createdAt: "2026-07-28T08:05:00.000Z",
+        startedAt: "2026-07-28T08:05:00.000Z",
+        completedAt: null,
+      },
+      userMessage: {
+        id: "message-2",
+        workId: "work-1",
+        runId: "run-2",
+        assignmentId: "assignment-2",
+        role: "user",
+        content: "替换为这条指令",
+        resourceIds: [],
+        createdAt: "2026-07-28T08:05:00.000Z",
+      },
+    });
+    render(<WorkSurface client={client} />);
+
+    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    await user.type(composer, "替换为这条指令");
+
+    const interrupt = screen.getByRole("button", { name: "中断并替换" });
+    expect(interrupt).toBeEnabled();
+    await user.click(interrupt);
+
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(client.interruptAndReplace).toHaveBeenCalledWith("work-1", {
+      assignmentId: "",
+      replacement: {
+        instruction: "替换为这条指令",
+        referencedFiles: [],
+        resourceIds: [],
+      },
+    });
+  });
+
   it("连续 Enter 只启动一个 Run", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
