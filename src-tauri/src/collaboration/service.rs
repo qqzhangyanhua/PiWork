@@ -24,7 +24,7 @@ use crate::{
     work::repository::WorkRepository,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DelegateResult {
     pub assignment_id: String,
     pub status: String,
@@ -486,7 +486,7 @@ pub struct MemberResultSubmission {
     pub envelope: ResultEnvelope,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum SubmitOutcome {
     Accepted {
         assignment: AssignmentSummary,
@@ -497,4 +497,145 @@ pub enum SubmitOutcome {
     Rejected {
         diagnostics: Vec<String>,
     },
+}
+
+/// Dispatches an authenticated Host Tool call to the Lead or Member service.
+/// The loopback HTTP thread blocks on the captured Tokio handle for each call.
+#[derive(Clone)]
+pub struct HostToolDispatcher {
+    lead: LeadToolService,
+    member: MemberResultService,
+    runtime: tokio::runtime::Handle,
+}
+
+impl HostToolDispatcher {
+    pub fn new(lead: LeadToolService, member: MemberResultService) -> Self {
+        Self {
+            lead,
+            member,
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    pub fn dispatch(
+        &self,
+        tool: &str,
+        context: &crate::collaboration::tool_bridge::AuthorizedRunContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        self.runtime.block_on(async {
+            match tool {
+                crate::collaboration::tools::TOOL_LIST_WORK_MEMBERS => {
+                    let members = self.lead.list_work_members(&context.work_id).await?;
+                    Ok(serde_json::to_value(members).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_INSPECT_CAPABILITY_PACKS => {
+                    let ids: Vec<String> = serde_json::from_value(
+                        arguments.get("ids").cloned().unwrap_or(serde_json::Value::Null),
+                    )
+                    .unwrap_or_default();
+                    let packs = self.lead.inspect_capability_packs(ids).await?;
+                    Ok(serde_json::to_value(packs).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_DELEGATE_ASSIGNMENT => {
+                    let input: DelegateAssignmentInput =
+                        serde_json::from_value(arguments).map_err(decode_error)?;
+                    let result = self
+                        .lead
+                        .delegate_assignment(&context.assignment_id, input)
+                        .await?;
+                    Ok(serde_json::to_value(result).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_GET_ASSIGNMENT_STATUS => {
+                    let ids: Vec<String> = serde_json::from_value(
+                        arguments.get("assignmentIds").cloned().unwrap_or(serde_json::Value::Null),
+                    )
+                    .unwrap_or_default();
+                    let statuses = self.lead.get_assignment_status(ids).await?;
+                    Ok(serde_json::to_value(statuses).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_CANCEL_ASSIGNMENT => {
+                    let child_id = arguments
+                        .get("assignmentId")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| AppError::invalid_input("assignmentId", "missing"))?;
+                    let cancelled = self
+                        .lead
+                        .cancel_assignment(&context.assignment_id, child_id)
+                        .await?;
+                    Ok(serde_json::to_value(cancelled).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_REQUEST_ASSIGNMENT_RETRY => {
+                    let child_id = arguments
+                        .get("assignmentId")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| AppError::invalid_input("assignmentId", "missing"))?;
+                    let retried = self
+                        .lead
+                        .request_assignment_retry(&context.assignment_id, child_id)
+                        .await?;
+                    Ok(serde_json::to_value(retried).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_RECORD_WORK_DECISION => {
+                    let input: RecordWorkDecisionInput =
+                        serde_json::from_value(arguments).map_err(decode_error)?;
+                    self.lead
+                        .record_work_decision(&context.assignment_id, input)
+                        .await?;
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                crate::collaboration::tools::TOOL_UPDATE_WORK_PLAN => {
+                    let input: UpdateWorkPlanInput =
+                        serde_json::from_value(arguments).map_err(decode_error)?;
+                    self.lead
+                        .update_work_plan(&context.assignment_id, input)
+                        .await?;
+                    Ok(serde_json::json!({ "ok": true }))
+                }
+                crate::collaboration::tools::TOOL_COMPLETE_WORK_DELIVERY => {
+                    let input: CompleteWorkDeliveryInput =
+                        serde_json::from_value(arguments).map_err(decode_error)?;
+                    let completed = self
+                        .lead
+                        .complete_work_delivery(
+                            &context.assignment_id,
+                            &context.runtime_owner,
+                            input,
+                        )
+                        .await?;
+                    Ok(serde_json::to_value(completed).map_err(json_error)?)
+                }
+                crate::collaboration::tools::TOOL_SUBMIT_ASSIGNMENT_RESULT => {
+                    let envelope: ResultEnvelope = serde_json::from_value(
+                        arguments.get("envelope").cloned().unwrap_or(serde_json::Value::Null),
+                    )
+                    .map_err(decode_error)?;
+                    let outcome = self
+                        .member
+                        .submit_assignment_result(MemberResultSubmission {
+                            work_id: context.work_id.clone(),
+                            assignment_id: context.assignment_id.clone(),
+                            run_id: context.run_id.clone(),
+                            author_agent_id: context.agent_instance_id.clone(),
+                            runtime_owner: context.runtime_owner.clone(),
+                            envelope,
+                        })
+                        .await?;
+                    Ok(serde_json::to_value(outcome).map_err(json_error)?)
+                }
+                other => Err(AppError::invalid_input(
+                    "tool",
+                    format!("unknown or unauthorized host tool '{other}'"),
+                )),
+            }
+        })
+    }
+}
+
+fn json_error(error: serde_json::Error) -> AppError {
+    AppError::invalid_input("arguments", error.to_string())
+}
+
+fn decode_error(error: serde_json::Error) -> AppError {
+    AppError::invalid_input("arguments", error.to_string())
 }

@@ -17,11 +17,15 @@ use std::{
 
 use serde_json::Value;
 
-use crate::{error::AppError, collaboration::tool_bridge::HostToolRegistry};
+use crate::{
+    collaboration::tool_bridge::{AuthorizedRunContext, HostToolRegistry},
+    error::AppError,
+};
 
 /// Dispatches an authenticated tool call. Implementations bridge to the async
 /// Lead/Member tool services (typically via `tokio::runtime::Handle::block_on`).
-pub type ToolDispatch = dyn Fn(&str, &str, Value) -> Result<Value, AppError> + Send + Sync;
+pub type ToolDispatch =
+    dyn Fn(&str, &AuthorizedRunContext, Value) -> Result<Value, AppError> + Send + Sync;
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
@@ -152,7 +156,13 @@ fn handle_body(
     if !registry.authenticate(run_id, &token_bytes) {
         return respond(401, json_error("unauthorized"));
     }
-    match dispatch(tool, run_id, arguments) {
+    let Some(context) = registry.context(run_id) else {
+        return respond(401, json_error("run context not found"));
+    };
+    if !context.allowed_tools.iter().any(|allowed| allowed == tool) {
+        return respond(403, json_error("tool not authorized for this run"));
+    }
+    match dispatch(tool, &context, arguments) {
         Ok(value) => respond(200, &serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned())),
         Err(error) => respond(500, &serde_json::to_string(&json_error(&error.to_string())).unwrap()),
     }
@@ -184,6 +194,7 @@ fn respond(status: u16, body: impl AsRef<str>) -> String {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         _ => "Internal Server Error",
     };
     format!(
@@ -207,6 +218,8 @@ mod tests {
                 run_id: "run-1".into(),
                 work_id: "work-1".into(),
                 assignment_id: "a1".into(),
+                agent_instance_id: "agent-1".into(),
+                runtime_owner: "owner-1".into(),
                 allowed_tools: vec!["delegate_assignment".into()],
             },
             "http://127.0.0.1:0/tool".into(),
@@ -214,7 +227,7 @@ mod tests {
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_clone = Arc::clone(&seen);
-        let dispatch: Arc<ToolDispatch> = Arc::new(move |tool, _run_id, _args| {
+        let dispatch: Arc<ToolDispatch> = Arc::new(move |tool, _context, _args| {
             seen_clone.lock().unwrap().push(tool.to_owned());
             Ok(serde_json::json!({ "ok": true }))
         });
@@ -254,11 +267,13 @@ mod tests {
                 run_id: "run-1".into(),
                 work_id: "work-1".into(),
                 assignment_id: "a1".into(),
+                agent_instance_id: "agent-1".into(),
+                runtime_owner: "owner-1".into(),
                 allowed_tools: vec!["delegate_assignment".into()],
             },
             "http://127.0.0.1:0/tool".into(),
         );
-        let dispatch: Arc<ToolDispatch> = Arc::new(|_tool, _run_id, _args| {
+        let dispatch: Arc<ToolDispatch> = Arc::new(|_tool, _context, _args| {
             Ok(serde_json::json!({ "ok": true }))
         });
         let server = HostToolServer::bind(registry, dispatch).unwrap();

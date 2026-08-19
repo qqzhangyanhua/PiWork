@@ -67,6 +67,8 @@ pub struct AuthorizedRunContext {
     pub run_id: String,
     pub work_id: String,
     pub assignment_id: String,
+    pub agent_instance_id: String,
+    pub runtime_owner: String,
     pub allowed_tools: Vec<String>,
 }
 
@@ -77,11 +79,11 @@ pub struct HostToolLease {
     pub allowed_tools: Vec<String>,
 }
 
-/// Stores token digests keyed by Run id; `authenticate` compares digests in
-/// constant time and returns `false` for unknown, revoked, or mismatched runs.
+/// Stores token digests and the authorizing Run context keyed by Run id;
+/// `authenticate` compares digests in constant time.
 #[derive(Default)]
 pub struct HostToolRegistry {
-    leases: Mutex<HashMap<String, Vec<u8>>>,
+    leases: Mutex<HashMap<String, (Vec<u8>, AuthorizedRunContext)>>,
 }
 
 impl HostToolRegistry {
@@ -94,7 +96,10 @@ impl HostToolRegistry {
         self.leases
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(context.run_id.clone(), token.digest().to_vec());
+            .insert(
+                context.run_id.clone(),
+                (token.digest().to_vec(), context.clone()),
+            );
         HostToolLease {
             endpoint,
             token,
@@ -109,12 +114,21 @@ impl HostToolRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(run_id)
-            .cloned();
+            .map(|(digest, _context)| digest.clone());
         let Some(expected) = expected else {
             return false;
         };
         let digest: [u8; 32] = Sha256::digest(presented).into();
         constant_time_eq(&digest, &expected)
+    }
+
+    /// The authorizing Run context for a dispatched tool call.
+    pub fn context(&self, run_id: &str) -> Option<AuthorizedRunContext> {
+        self.leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(run_id)
+            .map(|(_digest, context)| context.clone())
     }
 
     pub fn revoke(&self, run_id: &str) {
@@ -127,7 +141,9 @@ impl HostToolRegistry {
     #[cfg(test)]
     fn stores_plaintext(&self, token: &HostToolToken) -> bool {
         let leases = self.leases.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        leases.values().any(|digest| digest.as_slice() == token.0.as_slice())
+        leases
+            .values()
+            .any(|(digest, _context)| digest.as_slice() == token.0.as_slice())
     }
 }
 
@@ -151,6 +167,8 @@ mod tests {
             run_id: run_id.to_owned(),
             work_id: "work-1".to_owned(),
             assignment_id: "assignment-1".to_owned(),
+            agent_instance_id: "agent-1".to_owned(),
+            runtime_owner: "owner-1".to_owned(),
             allowed_tools: vec!["delegate_assignment".to_owned()],
         }
     }
