@@ -415,3 +415,83 @@ async fn member_submits_a_valid_result_and_completes() {
     assert_eq!(result_rows, 1);
 }
 
+#[tokio::test]
+async fn child_completion_resumes_a_waiting_lead() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-resume", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+
+    // Lead accepts, runs, then delegates and waits.
+    let lead_id = accept_lead(&repository, "work-resume").await;
+    let now = Utc::now();
+    repository.claim(&lead_id, "resume-owner", now).await.unwrap();
+    let lead_run = repository.begin_attempt(&lead_id, "fake", "Pi").await.unwrap();
+    repository
+        .mark_running(&lead_id, &lead_run.id, "lead-session", "resume-owner", now)
+        .await
+        .unwrap();
+
+    // Delegate directly: accept a child and record the parent→child dependency.
+    let child = repository
+        .accept(AcceptAssignmentInput {
+            id: None,
+            work_id: "work-resume".into(),
+            parent_assignment_id: Some(lead_id.clone()),
+            created_by_agent_id: Some("agent-instance:piwork-lead".into()),
+            assigned_agent_id: "agent-instance:piwork-researcher".into(),
+            capability_pack_id: None,
+            kind: AssignmentKind::Member,
+            side_effect: AssignmentSideEffect::ReadOnly,
+            title: "Investigate".into(),
+            instruction: "Inspect the queue".into(),
+            context_manifest: json!({}),
+            expected_result_schema: json!({}),
+            acceptance_criteria: json!([]),
+            permission_scope: json!({"mode": "read_only"}),
+            priority: 5,
+            max_attempts: 2,
+            not_before: None,
+        })
+        .await
+        .unwrap();
+    repository.add_dependency(&lead_id, &child.id).await.unwrap();
+
+    // The waiting handshake: the Lead run ends waiting on the child.
+    repository
+        .mark_waiting(&lead_id, &lead_run.id, "lead-session", "resume-owner", "waiting_on_assignments", now)
+        .await
+        .unwrap();
+
+    // Child runs and completes (fresh timestamps: the child was created after
+    // the captured `now`).
+    let child_now = Utc::now();
+    repository.claim(&child.id, "resume-owner", child_now).await.unwrap();
+    let child_run = repository.begin_attempt(&child.id, "fake", "Pi").await.unwrap();
+    repository
+        .mark_running(&child.id, &child_run.id, "child-session", "resume-owner", child_now)
+        .await
+        .unwrap();
+    repository
+        .complete_by_assignment(&child.id, "Inspected", "resume-owner")
+        .await
+        .unwrap();
+
+    let lead = repository.get_assignment(&lead_id).await.unwrap().unwrap();
+    assert_eq!(lead.status, AssignmentStatus::Queued, "lead should resume after the child terminal");
+
+    let resumed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE assignment_id = ? AND json_extract(payload, '$.type') = 'leadResumed'",
+    )
+    .bind(&lead_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(resumed, 1);
+}
+

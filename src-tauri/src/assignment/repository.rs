@@ -643,6 +643,7 @@ impl AssignmentRepository {
             },
         )
         .await?;
+        resume_parent_if_dependencies_terminal(&mut transaction, &assignment).await?;
         transaction.commit().await?;
         self.drain_after_commit().await;
         Ok(assignment.summary)
@@ -706,6 +707,7 @@ impl AssignmentRepository {
             },
         )
         .await?;
+        resume_parent_if_dependencies_terminal(&mut transaction, &assignment).await?;
         transaction.commit().await?;
         self.drain_after_commit().await;
         Ok(assignment.summary)
@@ -872,6 +874,7 @@ impl AssignmentRepository {
             },
         )
         .await?;
+        resume_parent_if_dependencies_terminal(&mut transaction, &assignment).await?;
         transaction.commit().await?;
         self.drain_after_commit().await;
         Ok(assignment.summary)
@@ -2075,6 +2078,46 @@ async fn dependencies_terminal_in(
         "SELECT COUNT(*) FROM assignment_dependencies dependencies INNER JOIN assignments predecessors ON predecessors.id = dependencies.depends_on_assignment_id WHERE dependencies.assignment_id = ? AND predecessors.status NOT IN ('completed', 'cancelled', 'dead_letter')",
     ).bind(assignment_id).fetch_one(connection).await?;
     Ok(count == 0)
+}
+
+/// When a child reaches a terminal state, resume its waiting parent once every
+/// required dependency is terminal. The waiting→queued transition is the
+/// natural dedup: a second terminal child sees the parent already queued.
+async fn resume_parent_if_dependencies_terminal(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    child: &AssignmentSummary,
+) -> Result<(), AppError> {
+    let Some(parent_id) = child.parent_assignment_id.as_deref() else {
+        return Ok(());
+    };
+    let mut parent = load_assignment(transaction, parent_id).await?;
+    if parent.status != AssignmentStatus::Waiting {
+        return Ok(());
+    }
+    if !dependencies_terminal_in(transaction, parent_id).await? {
+        return Ok(());
+    }
+    let now = Utc::now();
+    sqlx::query("UPDATE assignments SET status = 'queued', updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(parent_id)
+        .execute(&mut **transaction)
+        .await?;
+    parent.status = AssignmentStatus::Queued;
+    parent.updated_at = now;
+    assignment_event(
+        transaction,
+        &parent,
+        None,
+        None,
+        now,
+        WorkEventPayload::LeadResumed {
+            assignment_id: parent_id.to_owned(),
+            dependency_generation: 1,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn assignment_event(
