@@ -37,9 +37,10 @@ pub fn project_work_ledger(work: &WorkSummary, events: &[WorkEventEnvelope]) -> 
 
     for event in events {
         if let Some(event_id) = &event.event_id
-            && !seen_events.insert(event_id.clone()) {
-                continue;
-            }
+            && !seen_events.insert(event_id.clone())
+        {
+            continue;
+        }
         match &event.payload {
             WorkEventPayload::AssignmentQueued { assignment_id, .. }
             | WorkEventPayload::AssignmentClaimed { assignment_id, .. }

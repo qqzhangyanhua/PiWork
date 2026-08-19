@@ -235,12 +235,14 @@ fn lead_and_member_base_protocols_differ() {
 
 #[test]
 fn context_builder_truncates_later_sections_first() {
-    let mut input = ContextBuildInput::default();
-    input.budget_chars = 500;
-    input.explicit_files = vec![piwork_lib::collaboration::context::ExplicitContextFile {
-        path: "a.txt".into(),
-        content: "x".repeat(2000),
-    }];
+    let input = ContextBuildInput {
+        budget_chars: 500,
+        explicit_files: vec![piwork_lib::collaboration::context::ExplicitContextFile {
+            path: "a.txt".into(),
+            content: "x".repeat(2000),
+        }],
+        ..ContextBuildInput::default()
+    };
     let built = build_assignment_context(input);
     assert!(built.manifest.truncated, "tight budget must truncate");
     assert!(

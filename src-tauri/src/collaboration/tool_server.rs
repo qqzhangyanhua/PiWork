@@ -99,22 +99,25 @@ fn serve_one(
 ) -> std::io::Result<()> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 2048];
-    loop {
+    let response = loop {
         let read = stream.read(&mut chunk)?;
         if read == 0 {
-            break;
+            break respond(400, json_error("malformed request"));
         }
         buffer.extend_from_slice(&chunk[..read]);
         if buffer.len() > MAX_REQUEST_BYTES {
-            break;
+            break respond(400, json_error("request too large"));
         }
         if let Some(body) = complete_body(&buffer) {
-            let response = handle_body(body, registry, dispatch);
-            stream.write_all(response.as_bytes())?;
-            return Ok(());
+            break handle_body(body, registry, dispatch);
         }
-    }
-    stream.write_all(respond(400, json_error("malformed request")).as_bytes())?;
+    };
+    stream.write_all(response.as_bytes())?;
+    stream.flush()?;
+    // Half-close the write side so the client observes a clean FIN instead of a
+    // connection reset; Windows can RST a socket that is dropped while receive
+    // data is still buffered, which makes clients' reads fail spuriously.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
     Ok(())
 }
 
