@@ -672,6 +672,71 @@ impl WorkRepository {
         Ok(())
     }
 
+    /// Persists one engine-emitted event under an already-running Run without
+    /// advancing Work or Run status. Assignment-aware execution owns terminal
+    /// transitions through `AssignmentRepository`, so this journal must not
+    /// silently complete or fail a Run on a terminal payload.
+    pub async fn journal_engine_event(
+        &self,
+        envelope: &WorkEventEnvelope,
+    ) -> Result<(), AppError> {
+        let event_id = envelope.event_id.as_deref().ok_or_else(|| {
+            AppError::invalid_input("eventId", "new Work events require an event id")
+        })?;
+        if envelope.sequence == 0 {
+            return Err(AppError::invalid_input(
+                "sequence",
+                "event sequence must be at least 1",
+            ));
+        }
+        let run_id = envelope.run_id.as_deref().ok_or_else(|| {
+            AppError::invalid_input("runId", "the current event journal requires a run id")
+        })?;
+
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let run = sqlx::query_as::<_, RunStateRow>("SELECT work_id, status FROM runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| AppError::run_not_found(run_id))?;
+        if run.work_id != envelope.work_id {
+            return Err(AppError::run_not_found(run_id));
+        }
+        if !matches!(run.status, RunStatus::Running | RunStatus::Waiting) {
+            return Err(AppError::invalid_run_state(
+                run_id,
+                run.status,
+                RunStatus::Running,
+            ));
+        }
+        let current_sequence = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM events WHERE run_id = ?",
+        )
+        .bind(run_id)
+        .fetch_one(&mut *transaction)
+        .await?
+        .unwrap_or(0);
+        let next_sequence = current_sequence
+            .checked_add(1)
+            .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
+        if next_sequence > i64::from(u32::MAX) || i64::from(envelope.sequence) != next_sequence {
+            return Err(AppError::invalid_input(
+                "sequence",
+                "event sequence is not the next sequence for this Run",
+            ));
+        }
+
+        Self::insert_event(
+            &mut transaction,
+            event_id,
+            envelope,
+            i64::from(envelope.sequence),
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn events_for_run(&self, run_id: &str) -> Result<Vec<WorkEventEnvelope>, AppError> {
         sqlx::query_as::<_, EventRow>(
             "SELECT events.id, events.work_id, events.run_id, events.turn_id, \

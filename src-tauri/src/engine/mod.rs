@@ -10,6 +10,7 @@ use crate::domain::{
 
 pub mod activity_observer;
 pub mod fake;
+pub mod harness;
 pub mod pi;
 pub mod publisher;
 pub mod supervisor;
