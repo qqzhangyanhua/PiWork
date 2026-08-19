@@ -361,6 +361,20 @@ impl AssignmentRepository {
         )
     }
 
+    pub async fn get_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<AssignmentSummary>, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let mut assignments = load_assignments(
+            sqlx::query_as::<_, AssignmentRow>(&format!("{} WHERE id = ?", ASSIGNMENT_SELECT))
+                .bind(assignment_id)
+                .fetch_all(&self.pool)
+                .await?,
+        )?;
+        Ok(assignments.pop())
+    }
+
     pub async fn load_schedulable(
         &self,
         now: DateTime<Utc>,
@@ -1434,6 +1448,40 @@ impl AssignmentRepository {
         let assignment_id = validate_id("assignmentId", assignment_id)?;
         let mut connection = self.pool.acquire().await?;
         dependencies_terminal_in(&mut connection, &assignment_id).await
+    }
+
+    /// Emits the `assignmentDelegated` collaboration event for a newly accepted
+    /// child Assignment, using the child's product identity.
+    pub async fn record_delegation(
+        &self,
+        parent_assignment_id: &str,
+        child_assignment_id: &str,
+        assigned_agent_id: &str,
+        title: &str,
+    ) -> Result<(), AppError> {
+        let parent_assignment_id = validate_id("parentAssignmentId", parent_assignment_id)?;
+        let child_assignment_id = validate_id("childAssignmentId", child_assignment_id)?;
+        let assigned_agent_id = validate_id("assignedAgentId", assigned_agent_id)?;
+        let title = validate_text("title", title)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let child = load_assignment(&mut transaction, &child_assignment_id).await?;
+        assignment_event(
+            &mut transaction,
+            &child,
+            None,
+            None,
+            Utc::now(),
+            WorkEventPayload::AssignmentDelegated {
+                assignment_id: child_assignment_id,
+                parent_assignment_id,
+                assigned_agent_id,
+                title,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        self.drain_after_commit().await;
+        Ok(())
     }
 
     pub async fn events_for_assignment(
