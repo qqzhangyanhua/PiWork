@@ -495,3 +495,50 @@ async fn child_completion_resumes_a_waiting_lead() {
     assert_eq!(resumed, 1);
 }
 
+#[tokio::test]
+async fn memory_candidates_require_confirmation_and_reject_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-memory", &root_path).await;
+
+    let service = piwork_lib::collaboration::memory::MemoryService::new(pool.clone());
+    let ids = service
+        .propose_candidates(
+            "work-memory",
+            "agent-instance:piwork-researcher",
+            vec![
+                piwork_lib::domain::collaboration::MemoryCandidateInput {
+                    content: "The queue uses a BTreeMap for fair ordering".into(),
+                    reason: "discovered during review".into(),
+                },
+                piwork_lib::domain::collaboration::MemoryCandidateInput {
+                    content: "the API key is sk-secret-123".into(),
+                    reason: "stored credential".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    // The secret candidate is never proposed.
+    assert_eq!(ids.len(), 1);
+
+    let candidates = service.list_work_candidates("work-memory").await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].status, piwork_lib::domain::collaboration::MemoryCandidateStatus::Proposed);
+
+    let candidate_id = candidates[0].id.clone();
+    let resolved = service
+        .resolve_candidate(&candidate_id, true, "agent-instance:piwork-lead")
+        .await
+        .unwrap();
+    assert_eq!(resolved.status, piwork_lib::domain::collaboration::MemoryCandidateStatus::Confirmed);
+
+    let memory = service
+        .list_agent_memory("agent-instance:piwork-researcher", 1024)
+        .await
+        .unwrap();
+    assert_eq!(memory, vec!["The queue uses a BTreeMap for fair ordering".to_owned()]);
+}
+
