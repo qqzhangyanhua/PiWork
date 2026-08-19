@@ -8,8 +8,9 @@ import type { ResourceSummary } from "../../bindings";
 import { RawActivityRail } from "../activity/RawActivityRail";
 import { AttachmentChips } from "./AttachmentChips";
 import { AssignmentInspector } from "./AssignmentInspector";
+import { TeamInspector } from "./TeamInspector";
 
-const tabs = ["delivery", "attachments", "assignments", "validation", "logs"] as const;
+const tabs = ["delivery", "attachments", "team", "assignments", "validation", "logs"] as const;
 const tabbableSelector = [
   'button:not([disabled]):not([tabindex="-1"])',
   '[href]:not([tabindex="-1"])',
@@ -111,6 +112,9 @@ export function WorkInspector({
     }
     if (active === "assignments") {
       return <AssignmentInspector events={events} />;
+    }
+    if (active === "team") {
+      return <TeamInspector events={events} />;
     }
     if (active === "validation") {
       const validations = completions.flatMap(({ payload, runId }) => payload.validation.map((item) => ({ item, runId })));

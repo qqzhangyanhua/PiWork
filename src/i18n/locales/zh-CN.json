@@ -476,7 +476,7 @@
   "inspector": {
     "label": "对话检查器", "open": "打开检查器", "close": "关闭检查器",
     "title": "检查器", "resize": "调整检查器宽度", "resizeHint": "拖拽调整宽度，双击恢复默认",
-    "delivery": "交付", "attachments": "附件", "assignments": "任务", "artifacts": "产物", "validation": "验证", "logs": "活动原始记录",
+    "delivery": "交付", "attachments": "附件", "team": "团队", "assignments": "任务", "artifacts": "产物", "validation": "验证", "logs": "活动原始记录",
     "noValidation": "完成验证后，结果会显示在这里。当前没有验证记录。",
     "noDeliveries": "生成文件后，产物会显示在这里。先在下方输入一条指令。",
     "noArtifacts": "最新一次执行没有产物。继续对话并生成文件后，这里会列出可查看的产物。",
