@@ -7,8 +7,9 @@ import { isWorkEventTimelineItem, type AppError, type TimelineItem } from "../..
 import type { ResourceSummary } from "../../bindings";
 import { RawActivityRail } from "../activity/RawActivityRail";
 import { AttachmentChips } from "./AttachmentChips";
+import { AssignmentInspector } from "./AssignmentInspector";
 
-const tabs = ["delivery", "attachments", "validation", "logs"] as const;
+const tabs = ["delivery", "attachments", "assignments", "validation", "logs"] as const;
 const tabbableSelector = [
   'button:not([disabled]):not([tabindex="-1"])',
   '[href]:not([tabindex="-1"])',
@@ -107,6 +108,9 @@ export function WorkInspector({
     if (active === "attachments") {
       if (!resources.length) return <p className="inspector-empty">{t("inspector.noAttachments")}</p>;
       return <section className="inspector-attachments"><strong>{t("attachments.count", { count: resources.length })}</strong><AttachmentChips resources={resources} /></section>;
+    }
+    if (active === "assignments") {
+      return <AssignmentInspector events={events} />;
     }
     if (active === "validation") {
       const validations = completions.flatMap(({ payload, runId }) => payload.validation.map((item) => ({ item, runId })));
