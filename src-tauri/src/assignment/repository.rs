@@ -1174,6 +1174,50 @@ impl AssignmentRepository {
         Ok(assignment.summary)
     }
 
+    /// Manually retries a failed or interrupted Assignment back to queued.
+    pub async fn retry_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<AssignmentSummary, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        if !matches!(
+            assignment.status,
+            AssignmentStatus::Failed | AssignmentStatus::Interrupted
+        ) {
+            return Err(invalid_assignment_state("assignment is not retryable"));
+        }
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE assignments SET status = 'queued', next_attempt_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .bind(now)
+        .bind(&assignment_id)
+        .execute(&mut *transaction)
+        .await?;
+        assignment.status = AssignmentStatus::Queued;
+        assignment.next_attempt_at = None;
+        assignment.updated_at = now;
+        assignment_event(
+            &mut transaction,
+            &assignment,
+            None,
+            None,
+            now,
+            WorkEventPayload::AssignmentQueued {
+                assignment_id: assignment.id.clone(),
+                assigned_agent_id: assignment.assigned_agent_id.clone(),
+                title: assignment.title.clone(),
+                priority: assignment.priority,
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        self.drain_after_commit().await;
+        Ok(assignment.summary)
+    }
+
     /// Claims the ready Agent × Work session for an engine, or creates the next
     /// generation when none is ready. A claimed session is bound to a runtime
     /// owner so a process crash can invalidate exactly the sessions it owned.

@@ -67,6 +67,42 @@ impl LeadToolService {
         Ok(members)
     }
 
+    pub async fn inspect_capability_packs(
+        &self,
+        ids: Vec<String>,
+    ) -> Result<Vec<crate::domain::agent::CapabilityPackSummary>, AppError> {
+        let packs = self.agent_repository.list_capability_packs().await?;
+        if ids.is_empty() {
+            return Ok(packs);
+        }
+        Ok(packs
+            .into_iter()
+            .filter(|pack| ids.iter().any(|id| id == &pack.id))
+            .collect())
+    }
+
+    /// Retries a failed or interrupted child Assignment owned by the Lead.
+    pub async fn request_assignment_retry(
+        &self,
+        lead_assignment_id: &str,
+        child_assignment_id: &str,
+    ) -> Result<AssignmentSummary, AppError> {
+        let child = self
+            .repository
+            .get_assignment(child_assignment_id)
+            .await?
+            .ok_or_else(|| AppError::invalid_input("assignmentId", "assignment not found"))?;
+        if child.parent_assignment_id.as_deref() != Some(lead_assignment_id) {
+            return Err(AppError::invalid_input(
+                "assignmentId",
+                "only the parent Lead can retry this child",
+            ));
+        }
+        let retried = self.repository.retry_assignment(child_assignment_id).await?;
+        self.scheduler.wake()?;
+        Ok(retried)
+    }
+
     pub async fn get_assignment_status(
         &self,
         assignment_ids: Vec<String>,
