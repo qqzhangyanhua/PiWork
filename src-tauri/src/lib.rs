@@ -228,6 +228,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             agent_repository,
                             publisher,
                             assignment_repository,
+                            database.pool().clone(),
                         ))
                     }
                 },
@@ -238,6 +239,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     agent_repository,
                     publisher,
                     assignment_repository,
+                    pool,
                 )| -> StartupResult<()> {
                     let model_service =
                         Arc::new(model::ModelService::production(model_repository)?);
@@ -300,7 +302,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     let member_tools = collaboration::service::MemberResultService::new(
                         assignment_repository.clone(),
                         scheduler_handle.clone(),
-                    );
+                    )
+                    .with_memory(collaboration::memory::MemoryService::new(pool.clone()));
                     let dispatcher =
                         collaboration::service::HostToolDispatcher::new(lead_tools, member_tools);
                     let dispatch: Arc<collaboration::tool_server::ToolDispatch> =
@@ -317,6 +320,13 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             "PiWork host tool bridge is already managed",
+                        )
+                        .into());
+                    }
+                    if !app.manage(collaboration::memory::MemoryService::new(pool.clone())) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "PiWork memory service is already managed",
                         )
                         .into());
                     }
@@ -375,6 +385,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             assignment::commands::queue_work_input,
             assignment::commands::confirm_assignment_recovery,
             assignment::commands::interrupt_and_replace,
+            collaboration::commands::resolve_memory_candidate,
+            collaboration::commands::list_memory_candidates,
             model::commands::get_model_configuration_status,
             model::commands::list_model_configurations,
             model::commands::test_model_connection,

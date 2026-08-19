@@ -75,6 +75,12 @@ const makeClient = (
   interruptAndReplace: async () => {
     throw new Error("unused");
   },
+  listMemoryCandidates: async () => {
+    throw new Error("unused");
+  },
+  resolveMemoryCandidate: async () => {
+    throw new Error("unused");
+  },
   listenToWorkEvents,
 });
 

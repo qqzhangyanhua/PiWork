@@ -83,6 +83,8 @@ export type MockTauriClient = PiWorkClient & {
   queueWorkInput: Mock<PiWorkClient["queueWorkInput"]>;
   confirmAssignmentRecovery: Mock<PiWorkClient["confirmAssignmentRecovery"]>;
   interruptAndReplace: Mock<PiWorkClient["interruptAndReplace"]>;
+  listMemoryCandidates: Mock<PiWorkClient["listMemoryCandidates"]>;
+  resolveMemoryCandidate: Mock<PiWorkClient["resolveMemoryCandidate"]>;
   listenToWorkEvents: Mock<PiWorkClient["listenToWorkEvents"]>;
   emit(event: WorkEventEnvelope): void;
   seed(detail: WorkDetail): void;
@@ -626,6 +628,16 @@ export const createMockTauriClient = (): MockTauriClient => {
       throw new Error("interruptAndReplace is not mocked");
     },
   );
+  const listMemoryCandidates: Mock<PiWorkClient["listMemoryCandidates"]> = vi.fn(
+    async (_workId) => {
+      throw new Error("listMemoryCandidates is not mocked");
+    },
+  );
+  const resolveMemoryCandidate: Mock<PiWorkClient["resolveMemoryCandidate"]> = vi.fn(
+    async (_candidateId, _confirm) => {
+      throw new Error("resolveMemoryCandidate is not mocked");
+    },
+  );
 
   const client: MockTauriClient = {
     getRuntimeStatus,
@@ -657,6 +669,8 @@ export const createMockTauriClient = (): MockTauriClient => {
     queueWorkInput,
     confirmAssignmentRecovery,
     interruptAndReplace,
+    listMemoryCandidates,
+    resolveMemoryCandidate,
     listenToWorkEvents,
     unlisten,
     seed(detail) {

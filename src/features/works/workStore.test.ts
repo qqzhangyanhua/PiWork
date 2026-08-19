@@ -114,6 +114,12 @@ const unusedClient: PiWorkClient = {
   interruptAndReplace: async () => {
     throw new Error("unused");
   },
+  listMemoryCandidates: async () => {
+    throw new Error("unused");
+  },
+  resolveMemoryCandidate: async () => {
+    throw new Error("unused");
+  },
   listenToWorkEvents: async () => () => undefined,
 };
 

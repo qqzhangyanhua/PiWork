@@ -562,6 +562,7 @@ async fn memory_candidates_require_confirmation_and_reject_secrets() {
         .propose_candidates(
             "work-memory",
             "agent-instance:piwork-researcher",
+            "assignment-memory-source",
             vec![
                 piwork_lib::domain::collaboration::MemoryCandidateInput {
                     content: "The queue uses a BTreeMap for fair ordering".into(),
@@ -586,13 +587,17 @@ async fn memory_candidates_require_confirmation_and_reject_secrets() {
     );
 
     let candidate_id = candidates[0].id.clone();
-    let resolved = service
+    let (resolved, source_assignment_id) = service
         .resolve_candidate(&candidate_id, true, "agent-instance:piwork-lead")
         .await
         .unwrap();
     assert_eq!(
         resolved.status,
         piwork_lib::domain::collaboration::MemoryCandidateStatus::Confirmed
+    );
+    assert_eq!(
+        source_assignment_id.as_deref(),
+        Some("assignment-memory-source")
     );
 
     let memory = service

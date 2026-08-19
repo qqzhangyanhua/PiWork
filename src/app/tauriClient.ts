@@ -9,6 +9,7 @@ import type {
   CreateWorkInput,
   ImportResourcesInput,
   InterruptWorkInput,
+  MemoryCandidateSummary,
   ProjectFileSummary,
   QueueWorkInput,
   ResourceSummary,
@@ -111,6 +112,11 @@ export type PiWorkClient = {
     workId: string,
     input: InterruptWorkInput,
   ): Promise<StartWorkOutput>;
+  listMemoryCandidates(workId: string): Promise<MemoryCandidateSummary[]>;
+  resolveMemoryCandidate(
+    candidateId: string,
+    confirm: boolean,
+  ): Promise<MemoryCandidateSummary>;
   listenToWorkEvents(
     handler: (event: WorkEventEnvelope) => void,
   ): Promise<UnlistenFn>;
@@ -173,6 +179,13 @@ export const tauriClient: PiWorkClient = {
     }),
   interruptAndReplace: (workId, input) =>
     invoke<StartWorkOutput>("interrupt_and_replace", { workId, input }),
+  listMemoryCandidates: (workId) =>
+    invoke<MemoryCandidateSummary[]>("list_memory_candidates", { workId }),
+  resolveMemoryCandidate: (candidateId, confirm) =>
+    invoke<MemoryCandidateSummary>("resolve_memory_candidate", {
+      candidateId,
+      confirm,
+    }),
   listenToWorkEvents: (handler) =>
     listen<WorkEventEnvelope>("piwork://work-event", ({ payload }) =>
       handler(payload),

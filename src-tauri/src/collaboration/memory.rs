@@ -23,15 +23,17 @@ impl MemoryService {
     }
 
     /// Proposes candidates from a Result envelope. Candidates are persisted as
-    /// `proposed` and never write `agent_memory` directly.
+    /// `proposed` and never write `agent_memory` directly. Returns each accepted
+    /// candidate as `(id, content)` so the caller can emit a proposal event.
     pub async fn propose_candidates(
         &self,
         work_id: &str,
         author_agent_id: &str,
+        source_assignment_id: &str,
         candidates: Vec<MemoryCandidateInput>,
-    ) -> Result<Vec<String>, AppError> {
+    ) -> Result<Vec<(String, String)>, AppError> {
         let now = Utc::now();
-        let mut ids = Vec::with_capacity(candidates.len());
+        let mut proposed = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             if candidate.content.trim().is_empty() {
                 continue;
@@ -41,8 +43,8 @@ impl MemoryService {
             }
             let id = Uuid::new_v4().to_string();
             sqlx::query(
-                "INSERT INTO memory_candidates (id, source_work_id, author_agent_id, content, reason, version, status, created_at) \
-                 VALUES (?, ?, ?, ?, ?, 1, 'proposed', ?)",
+                "INSERT INTO memory_candidates (id, source_work_id, author_agent_id, content, reason, version, status, created_at, source_assignment_id) \
+                 VALUES (?, ?, ?, ?, ?, 1, 'proposed', ?, ?)",
             )
             .bind(&id)
             .bind(work_id)
@@ -50,11 +52,12 @@ impl MemoryService {
             .bind(&candidate.content)
             .bind(&candidate.reason)
             .bind(now)
+            .bind(source_assignment_id)
             .execute(&self.pool)
             .await?;
-            ids.push(id);
+            proposed.push((id, candidate.content));
         }
-        Ok(ids)
+        Ok(proposed)
     }
 
     pub async fn list_work_candidates(
@@ -62,7 +65,7 @@ impl MemoryService {
         work_id: &str,
     ) -> Result<Vec<MemoryCandidateSummary>, AppError> {
         sqlx::query_as::<_, MemoryCandidateRow>(
-            "SELECT id, source_work_id, source_event_id, author_agent_id, content, reason, version, status, created_at, resolved_at, resolved_by \
+            "SELECT id, source_work_id, source_event_id, author_agent_id, content, reason, version, status, created_at, resolved_at, resolved_by, source_assignment_id \
              FROM memory_candidates WHERE source_work_id = ? AND status = 'proposed' ORDER BY created_at, id",
         )
         .bind(work_id)
@@ -75,15 +78,17 @@ impl MemoryService {
 
     /// Confirms (writes `agent_memory` + event) or rejects (keeps audit) one
     /// candidate. Confirmation is idempotent and always re-runs the sensitive
-    /// scan before writing durable memory.
+    /// scan before writing durable memory. Returns the resolved candidate and
+    /// the id of the Assignment that proposed it (when known) so the caller can
+    /// journal a `memoryCandidateResolved` event.
     pub async fn resolve_candidate(
         &self,
         candidate_id: &str,
         confirm: bool,
         actor: &str,
-    ) -> Result<MemoryCandidateSummary, AppError> {
+    ) -> Result<(MemoryCandidateSummary, Option<String>), AppError> {
         let candidate: MemoryCandidateRow = sqlx::query_as(
-            "SELECT id, source_work_id, source_event_id, author_agent_id, content, reason, version, status, created_at, resolved_at, resolved_by \
+            "SELECT id, source_work_id, source_event_id, author_agent_id, content, reason, version, status, created_at, resolved_at, resolved_by, source_assignment_id \
              FROM memory_candidates WHERE id = ?",
         )
         .bind(candidate_id)
@@ -92,7 +97,10 @@ impl MemoryService {
         .ok_or_else(|| AppError::invalid_input("candidateId", "memory candidate not found"))?;
 
         if candidate.status != "proposed" {
-            return MemoryCandidateSummary::try_from(candidate);
+            return Ok((
+                MemoryCandidateSummary::try_from(candidate.clone())?,
+                candidate.source_assignment_id,
+            ));
         }
         if confirm && contains_sensitive_content(&candidate.content) {
             return Err(AppError::invalid_input(
@@ -131,17 +139,20 @@ impl MemoryService {
         .await?;
 
         // The candidate status transition and the agent_memory row (on confirm)
-        // are the durable facts; the MemoryCandidateResolved event is emitted by
-        // the assignment-scoped collaboration path once a source assignment id
-        // is attached to candidates.
+        // are the durable facts; the caller journals `memoryCandidateResolved`
+        // against the source assignment id.
         let resolved: MemoryCandidateRow = sqlx::query_as(
-            "SELECT id, source_work_id, source_event_id, author_agent_id, content, reason, version, status, created_at, resolved_at, resolved_by \
+            "SELECT id, source_work_id, source_event_id, author_agent_id, content, reason, version, status, created_at, resolved_at, resolved_by, source_assignment_id \
              FROM memory_candidates WHERE id = ?",
         )
         .bind(candidate_id)
         .fetch_one(&self.pool)
         .await?;
-        MemoryCandidateSummary::try_from(resolved)
+        let source_assignment_id = resolved.source_assignment_id.clone();
+        Ok((
+            MemoryCandidateSummary::try_from(resolved)?,
+            source_assignment_id,
+        ))
     }
 
     /// Lists confirmed memories for an Agent, bounded to `budget` characters.
@@ -186,7 +197,7 @@ fn contains_sensitive_content(content: &str) -> bool {
         || content.contains("appdata\\local\\temp")
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct MemoryCandidateRow {
     id: String,
     source_work_id: String,
@@ -199,6 +210,7 @@ struct MemoryCandidateRow {
     created_at: chrono::DateTime<Utc>,
     resolved_at: Option<chrono::DateTime<Utc>>,
     resolved_by: Option<String>,
+    source_assignment_id: Option<String>,
 }
 
 impl TryFrom<MemoryCandidateRow> for MemoryCandidateSummary {

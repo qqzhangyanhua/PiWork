@@ -9,8 +9,9 @@ use crate::{
         repository::{AcceptAssignmentInput, AssignmentRepository},
         scheduler::AssignmentSchedulerHandle,
     },
-    collaboration::result::{
-        RepairDecision, ResultSubmissionContext, repair_decision, validate_result,
+    collaboration::{
+        memory::MemoryService,
+        result::{RepairDecision, ResultSubmissionContext, repair_decision, validate_result},
     },
     domain::{
         agent::WorkAgentSummary,
@@ -378,6 +379,7 @@ impl LeadToolService {
 pub struct MemberResultService {
     repository: AssignmentRepository,
     scheduler: AssignmentSchedulerHandle,
+    memory: Option<MemoryService>,
 }
 
 impl MemberResultService {
@@ -385,7 +387,45 @@ impl MemberResultService {
         Self {
             repository,
             scheduler,
+            memory: None,
         }
+    }
+
+    /// Attaches Memory candidate proposal so accepted Result envelopes can
+    /// propose durable (but unconfirmed) Memory candidates.
+    pub fn with_memory(mut self, memory: MemoryService) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Proposes each accepted Memory candidate from an accepted Result envelope
+    /// and journals a `memoryCandidateProposed` event for the Inspector.
+    async fn propose_memory_candidates(
+        &self,
+        work_id: &str,
+        assignment_id: &str,
+        author_agent_id: &str,
+        candidates: &[crate::domain::collaboration::MemoryCandidateInput],
+    ) -> Result<(), AppError> {
+        let Some(memory) = &self.memory else {
+            return Ok(());
+        };
+        let proposed = memory
+            .propose_candidates(work_id, author_agent_id, assignment_id, candidates.to_vec())
+            .await?;
+        for (candidate_id, content) in proposed {
+            self.repository
+                .emit_collaboration_event(
+                    assignment_id,
+                    WorkEventPayload::MemoryCandidateProposed {
+                        candidate_id,
+                        author_agent_id: author_agent_id.to_owned(),
+                        content,
+                    },
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn submit_assignment_result(
@@ -433,6 +473,13 @@ impl MemberResultService {
                         },
                     )
                     .await?;
+                self.propose_memory_candidates(
+                    &submission.work_id,
+                    &submission.assignment_id,
+                    &submission.author_agent_id,
+                    &valid.envelope.memory_candidates,
+                )
+                .await?;
                 self.scheduler.wake()?;
                 Ok(SubmitOutcome::Accepted { assignment })
             }
