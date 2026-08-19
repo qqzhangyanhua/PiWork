@@ -38,6 +38,15 @@ impl HostToolToken {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// Hex encoding for injection into the Run environment and loopback JSON.
+    pub fn to_hex(&self) -> String {
+        let mut hex = String::with_capacity(TOKEN_BYTES * 2);
+        for byte in self.0 {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
 }
 
 impl Drop for HostToolToken {
