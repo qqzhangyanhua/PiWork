@@ -734,17 +734,28 @@ fn rpc_agent_end_is_terminal_and_reports_real_tool_activity() {
 #[test]
 fn pi_launch_arguments_bind_the_workspace_session_and_builtin_tools() {
     use piwork_lib::domain::work::PermissionMode;
-    use piwork_lib::engine::pi::PiRunArguments;
+    use piwork_lib::engine::pi::{PiRunArguments, session_directory};
 
+    let session_directory = session_directory(
+        Path::new("D:/sessions"),
+        "agent-instance-contract",
+        "work-1",
+        4,
+    )
+    .unwrap();
     let arguments = PiRunArguments::new(
         Path::new("D:/workspace"),
-        Path::new("D:/sessions/work-1"),
-        "work-1",
+        &session_directory,
+        "agent-session-contract",
         "agent-model",
         PermissionMode::Balanced,
     );
 
     assert_eq!(arguments.working_directory(), Path::new("D:/workspace"));
+    assert_eq!(
+        session_directory,
+        Path::new("D:/sessions/pi/agent-instance-contract/work-1/4")
+    );
     assert!(
         arguments
             .values()
@@ -755,7 +766,13 @@ fn pi_launch_arguments_bind_the_workspace_session_and_builtin_tools() {
         arguments
             .values()
             .windows(2)
-            .any(|pair| pair == ["--session-id", "work-1"])
+            .any(|pair| pair == ["--session-id", "agent-session-contract"])
+    );
+    assert!(
+        arguments
+            .values()
+            .windows(2)
+            .any(|pair| pair == ["--session-dir", session_directory.to_string_lossy().as_ref()])
     );
     assert!(
         arguments

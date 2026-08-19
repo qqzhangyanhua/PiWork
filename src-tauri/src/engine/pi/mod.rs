@@ -16,6 +16,7 @@ use tokio::{
 };
 
 use crate::{
+    agent::repository::DEFAULT_LEAD_INSTANCE_ID,
     domain::{event::SessionTransition, work::PermissionMode},
     model::{ModelProvider, ModelService, RuntimeModelConfiguration},
 };
@@ -36,6 +37,10 @@ use startup::await_prompt_acceptance;
 const PROVIDER_NAME: &str = "piwork";
 const API_KEY_ENVIRONMENT_VARIABLE: &str = "PIWORK_MODEL_API_KEY";
 const PRODUCTION_PI_TOOL_IDS: &[&str] = &["read", "grep", "find", "ls", "edit", "write", "bash"];
+/// Engine-kind directory segment shared by every Pi session. The legacy
+/// one-session-per-Work layout (`<sessions_root>/<work_id>`) is only read for
+/// the built-in Lead's first generation before it rotates into this layout.
+pub const SESSION_ENGINE_SEGMENT: &str = "pi";
 
 pub(crate) fn production_pi_tool_ids() -> &'static [&'static str] {
     PRODUCTION_PI_TOOL_IDS
@@ -339,6 +344,84 @@ impl PiRunArguments {
     pub fn values(&self) -> &[String] {
         &self.values
     }
+}
+
+/// Builds the isolated session directory for an Agent × Work generation:
+///
+/// ```text
+/// <sessions_root>/pi/<agent_instance_id>/<work_id>/<generation>
+/// ```
+///
+/// Every segment is validated to be a portable, canonical identity segment;
+/// values that are empty, `.`/`..`, or contain path separators are rejected so
+/// an identity can never escape the sessions root. Characters that Windows
+/// cannot host in a directory name (such as the `:` inside the stable built-in
+/// `agent-instance:piwork-lead` id) are mapped deterministically to `_`.
+pub fn session_directory(
+    sessions_root: &Path,
+    agent_instance_id: &str,
+    work_id: &str,
+    generation: u32,
+) -> Result<PathBuf, EngineError> {
+    let agent_segment = validated_session_segment("agent instance", agent_instance_id)?;
+    let work_segment = validated_session_segment("work", work_id)?;
+    Ok(sessions_root
+        .join(SESSION_ENGINE_SEGMENT)
+        .join(agent_segment)
+        .join(work_segment)
+        .join(generation.to_string()))
+}
+
+/// Resolves the effective Pi session directory for a run.
+///
+/// The built-in Lead of a Work created before session isolation may still hold
+/// its conversation in the legacy `<sessions_root>/<work_id>` directory. That
+/// directory is only read as a one-time resume source when the new generation
+/// has no session yet; after the first rotation the isolated layout is used
+/// exclusively and the legacy directory is never written again.
+pub fn resolve_session_directory(
+    sessions_root: &Path,
+    agent_instance_id: &str,
+    work_id: &str,
+    generation: u32,
+    is_builtin_lead: bool,
+    new_directory_exists: bool,
+    legacy_directory_exists: bool,
+) -> Result<PathBuf, EngineError> {
+    let new_directory = session_directory(sessions_root, agent_instance_id, work_id, generation)?;
+    let legacy = sessions_root.join(validated_session_segment("work", work_id)?);
+    let use_legacy = is_builtin_lead
+        && generation <= 1
+        && !new_directory_exists
+        && legacy_directory_exists;
+    Ok(if use_legacy { legacy } else { new_directory })
+}
+
+fn validated_session_segment(field: &str, value: &str) -> Result<String, EngineError> {
+    if value.trim().is_empty() || value == "." || value == ".." {
+        return Err(EngineError::Start(format!(
+            "{field} identity must be a portable path segment"
+        )));
+    }
+    if value.contains(['/', '\\', '\0']) {
+        return Err(EngineError::Start(format!(
+            "{field} identity must be a portable path segment"
+        )));
+    }
+    let mut segment = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+            segment.push(character);
+        } else {
+            segment.push('_');
+        }
+    }
+    if segment.is_empty() || segment == "." || segment == ".." {
+        return Err(EngineError::Start(format!(
+            "{field} identity must be a portable path segment"
+        )));
+    }
+    Ok(segment)
 }
 
 #[derive(Default)]
@@ -1026,7 +1109,6 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
     let mut dispatcher = EventDispatcher::new(sink);
     let mut startup = Some(startup);
     let agent_directory = runtime_root.join(&run_id).join("agent");
-    let session_directory = sessions_root.join(context.work_id());
     let mut process_tree: Option<PiProcessTree> = None;
     let mut spawn_cleanup_confirmed = true;
     let mut cleanup_budget = None;
@@ -1043,6 +1125,27 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
                 configuration.map_err(|_| EngineError::Start("model configuration is unavailable".into()))?
             }
         };
+        let session_directory = {
+            let new_directory = session_directory(
+                &sessions_root,
+                context.agent_instance_id(),
+                context.work_id(),
+                context.session_generation(),
+            )?;
+            let legacy_directory = sessions_root.join(validated_session_segment(
+                "work",
+                context.work_id(),
+            )?);
+            resolve_session_directory(
+                &sessions_root,
+                context.agent_instance_id(),
+                context.work_id(),
+                context.session_generation(),
+                context.agent_instance_id() == DEFAULT_LEAD_INSTANCE_ID,
+                new_directory.exists(),
+                legacy_directory.exists(),
+            )?
+        };
         std::fs::create_dir_all(&agent_directory)
             .and_then(|_| std::fs::create_dir_all(&session_directory))
             .map_err(|_| {
@@ -1058,7 +1161,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         let arguments = PiRunArguments::new(
             context.root_path(),
             &session_directory,
-            context.work_id(),
+            context.agent_session_id(),
             &configuration.model_id,
             context.effective_permission(),
         );
@@ -1133,7 +1236,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             translator,
             session: EngineSessionRef {
                 engine_kind: "pi_rpc".into(),
-                session_id: context.work_id().to_owned(),
+                session_id: context.agent_session_id().to_owned(),
             },
             transition,
             model_label: configuration.model_id.clone(),
@@ -1755,5 +1858,119 @@ mod tests {
         ));
 
         assert_eq!(argument, r"D:\PiWork\pi-sidecar\dist\piwork-pi.js");
+    }
+
+    #[test]
+    fn isolated_session_directory_uses_agent_work_and_generation_segments() {
+        let directory = super::session_directory(
+            std::path::Path::new(r"D:\sessions"),
+            "agent-instance-contract",
+            "work-1",
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(
+            directory,
+            std::path::Path::new(r"D:\sessions\pi\agent-instance-contract\work-1\3")
+        );
+    }
+
+    #[test]
+    fn session_directory_maps_windows_hostile_agent_ids_deterministically() {
+        let directory = super::session_directory(
+            std::path::Path::new(r"D:\sessions"),
+            "agent-instance:piwork-lead",
+            "work-1",
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            directory,
+            std::path::Path::new(r"D:\sessions\pi\agent-instance_piwork-lead\work-1\1")
+        );
+        // The drive prefix contributes a colon on Windows; only identity
+        // segments must be free of Windows-hostile directory characters.
+        let hostile_segment = directory
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(segment) => Some(segment),
+                _ => None,
+            })
+            .any(|segment| segment.to_string_lossy().contains(':'));
+        assert!(
+            !hostile_segment,
+            "Windows cannot host colons in a directory name"
+        );
+    }
+
+    #[test]
+    fn session_directory_rejects_traversal_and_separator_identities() {
+        for (agent, work) in [
+            ("../outside", "work-1"),
+            (r"a\b", "work-1"),
+            ("a/b", "work-1"),
+            ("", "work-1"),
+            ("agent-1", ".."),
+            ("agent-1", r"nested\path"),
+            ("agent-1", "nested/path"),
+            ("agent-1", ""),
+        ] {
+            assert!(
+                super::session_directory(std::path::Path::new(r"D:\sessions"), agent, work, 1)
+                    .is_err(),
+                "unsafe segment pair ({agent:?}, {work:?}) must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_lead_directory_is_resolved_only_once_before_the_first_rotation() {
+        let sessions = std::path::Path::new(r"D:\sessions");
+
+        let legacy = super::resolve_session_directory(
+            sessions,
+            super::DEFAULT_LEAD_INSTANCE_ID,
+            "work-legacy",
+            1,
+            true,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(legacy, std::path::Path::new(r"D:\sessions\work-legacy"));
+
+        let rotated = super::resolve_session_directory(
+            sessions,
+            super::DEFAULT_LEAD_INSTANCE_ID,
+            "work-legacy",
+            2,
+            true,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            rotated,
+            std::path::Path::new(r"D:\sessions\pi\agent-instance_piwork-lead\work-legacy\2")
+        );
+
+        let non_lead = super::resolve_session_directory(
+            sessions,
+            "agent-instance:local:researcher",
+            "work-legacy",
+            1,
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            non_lead,
+            std::path::Path::new(
+                r"D:\sessions\pi\agent-instance_local_researcher\work-legacy\1"
+            )
+        );
     }
 }

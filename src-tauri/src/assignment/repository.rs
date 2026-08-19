@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus, AssignmentSummary},
+        assignment::{
+            AgentSessionStatus, AgentSessionSummary, AssignmentKind, AssignmentSideEffect,
+            AssignmentStatus, AssignmentSummary,
+        },
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{RunStatus, RunSummary},
     },
@@ -1105,6 +1108,233 @@ impl AssignmentRepository {
         Ok(assignment.summary)
     }
 
+    /// Claims the ready Agent × Work session for an engine, or creates the next
+    /// generation when none is ready. A claimed session is bound to a runtime
+    /// owner so a process crash can invalidate exactly the sessions it owned.
+    pub async fn claim_or_create_session(
+        &self,
+        agent_instance_id: &str,
+        work_id: &str,
+        engine_kind: &str,
+        owner_id: &str,
+    ) -> Result<AgentSessionSummary, AppError> {
+        let agent_instance_id = validate_id("agentInstanceId", agent_instance_id)?;
+        let work_id = validate_id("workId", work_id)?;
+        let engine_kind = validate_label("engineKind", engine_kind)?;
+        let owner_id = validate_label("runtimeOwner", owner_id)?;
+        let now = Utc::now();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let ready = sqlx::query_as::<_, AgentSessionRow>(
+            "SELECT id, work_id, agent_instance_id, engine_kind, generation, current_assignment_id, last_successful_turn_id, rotation_reason, status, created_at, updated_at, invalidated_at FROM agent_sessions WHERE agent_instance_id = ? AND work_id = ? AND engine_kind = ? AND status = 'ready' ORDER BY generation DESC LIMIT 1",
+        )
+        .bind(&agent_instance_id)
+        .bind(&work_id)
+        .bind(&engine_kind)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let session = if let Some(ready) = ready {
+            let updated = sqlx::query("UPDATE agent_sessions SET status = 'running', runtime_owner_id = ?, updated_at = ? WHERE id = ? AND status = 'ready'")
+                .bind(&owner_id).bind(now).bind(&ready.id)
+                .execute(&mut *transaction).await?;
+            if updated.rows_affected() != 1 {
+                return Err(AppError::invalid_input(
+                    "sessionId",
+                    "agent session was claimed concurrently",
+                ));
+            }
+            let mut summary = AgentSessionSummary::try_from(ready)?;
+            summary.status = AgentSessionStatus::Running;
+            summary.updated_at = now;
+            summary
+        } else {
+            let current_generation: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(generation), 0) FROM agent_sessions WHERE agent_instance_id = ? AND work_id = ? AND engine_kind = ?",
+            )
+            .bind(&agent_instance_id)
+            .bind(&work_id)
+            .bind(&engine_kind)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let generation = u32::try_from(current_generation)
+                .map_err(|_| AppError::invalid_input("generation", "stored session generation is invalid"))?
+                .checked_add(1)
+                .ok_or_else(|| AppError::invalid_input("generation", "session generation limit exceeded"))?;
+            let session = AgentSessionSummary {
+                id: Uuid::new_v4().to_string(),
+                work_id: work_id.clone(),
+                agent_instance_id: agent_instance_id.clone(),
+                engine_kind: engine_kind.clone(),
+                generation,
+                current_assignment_id: None,
+                last_successful_turn_id: None,
+                rotation_reason: None,
+                status: AgentSessionStatus::Running,
+                created_at: now,
+                updated_at: now,
+                invalidated_at: None,
+            };
+            sqlx::query("INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, generation, status, runtime_owner_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)")
+                .bind(&session.id)
+                .bind(&session.work_id)
+                .bind(&session.agent_instance_id)
+                .bind(&session.engine_kind)
+                .bind(i64::from(session.generation))
+                .bind(&owner_id)
+                .bind(session.created_at)
+                .bind(session.updated_at)
+                .execute(&mut *transaction)
+                .await?;
+            session
+        };
+        transaction.commit().await?;
+        Ok(session)
+    }
+
+    /// Stores the engine-specific opaque reference without ever exposing it in
+    /// a product DTO. A session must exist; the reference is updated in place.
+    pub async fn attach_engine_reference(
+        &self,
+        session_id: &str,
+        opaque_ref: &str,
+    ) -> Result<(), AppError> {
+        let session_id = validate_id("sessionId", session_id)?;
+        let opaque_ref = validate_label("engineReference", opaque_ref)?;
+        let now = Utc::now();
+        let updated = sqlx::query("UPDATE agent_sessions SET engine_reference = ?, updated_at = ? WHERE id = ?")
+            .bind(&opaque_ref)
+            .bind(now)
+            .bind(&session_id)
+            .execute(&self.pool)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::invalid_input(
+                "sessionId",
+                "agent session was not found",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Marks a session ready after a successful turn, releasing the runtime
+    /// owner so the next claim can reuse the same generation.
+    pub async fn mark_ready(
+        &self,
+        session_id: &str,
+        last_successful_turn: &str,
+    ) -> Result<AgentSessionSummary, AppError> {
+        let session_id = validate_id("sessionId", session_id)?;
+        let last_successful_turn = validate_id("lastSuccessfulTurnId", last_successful_turn)?;
+        let now = Utc::now();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let updated = sqlx::query("UPDATE agent_sessions SET status = 'ready', last_successful_turn_id = ?, runtime_owner_id = NULL, updated_at = ? WHERE id = ? AND status IN ('running', 'ready')")
+            .bind(&last_successful_turn)
+            .bind(now)
+            .bind(&session_id)
+            .execute(&mut *transaction)
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::invalid_input(
+                "sessionId",
+                "agent session was not found or is invalidated",
+            ));
+        }
+        let session = load_agent_session(&mut transaction, &session_id).await?;
+        transaction.commit().await?;
+        Ok(session)
+    }
+
+    /// Invalidates the current generation and creates the next one ready,
+    /// preserving the Agent × Work × Engine identity. The reason is persisted
+    /// on both generations for auditability.
+    pub async fn rotate(
+        &self,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<AgentSessionSummary, AppError> {
+        let session_id = validate_id("sessionId", session_id)?;
+        let reason = validate_text("rotationReason", reason)?;
+        let now = Utc::now();
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current = load_agent_session(&mut transaction, &session_id).await?;
+        if current.status == AgentSessionStatus::Invalidated {
+            return Err(AppError::invalid_input(
+                "sessionId",
+                "agent session is already invalidated",
+            ));
+        }
+        let next_generation = current
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| AppError::invalid_input("generation", "session generation limit exceeded"))?;
+        sqlx::query("UPDATE agent_sessions SET status = 'invalidated', invalidated_at = ?, rotation_reason = ?, runtime_owner_id = NULL, updated_at = ? WHERE id = ?")
+            .bind(now).bind(&reason).bind(now).bind(&session_id)
+            .execute(&mut *transaction).await?;
+        let rotated = AgentSessionSummary {
+            id: Uuid::new_v4().to_string(),
+            work_id: current.work_id.clone(),
+            agent_instance_id: current.agent_instance_id.clone(),
+            engine_kind: current.engine_kind.clone(),
+            generation: next_generation,
+            current_assignment_id: None,
+            last_successful_turn_id: None,
+            rotation_reason: Some(reason.clone()),
+            status: AgentSessionStatus::Ready,
+            created_at: now,
+            updated_at: now,
+            invalidated_at: None,
+        };
+        sqlx::query("INSERT INTO agent_sessions (id, work_id, agent_instance_id, engine_kind, generation, status, rotation_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'ready', ?, ?, ?)")
+            .bind(&rotated.id)
+            .bind(&rotated.work_id)
+            .bind(&rotated.agent_instance_id)
+            .bind(&rotated.engine_kind)
+            .bind(i64::from(rotated.generation))
+            .bind(&reason)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(rotated)
+    }
+
+    /// Invalidates every session still owned by a runtime owner (for example
+    /// after a process crash), releasing them for future claims.
+    pub async fn invalidate_owner(
+        &self,
+        owner_id: &str,
+        reason: &str,
+    ) -> Result<Vec<AgentSessionSummary>, AppError> {
+        let owner_id = validate_label("runtimeOwner", owner_id)?;
+        let reason = validate_text("rotationReason", reason)?;
+        let now = Utc::now();
+        let rows = sqlx::query_as::<_, AgentSessionRow>(&format!(
+            "{} WHERE runtime_owner_id = ? AND status IN ('ready', 'running') ORDER BY id",
+            AGENT_SESSION_SELECT
+        ))
+        .bind(&owner_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let ids = rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        if !ids.is_empty() {
+            sqlx::query("UPDATE agent_sessions SET status = 'invalidated', invalidated_at = ?, rotation_reason = ?, runtime_owner_id = NULL, updated_at = ? WHERE id IN (SELECT id FROM agent_sessions WHERE runtime_owner_id = ? AND status IN ('ready', 'running'))")
+                .bind(now).bind(&reason).bind(now).bind(&owner_id)
+                .execute(&self.pool).await?;
+        }
+        rows.into_iter()
+            .map(AgentSessionSummary::try_from)
+            .map(|result| {
+                result.map(|mut summary| {
+                    summary.status = AgentSessionStatus::Invalidated;
+                    summary.invalidated_at = Some(now);
+                    summary.rotation_reason = Some(reason.clone());
+                    summary.updated_at = now;
+                    summary
+                })
+            })
+            .collect()
+    }
+
     pub async fn add_dependency(
         &self,
         assignment_id: &str,
@@ -1545,6 +1775,61 @@ async fn load_assignment(
         .await?
         .ok_or_else(|| AppError::invalid_input("assignmentId", "assignment was not found"))?;
     AssignmentRecord::try_from(row)
+}
+
+const AGENT_SESSION_SELECT: &str = "SELECT id, work_id, agent_instance_id, engine_kind, generation, current_assignment_id, last_successful_turn_id, rotation_reason, status, created_at, updated_at, invalidated_at FROM agent_sessions";
+
+#[derive(FromRow)]
+struct AgentSessionRow {
+    id: String,
+    work_id: String,
+    agent_instance_id: String,
+    engine_kind: String,
+    generation: i64,
+    current_assignment_id: Option<String>,
+    last_successful_turn_id: Option<String>,
+    rotation_reason: Option<String>,
+    status: AgentSessionStatus,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    invalidated_at: Option<DateTime<Utc>>,
+}
+
+impl TryFrom<AgentSessionRow> for AgentSessionSummary {
+    type Error = AppError;
+
+    fn try_from(row: AgentSessionRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            work_id: row.work_id,
+            agent_instance_id: row.agent_instance_id,
+            engine_kind: row.engine_kind,
+            generation: u32::try_from(row.generation)
+                .map_err(|_| AppError::invalid_input("generation", "stored session generation is invalid"))?,
+            current_assignment_id: row.current_assignment_id,
+            last_successful_turn_id: row.last_successful_turn_id,
+            rotation_reason: row.rotation_reason,
+            status: row.status,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            invalidated_at: row.invalidated_at,
+        })
+    }
+}
+
+async fn load_agent_session(
+    connection: &mut sqlx::SqliteConnection,
+    session_id: &str,
+) -> Result<AgentSessionSummary, AppError> {
+    let row = sqlx::query_as::<_, AgentSessionRow>(&format!(
+        "{} WHERE id = ?",
+        AGENT_SESSION_SELECT
+    ))
+    .bind(session_id)
+    .fetch_optional(connection)
+    .await?
+    .ok_or_else(|| AppError::invalid_input("sessionId", "agent session was not found"))?;
+    AgentSessionSummary::try_from(row)
 }
 
 #[derive(FromRow)]
