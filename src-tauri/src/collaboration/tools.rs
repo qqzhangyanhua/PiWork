@@ -46,6 +46,17 @@ pub const MEMBER_TOOLS: [&str; 3] = [
     TOOL_REQUEST_CLARIFICATION,
 ];
 
+/// The role-scoped tool allowlist carried by a Run's host tool lease. Lead gets
+/// the nine Lead tools, every other role gets the three Member tools.
+pub fn role_tool_allowlist(role_kind: RoleKind) -> Vec<String> {
+    let tools: &[&str] = if role_kind == RoleKind::Lead {
+        &LEAD_TOOLS
+    } else {
+        &MEMBER_TOOLS
+    };
+    tools.iter().map(|tool| (*tool).to_owned()).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecisionSource {
     WorkPolicy {

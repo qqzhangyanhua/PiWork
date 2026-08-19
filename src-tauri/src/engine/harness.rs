@@ -7,7 +7,12 @@
 //! build layered context, or decide retry/dead-letter policy — those belong to
 //! the Scheduler and the collaboration layer.
 
-use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use chrono::Utc;
 use tokio::sync::mpsc;
@@ -15,6 +20,10 @@ use uuid::Uuid;
 
 use crate::{
     assignment::repository::AssignmentRepository,
+    collaboration::{
+        tool_bridge::{AuthorizedRunContext, HostToolRegistry},
+        tools::role_tool_allowlist,
+    },
     domain::{
         agent::AgentInstanceSummary,
         assignment::{AgentSessionSummary, AssignmentSummary},
@@ -63,6 +72,32 @@ pub enum AssignmentExecutionOutcome {
     Stopped,
 }
 
+/// The production Host Tool Bridge pieces the Harness needs to issue a
+/// per-Run lease and revoke it when the Run ends. Optional so legacy/test
+/// execution paths that never expose host tools keep working unchanged.
+///
+/// The endpoint is a `OnceLock` because the loopback server binds an ephemeral
+/// port during app assembly, after the Scheduler (and thus this config) is
+/// constructed; it is set exactly once before any Run can dispatch.
+#[derive(Clone)]
+pub struct HostToolBridgeConfig {
+    pub registry: Arc<HostToolRegistry>,
+    pub endpoint: Arc<OnceLock<String>>,
+}
+
+/// Revokes a Run's host tool lease on drop, guaranteeing the token is dead once
+/// the execution (including its error paths) leaves scope.
+struct LeaseGuard {
+    registry: Arc<HostToolRegistry>,
+    run_id: String,
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        self.registry.revoke(&self.run_id);
+    }
+}
+
 #[derive(Clone)]
 pub struct EngineHarness {
     engine: Arc<dyn EngineAdapter>,
@@ -70,6 +105,7 @@ pub struct EngineHarness {
     assignment_repository: AssignmentRepository,
     publisher: Arc<dyn EventPublisher>,
     startup_timeout: Duration,
+    host_tools: Option<HostToolBridgeConfig>,
 }
 
 impl EngineHarness {
@@ -85,7 +121,15 @@ impl EngineHarness {
             assignment_repository,
             publisher,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
+            host_tools: None,
         }
+    }
+
+    /// Attaches the production host tool bridge so each executed Run receives a
+    /// role-scoped lease. Without this the Pi extension is never loaded.
+    pub fn with_host_tools(mut self, config: HostToolBridgeConfig) -> Self {
+        self.host_tools = Some(config);
+        self
     }
 
     #[cfg(test)]
@@ -130,6 +174,41 @@ impl EngineHarness {
             effective_permission,
         )
         .map_err(|error| AppError::engine(error.to_string()))?;
+
+        // Issue a role-scoped host tool lease before starting the engine. The
+        // guard revokes it on every exit path (including startup failure and
+        // the `?` early returns below), so a token never outlives its Run.
+        let (lease, _lease_guard) = match self.host_tools.as_ref().and_then(|config| {
+            config
+                .endpoint
+                .get()
+                .cloned()
+                .map(|endpoint| (config, endpoint))
+        }) {
+            Some((config, endpoint)) => {
+                let lease = config.registry.issue(
+                    AuthorizedRunContext {
+                        run_id: run.id.clone(),
+                        work_id: work.id.clone(),
+                        assignment_id: assignment.id.clone(),
+                        agent_instance_id: agent.id.clone(),
+                        runtime_owner: runtime_owner.clone(),
+                        allowed_tools: role_tool_allowlist(agent.definition.role_kind),
+                    },
+                    endpoint,
+                );
+                let guard = LeaseGuard {
+                    registry: Arc::clone(&config.registry),
+                    run_id: run.id.clone(),
+                };
+                (Some(lease), Some(guard))
+            }
+            None => (None, None),
+        };
+        let context = match lease {
+            Some(lease) => context.with_host_tool_lease(lease),
+            None => context,
+        };
 
         let (event_sender, mut event_receiver) = mpsc::channel(64);
         let start = self.engine.start(context, input, event_sender);

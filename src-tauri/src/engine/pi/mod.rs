@@ -344,6 +344,15 @@ impl PiRunArguments {
     pub fn values(&self) -> &[String] {
         &self.values
     }
+
+    /// Appends an explicit `--extension` after `--no-extensions`: Pi treats
+    /// `--no-extensions` as "disable discovery", and still loads extension
+    /// paths given on the command line.
+    pub fn with_extension(mut self, path: &Path) -> Self {
+        self.values.push("--extension".into());
+        self.values.push(node_entrypoint_argument(path));
+        self
+    }
 }
 
 /// Builds the isolated session directory for an Agent × Work generation:
@@ -887,6 +896,7 @@ pub struct PiEngineAdapter {
     runtime_root: PathBuf,
     command: PiCommand,
     active: Arc<PiActiveRuns>,
+    host_tool_extension: Option<PathBuf>,
 }
 
 impl PiEngineAdapter {
@@ -920,8 +930,17 @@ impl PiEngineAdapter {
                 runtime_root,
                 command: PiCommand::discover(executable.as_deref())?,
                 active: Arc::new(Mutex::new(HashMap::new())),
+                host_tool_extension: None,
             })
         }
+    }
+
+    /// Points the adapter at the bundled `piwork-host-tools.ts` asset. When a
+    /// Run carries a host tool lease, the adapter copies this asset into the
+    /// Run's private extension directory and loads it explicitly.
+    pub fn with_host_tool_extension(mut self, path: PathBuf) -> Self {
+        self.host_tool_extension = Some(path);
+        self
     }
 }
 
@@ -970,6 +989,7 @@ impl PiEngineAdapter {
             completion,
             startup: startup_sender,
             caller_acknowledgement: caller_acknowledgement_receiver,
+            host_tool_extension: self.host_tool_extension.clone(),
         }));
 
         let startup = startup_receiver
@@ -1068,6 +1088,7 @@ struct PiLifecycleRequest {
     completion: Arc<PiRunCompletion>,
     startup: oneshot::Sender<Result<EngineSessionRef, EngineError>>,
     caller_acknowledgement: oneshot::Receiver<()>,
+    host_tool_extension: Option<PathBuf>,
 }
 
 struct StartedPiRun {
@@ -1103,6 +1124,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         completion,
         startup,
         mut caller_acknowledgement,
+        host_tool_extension,
     } = request;
     let mut dispatcher = EventDispatcher::new(sink);
     let mut startup = Some(startup);
@@ -1156,17 +1178,51 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             EngineError::Start("Pi provider configuration could not be written".into())
         })?;
 
-        let arguments = PiRunArguments::new(
+        // Stage the PiWork host tools extension for this Run and capture the
+        // lease so the endpoint/token/allowlist can be injected into the child
+        // environment. Fail closed: a lease without the bundled asset is a
+        // configuration error, never a silent no-tools Run.
+        let host_tools = match (context.host_tool_lease(), &host_tool_extension) {
+            (Some(lease), Some(asset)) => {
+                let extension_dir = agent_directory.join("extensions");
+                std::fs::create_dir_all(&extension_dir).map_err(|_| {
+                    EngineError::Start("Pi host tool extension directory could not be prepared".into())
+                })?;
+                let target = extension_dir.join("piwork-host-tools.ts");
+                std::fs::copy(asset, &target).map_err(|_| {
+                    EngineError::Start("Pi host tool extension could not be staged".into())
+                })?;
+                Some((target, lease))
+            }
+            (Some(_), None) => {
+                return Err(EngineError::Start(
+                    "host tool lease issued without the bundled extension asset".into(),
+                ));
+            }
+            (None, _) => None,
+        };
+
+        let mut arguments = PiRunArguments::new(
             context.root_path(),
             &session_directory,
             context.agent_session_id(),
             &configuration.model_id,
             context.effective_permission(),
         );
+        if let Some((path, _)) = &host_tools {
+            arguments = arguments.with_extension(path);
+        }
         let mut process = command.process(&arguments);
         process
             .env("PI_CODING_AGENT_DIR", &agent_directory)
             .env(API_KEY_ENVIRONMENT_VARIABLE, &configuration.api_key);
+        if let Some((_, lease)) = &host_tools {
+            process
+                .env("PIWORK_HOST_TOOL_ENDPOINT", &lease.endpoint)
+                .env("PIWORK_HOST_TOOL_TOKEN", lease.token.to_hex())
+                .env("PIWORK_RUN_ID", &run_id)
+                .env("PIWORK_HOST_TOOLS", lease.allowed_tools.join(","));
+        }
         let spawned_tree = match PiProcessTree::spawn(&mut process).await {
             Ok(tree) => tree,
             Err(error) => {
@@ -1201,14 +1257,18 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             result = write_rpc(startup_stdin.as_mut().unwrap(), &prompt) => result?,
         }
         let mut stdout = RpcRecordReader::new(BufReader::new(stdout));
+        let mut sensitive_values = vec![
+            configuration.api_key.clone(),
+            context.work_id().to_owned(),
+            context.run_id().to_owned(),
+            context.agent_session_id().to_owned(),
+            configuration.model_id.clone(),
+        ];
+        if let Some((_, lease)) = &host_tools {
+            sensitive_values.push(lease.token.to_hex());
+        }
         let mut translator = RpcEventTranslator::with_sensitive_values_and_local_paths(
-            [
-                configuration.api_key.clone(),
-                context.work_id().to_owned(),
-                context.run_id().to_owned(),
-                context.agent_session_id().to_owned(),
-                configuration.model_id.clone(),
-            ],
+            sensitive_values,
             [
                 context.root_path().to_path_buf(),
                 sessions_root.clone(),
@@ -1349,6 +1409,12 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         let _ = stderr_task.await;
     }
     let _ = std::fs::remove_file(agent_directory.join("models.json"));
+    let _ = std::fs::remove_file(
+        agent_directory
+            .join("extensions")
+            .join("piwork-host-tools.ts"),
+    );
+    let _ = std::fs::remove_dir(agent_directory.join("extensions"));
     let _ = std::fs::remove_dir(&agent_directory);
     let mut outcome = stream.outcome;
     let mut terminal_event = stream
@@ -1856,6 +1922,38 @@ mod tests {
         ));
 
         assert_eq!(argument, r"D:\PiWork\pi-sidecar\dist\piwork-pi.js");
+    }
+
+    #[test]
+    fn pi_run_arguments_append_explicit_extension_after_no_extensions() {
+        let arguments = super::PiRunArguments::new(
+            std::path::Path::new(r"D:\workspace"),
+            std::path::Path::new(r"D:\sessions\session"),
+            "agent-session-1",
+            "model-1",
+            crate::domain::work::PermissionMode::Balanced,
+        )
+        .with_extension(std::path::Path::new(
+            r"D:\runtime\run-1\agent\extensions\piwork-host-tools.ts",
+        ));
+
+        let values = arguments.values();
+        let no_extensions = values
+            .iter()
+            .position(|value| value == "--no-extensions")
+            .expect("--no-extensions is present");
+        let extension = values
+            .iter()
+            .position(|value| value == "--extension")
+            .expect("--extension is present");
+        assert!(
+            extension > no_extensions,
+            "--extension must follow --no-extensions so discovery stays disabled"
+        );
+        assert_eq!(
+            values[extension + 1],
+            r"D:\runtime\run-1\agent\extensions\piwork-host-tools.ts"
+        );
     }
 
     #[test]

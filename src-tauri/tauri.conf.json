@@ -34,7 +34,8 @@
       "../NOTICE": "NOTICE",
       "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../licenses/Apache-2.0.txt": "licenses/Apache-2.0.txt",
-      "binaries/pi-sidecar": "pi-sidecar"
+      "binaries/pi-sidecar": "pi-sidecar",
+      "assets/piwork-host-tools.ts": "piwork-host-tools.ts"
     },
     "icon": [
       "icons/32x32.png",

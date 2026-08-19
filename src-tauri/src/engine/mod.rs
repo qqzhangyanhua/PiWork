@@ -3,9 +3,12 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::domain::{
-    event::{LivenessState, PermissionOutcome, SessionTransition},
-    work::PermissionMode,
+use crate::{
+    collaboration::tool_bridge::HostToolLease,
+    domain::{
+        event::{LivenessState, PermissionOutcome, SessionTransition},
+        work::PermissionMode,
+    },
 };
 
 pub mod activity_observer;
@@ -202,6 +205,7 @@ pub struct EngineRunContext {
     session_generation: u32,
     resolved_model_configuration_id: Option<String>,
     effective_permission: PermissionMode,
+    host_tool_lease: Option<HostToolLease>,
 }
 
 impl EngineRunContext {
@@ -242,7 +246,16 @@ impl EngineRunContext {
             session_generation,
             resolved_model_configuration_id,
             effective_permission,
+            host_tool_lease: None,
         })
+    }
+
+    /// Attaches the per-Run host tool bridge lease for engines that expose the
+    /// PiWork extension. The token is redacted in `Debug` and the registry only
+    /// ever stores its digest.
+    pub fn with_host_tool_lease(mut self, lease: HostToolLease) -> Self {
+        self.host_tool_lease = Some(lease);
+        self
     }
 
     pub fn work_id(&self) -> &str {
@@ -283,6 +296,10 @@ impl EngineRunContext {
 
     pub fn effective_permission(&self) -> PermissionMode {
         self.effective_permission
+    }
+
+    pub fn host_tool_lease(&self) -> Option<&HostToolLease> {
+        self.host_tool_lease.as_ref()
     }
 
     #[cfg(test)]

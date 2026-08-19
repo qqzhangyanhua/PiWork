@@ -14,6 +14,11 @@ use zeroize::Zeroize;
 const TOKEN_BYTES: usize = 32;
 
 /// A 32-byte CSPRNG token that zeroizes on drop and redacts in Debug output.
+///
+/// `Clone` is provided only so the token can be carried across the async task
+/// boundary into the engine run context; each clone zeroizes independently on
+/// drop and the registry never stores the plaintext (only a SHA-256 digest).
+#[derive(Clone, PartialEq, Eq)]
 pub struct HostToolToken([u8; TOKEN_BYTES]);
 
 impl HostToolToken {
@@ -68,7 +73,7 @@ pub struct AuthorizedRunContext {
     pub allowed_tools: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostToolLease {
     pub endpoint: String,
     pub token: HostToolToken,

@@ -171,6 +171,10 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 .path()
                 .resolve("pi-sidecar/dist/piwork-pi.js", BaseDirectory::Resource)
                 .ok();
+            let bundled_host_tools = app
+                .path()
+                .resolve("piwork-host-tools.ts", BaseDirectory::Resource)
+                .ok();
             let observer = engine::activity_observer::ActivityObserverHandle::in_process();
             tauri::async_runtime::block_on(orchestrate_startup(
                 || {
@@ -237,12 +241,21 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 )| -> StartupResult<()> {
                     let model_service =
                         Arc::new(model::ModelService::production(model_repository)?);
-                    let engine = Arc::new(engine::pi::PiEngineAdapter::production_with_executable(
-                        Arc::clone(&model_service),
-                        engine_sessions_dir.clone(),
-                        runtime_dir.clone(),
-                        bundled_pi.clone(),
-                    )?);
+                    let host_tool_extension = bundled_host_tools.clone().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "bundled PiWork host tools extension is unavailable",
+                        )
+                    })?;
+                    let engine = Arc::new(
+                        engine::pi::PiEngineAdapter::production_with_executable(
+                            Arc::clone(&model_service),
+                            engine_sessions_dir.clone(),
+                            runtime_dir.clone(),
+                            bundled_pi.clone(),
+                        )?
+                        .with_host_tool_extension(host_tool_extension),
+                    );
                     if !app.manage(observer.clone()) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
@@ -257,6 +270,9 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         )
                         .into());
                     }
+                    let host_tool_registry =
+                        Arc::new(collaboration::tool_bridge::HostToolRegistry::new());
+                    let host_tool_endpoint = Arc::new(std::sync::OnceLock::new());
                     let scheduler = assignment::scheduler::AssignmentScheduler::new(
                         assignment_repository.clone(),
                         repository.clone(),
@@ -265,8 +281,46 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         Arc::clone(&publisher) as Arc<dyn engine::publisher::EventPublisher>,
                         format!("piwork-scheduler-{}", uuid::Uuid::new_v4()),
                         "Pi",
-                    );
+                    )
+                    .with_host_tools(engine::harness::HostToolBridgeConfig {
+                        registry: Arc::clone(&host_tool_registry),
+                        endpoint: Arc::clone(&host_tool_endpoint),
+                    });
                     let scheduler_handle = scheduler.spawn();
+
+                    // Bind the loopback Host Tool Bridge and publish its endpoint
+                    // so the Harness can issue per-Run leases. The endpoint is set
+                    // exactly once, before the window is shown and any Run runs.
+                    let lead_tools = collaboration::service::LeadToolService::new(
+                        assignment_repository.clone(),
+                        repository.clone(),
+                        agent_repository.clone(),
+                        scheduler_handle.clone(),
+                    );
+                    let member_tools = collaboration::service::MemberResultService::new(
+                        assignment_repository.clone(),
+                        scheduler_handle.clone(),
+                    );
+                    let dispatcher =
+                        collaboration::service::HostToolDispatcher::new(lead_tools, member_tools);
+                    let dispatch: Arc<collaboration::tool_server::ToolDispatch> =
+                        Arc::new(move |tool, context, arguments| {
+                            dispatcher.dispatch(tool, context, arguments)
+                        });
+                    let host_tool_server =
+                        collaboration::tool_server::HostToolServer::bind(
+                            Arc::clone(&host_tool_registry),
+                            dispatch,
+                        )?;
+                    let _ = host_tool_endpoint.set(host_tool_server.endpoint().to_owned());
+                    if !app.manage(host_tool_server) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "PiWork host tool bridge is already managed",
+                        )
+                        .into());
+                    }
+
                     let assignment_service = Arc::new(assignment::service::AssignmentService::new(
                         assignment_repository,
                         repository.clone(),

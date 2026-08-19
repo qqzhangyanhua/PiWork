@@ -26,7 +26,10 @@ use crate::{
     domain::{agent::RoleKind, assignment::AssignmentSummary},
     engine::{
         EngineAdapter, EngineInput,
-        harness::{AssignmentExecutionOutcome, AssignmentExecutionRequest, EngineHarness},
+        harness::{
+            AssignmentExecutionOutcome, AssignmentExecutionRequest, EngineHarness,
+            HostToolBridgeConfig,
+        },
         publisher::EventPublisher,
     },
     error::AppError,
@@ -108,6 +111,13 @@ impl AssignmentScheduler {
             limits: default_limits(),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attaches the production host tool bridge so every dispatched Run issues
+    /// a role-scoped lease and loads the Pi extension.
+    pub fn with_host_tools(mut self, config: HostToolBridgeConfig) -> Self {
+        self.harness = self.harness.clone().with_host_tools(config);
+        self
     }
 
     /// Runs orphan recovery once before the dispatch loop starts. Production
