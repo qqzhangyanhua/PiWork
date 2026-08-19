@@ -17,6 +17,7 @@ pub struct WorkService {
     repository: WorkRepository,
     execution: Execution,
     resource_service: Option<Arc<ResourceService>>,
+    assignment_service: Option<Arc<crate::assignment::service::AssignmentService>>,
 }
 
 #[derive(Clone)]
@@ -31,6 +32,7 @@ impl WorkService {
             repository,
             execution: Execution::RepositoryOnly,
             resource_service: None,
+            assignment_service: None,
         }
     }
 
@@ -39,6 +41,7 @@ impl WorkService {
             repository,
             execution: Execution::Supervisor(supervisor),
             resource_service: None,
+            assignment_service: None,
         }
     }
 
@@ -51,6 +54,19 @@ impl WorkService {
             repository,
             execution: Execution::Supervisor(supervisor),
             resource_service: Some(resource_service),
+            assignment_service: None,
+        }
+    }
+
+    pub fn with_assignment_service(
+        repository: WorkRepository,
+        assignment_service: Arc<crate::assignment::service::AssignmentService>,
+    ) -> Self {
+        Self {
+            repository,
+            execution: Execution::RepositoryOnly,
+            resource_service: None,
+            assignment_service: Some(assignment_service),
         }
     }
 
@@ -89,6 +105,16 @@ impl WorkService {
         work_id: &str,
         input: StartWorkInput,
     ) -> Result<StartWorkOutput, AppError> {
+        if let Some(assignment_service) = &self.assignment_service {
+            return assignment_service
+                .start_lead_assignment(
+                    work_id,
+                    input.prompt,
+                    input.referenced_files,
+                    input.resource_ids,
+                )
+                .await;
+        }
         let work = self.get_work(work_id).await?;
         let root_path = PathBuf::from(work.summary.root_path);
         let user_prompt = input.prompt;

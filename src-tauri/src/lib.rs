@@ -197,6 +197,9 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             assignment_sink,
                         )
                         .await?;
+                        // Recover assignments orphaned by a previous process before
+                        // the window is shown or the scheduler starts dispatching.
+                        assignment_repository.recover_orphans(&[]).await?;
                         work::service::WorkService::new(repository.clone())
                             .recover_interrupted_runs()
                             .await?;
@@ -246,24 +249,32 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         )
                         .into());
                     }
-                    if !app.manage(assignment_repository) {
+                    if !app.manage(assignment_repository.clone()) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             "PiWork assignment repository is already managed",
                         )
                         .into());
                     }
-                    let supervisor = Arc::new(engine::supervisor::EngineSupervisor::new(
+                    let scheduler = assignment::scheduler::AssignmentScheduler::new(
+                        assignment_repository.clone(),
                         repository.clone(),
-                        engine,
-                        publisher,
+                        agent_repository.clone(),
+                        Arc::clone(&engine) as Arc<dyn engine::EngineAdapter>,
+                        Arc::clone(&publisher) as Arc<dyn engine::publisher::EventPublisher>,
+                        format!("piwork-scheduler-{}", uuid::Uuid::new_v4()),
                         "Pi",
+                    );
+                    let scheduler_handle = scheduler.spawn();
+                    let assignment_service = Arc::new(assignment::service::AssignmentService::new(
+                        assignment_repository,
+                        repository.clone(),
+                        scheduler_handle,
                     ));
                     let service =
-                        Arc::new(work::service::WorkService::with_supervisor_and_resources(
+                        Arc::new(work::service::WorkService::with_assignment_service(
                             repository,
-                            supervisor,
-                            Arc::clone(&resource_service),
+                            assignment_service,
                         ));
                     let agent_service = Arc::new(agent::service::AgentService::new(
                         agent_repository,
@@ -495,8 +506,8 @@ mod tests {
             .find("app.manage(observer.clone())")
             .expect("shared activity observer is not retained in Tauri managed state");
         let erase = assembly
-            .find("engine::supervisor::EngineSupervisor::new")
-            .expect("publisher is not erased into the supervisor");
+            .find("assignment::scheduler::AssignmentScheduler::new")
+            .expect("publisher is not erased into the assignment scheduler");
 
         assert!(observer < publisher && publisher < manage && manage < erase);
         assert!(assembly[publisher..manage].contains("observer.clone()"));
@@ -522,7 +533,7 @@ mod tests {
             .find("assignment::repository::AssignmentRepository::initialize_with_event_sink")
             .expect("production startup does not recover and drain the assignment outbox");
         let manage = assembly
-            .find("app.manage(assignment_repository)")
+            .find("app.manage(assignment_repository.clone())")
             .expect("the initialized assignment repository is not retained in managed state");
         let drain_command = assembly
             .find("assignment::commands::drain_assignment_event_outbox")

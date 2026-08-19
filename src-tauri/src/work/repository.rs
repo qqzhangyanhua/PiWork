@@ -382,6 +382,51 @@ impl WorkRepository {
         Ok(run)
     }
 
+    /// Resolves the joined Lead agent instance for a Work.
+    pub async fn lead_agent_id(&self, work_id: &str) -> Result<String, AppError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT agent_instance_id FROM work_agents \
+             WHERE work_id = ? AND role_kind = 'lead' AND status = 'joined'",
+        )
+        .bind(work_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::from)
+    }
+
+    /// Persists a user message before a Run exists. The message is bound to the
+    /// accepted Lead Assignment and its Run id is filled in once the Scheduler
+    /// begins the attempt.
+    pub async fn insert_user_message(
+        &self,
+        work_id: &str,
+        content: &str,
+        assignment_id: &str,
+    ) -> Result<UserMessageSummary, AppError> {
+        let now = Utc::now();
+        let message = UserMessageSummary {
+            id: Uuid::new_v4().to_string(),
+            work_id: work_id.to_owned(),
+            assignment_id: Some(assignment_id.to_owned()),
+            run_id: None,
+            role: MessageRole::User,
+            content: content.to_owned(),
+            resource_ids: Vec::new(),
+            created_at: now,
+        };
+        sqlx::query(
+            "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
+             VALUES (?, ?, NULL, 'user', ?, ?)",
+        )
+        .bind(&message.id)
+        .bind(&message.work_id)
+        .bind(&message.content)
+        .bind(message.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(message)
+    }
+
     pub async fn begin_run(
         &self,
         work_id: &str,
