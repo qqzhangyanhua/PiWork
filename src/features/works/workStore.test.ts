@@ -104,6 +104,16 @@ const unusedClient: PiWorkClient = {
     throw new Error("unused");
   },
   drainAssignmentEventOutbox: async () => undefined,
+  listWorkAssignments: async () => [],
+  queueWorkInput: async () => {
+    throw new Error("unused");
+  },
+  confirmAssignmentRecovery: async () => {
+    throw new Error("unused");
+  },
+  interruptAndReplace: async () => {
+    throw new Error("unused");
+  },
   listenToWorkEvents: async () => () => undefined,
 };
 

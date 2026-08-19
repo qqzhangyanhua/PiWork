@@ -79,6 +79,10 @@ export type MockTauriClient = PiWorkClient & {
   startWork: Mock<PiWorkClient["startWork"]>;
   stopWork: Mock<PiWorkClient["stopWork"]>;
   drainAssignmentEventOutbox: Mock<PiWorkClient["drainAssignmentEventOutbox"]>;
+  listWorkAssignments: Mock<PiWorkClient["listWorkAssignments"]>;
+  queueWorkInput: Mock<PiWorkClient["queueWorkInput"]>;
+  confirmAssignmentRecovery: Mock<PiWorkClient["confirmAssignmentRecovery"]>;
+  interruptAndReplace: Mock<PiWorkClient["interruptAndReplace"]>;
   listenToWorkEvents: Mock<PiWorkClient["listenToWorkEvents"]>;
   emit(event: WorkEventEnvelope): void;
   seed(detail: WorkDetail): void;
@@ -604,6 +608,24 @@ export const createMockTauriClient = (): MockTauriClient => {
     },
   );
   const drainAssignmentEventOutbox = vi.fn(async () => undefined);
+  const listWorkAssignments: Mock<PiWorkClient["listWorkAssignments"]> = vi.fn(
+    async () => [],
+  );
+  const queueWorkInput: Mock<PiWorkClient["queueWorkInput"]> = vi.fn(
+    async (_workId, _input) => {
+      throw new Error("queueWorkInput is not mocked");
+    },
+  );
+  const confirmAssignmentRecovery: Mock<
+    PiWorkClient["confirmAssignmentRecovery"]
+  > = vi.fn(async (_assignmentId, _resume) => {
+    throw new Error("confirmAssignmentRecovery is not mocked");
+  });
+  const interruptAndReplace: Mock<PiWorkClient["interruptAndReplace"]> = vi.fn(
+    async (_workId, _input) => {
+      throw new Error("interruptAndReplace is not mocked");
+    },
+  );
 
   const client: MockTauriClient = {
     getRuntimeStatus,
@@ -631,6 +653,10 @@ export const createMockTauriClient = (): MockTauriClient => {
     startWork,
     stopWork,
     drainAssignmentEventOutbox,
+    listWorkAssignments,
+    queueWorkInput,
+    confirmAssignmentRecovery,
+    interruptAndReplace,
     listenToWorkEvents,
     unlisten,
     seed(detail) {

@@ -4,10 +4,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentInstanceSummary,
   AssemblyDiagnostic,
+  AssignmentSummary,
   CapabilityPackSummary,
   CreateWorkInput,
   ImportResourcesInput,
+  InterruptWorkInput,
   ProjectFileSummary,
+  QueueWorkInput,
   ResourceSummary,
   ResourceThumbnail,
   RuntimeStatus,
@@ -98,6 +101,16 @@ export type PiWorkClient = {
   ): Promise<StartWorkOutput>;
   stopWork(workId: string): Promise<WorkDetail>;
   drainAssignmentEventOutbox(): Promise<void>;
+  listWorkAssignments(workId: string): Promise<AssignmentSummary[]>;
+  queueWorkInput(workId: string, input: QueueWorkInput): Promise<StartWorkOutput>;
+  confirmAssignmentRecovery(
+    assignmentId: string,
+    resume: boolean,
+  ): Promise<AssignmentSummary>;
+  interruptAndReplace(
+    workId: string,
+    input: InterruptWorkInput,
+  ): Promise<StartWorkOutput>;
   listenToWorkEvents(
     handler: (event: WorkEventEnvelope) => void,
   ): Promise<UnlistenFn>;
@@ -149,6 +162,17 @@ export const tauriClient: PiWorkClient = {
   stopWork: (workId) => invoke<WorkDetail>("stop_work", { workId }),
   drainAssignmentEventOutbox: () =>
     invoke<void>("drain_assignment_event_outbox"),
+  listWorkAssignments: (workId) =>
+    invoke<AssignmentSummary[]>("list_work_assignments", { workId }),
+  queueWorkInput: (workId, input) =>
+    invoke<StartWorkOutput>("queue_work_input", { workId, input }),
+  confirmAssignmentRecovery: (assignmentId, resume) =>
+    invoke<AssignmentSummary>("confirm_assignment_recovery", {
+      assignmentId,
+      resume,
+    }),
+  interruptAndReplace: (workId, input) =>
+    invoke<StartWorkOutput>("interrupt_and_replace", { workId, input }),
   listenToWorkEvents: (handler) =>
     listen<WorkEventEnvelope>("piwork://work-event", ({ payload }) =>
       handler(payload),
