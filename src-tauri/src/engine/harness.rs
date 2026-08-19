@@ -202,7 +202,7 @@ impl EngineHarness {
             .mark_running(&assignment.id, &run.id, &session.id, &runtime_owner, Utc::now())
             .await?;
 
-        let mut sequence = 1_u32;
+        let mut sequence = self.work_repository.next_run_sequence(&run.id).await?;
         let mut previous_event_id: Option<String> = None;
         let mut terminal: Option<(String, Vec<String>, Vec<String>, Vec<String>)> = None;
         let mut failed: Option<String> = None;

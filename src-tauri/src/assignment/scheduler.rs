@@ -16,7 +16,10 @@ use tokio::sync::{mpsc, Mutex};
 use crate::{
     agent::repository::AgentRepository,
     assignment::{
-        queue::{QueueClaim, QueueCompletion, QueueItem, QueueLimits, QueueOutcome, WorkQueue},
+        queue::{
+            QueueClaim, QueueCompletion, QueueInput, QueueItem, QueueLimits, QueueOutcome,
+            WorkQueue,
+        },
         repository::AssignmentRepository,
     },
     domain::assignment::AssignmentSummary,
@@ -204,9 +207,7 @@ impl AssignmentScheduler {
             .await?
             .ok_or_else(|| AppError::work_not_found(&assignment.work_id))?;
 
-        self.work_repository
-            .set_work_status(&work.summary.id, crate::domain::work::WorkStatus::Running)
-            .await?;
+        self.ensure_work_running(&work.summary.id).await;
 
         let request = AssignmentExecutionRequest {
             assignment: assignment.clone(),
@@ -224,6 +225,23 @@ impl AssignmentScheduler {
         self.harness.execute(request).await
     }
 
+    async fn ensure_work_running(&self, work_id: &str) {
+        use crate::domain::work::WorkStatus;
+        let Ok(Some(work)) = self.work_repository.get(work_id).await else {
+            return;
+        };
+        match work.summary.status {
+            WorkStatus::Running => {}
+            WorkStatus::Queued => {
+                let _ = self.work_repository.set_work_status(work_id, WorkStatus::Running).await;
+            }
+            _ => {
+                let _ = self.work_repository.set_work_status(work_id, WorkStatus::Queued).await;
+                let _ = self.work_repository.set_work_status(work_id, WorkStatus::Running).await;
+            }
+        }
+    }
+
     async fn release_claim(
         &self,
         queue: &Arc<Mutex<WorkQueue>>,
@@ -231,7 +249,7 @@ impl AssignmentScheduler {
         outcome: Result<AssignmentExecutionOutcome, AppError>,
     ) {
         let now = Utc::now();
-        let queue_outcome = match outcome {
+        let queue_outcome = match &outcome {
             Ok(AssignmentExecutionOutcome::Stopped) => QueueOutcome::Interrupted,
             Ok(AssignmentExecutionOutcome::Completed { .. })
             | Ok(AssignmentExecutionOutcome::Failed { .. })
@@ -244,6 +262,21 @@ impl AssignmentScheduler {
             outcome: queue_outcome,
         };
         let _ = queue.lock().await.release(completion);
+        self.reflect_work_terminal(&claim.work_id, &outcome).await;
+    }
+
+    async fn reflect_work_terminal(
+        &self,
+        work_id: &str,
+        outcome: &Result<AssignmentExecutionOutcome, AppError>,
+    ) {
+        use crate::domain::work::WorkStatus;
+        let target = match outcome {
+            Ok(AssignmentExecutionOutcome::Completed { .. }) => WorkStatus::Completed,
+            Ok(AssignmentExecutionOutcome::Stopped) => WorkStatus::Stopped,
+            Ok(AssignmentExecutionOutcome::Failed { .. }) | Err(_) => WorkStatus::Failed,
+        };
+        let _ = self.work_repository.set_work_status(work_id, target).await;
     }
 }
 
@@ -255,7 +288,10 @@ fn queue_item(assignment: &AssignmentSummary) -> QueueItem {
         created_at: assignment.created_at,
         not_before: assignment.not_before.unwrap_or(assignment.created_at),
         retry_count: assignment.attempt_count,
-        inputs: Vec::new(),
+        inputs: vec![QueueInput {
+            id: assignment.id.clone(),
+            created_at: assignment.created_at,
+        }],
     }
 }
 

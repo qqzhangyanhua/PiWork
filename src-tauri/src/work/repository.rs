@@ -672,6 +672,23 @@ impl WorkRepository {
         Ok(())
     }
 
+    /// Returns the next sequence a Run-scoped event must carry (one past the
+    /// current maximum), or 1 for a fresh Run.
+    pub async fn next_run_sequence(&self, run_id: &str) -> Result<u32, AppError> {
+        let current = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM events WHERE run_id = ?",
+        )
+        .bind(run_id)
+        .fetch_one(&self.pool)
+        .await?
+        .unwrap_or(0);
+        let next = current
+            .checked_add(1)
+            .filter(|value| *value <= i64::from(u32::MAX))
+            .ok_or_else(|| AppError::invalid_input("sequence", "event sequence limit exceeded"))?;
+        Ok(u32::try_from(next).expect("bounded sequence"))
+    }
+
     /// Persists one engine-emitted event under an already-running Run without
     /// advancing Work or Run status. Assignment-aware execution owns terminal
     /// transitions through `AssignmentRepository`, so this journal must not
