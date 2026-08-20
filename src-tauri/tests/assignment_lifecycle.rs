@@ -1689,6 +1689,121 @@ async fn repository_mark_running_rejects_an_old_attempt_even_if_its_run_looks_qu
 }
 
 #[tokio::test]
+async fn repository_startup_failure_retries_then_dead_letters_and_never_strands() {
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let sink = Arc::new(RecordingSink::default());
+    let repository = AssignmentRepository::with_event_sink(pool.clone(), sink.clone());
+    seed_work(&pool, "work-startup-fail").await;
+    let mut input = accept_input("work-startup-fail", "Startup failure");
+    input.max_attempts = 2;
+    let max_attempts = input.max_attempts;
+    let assignment = repository.accept(input).await.unwrap();
+
+    // Each startup failure happens while the Assignment is claimed and its Run
+    // is still queued (the engine never started).
+    let mut claim_at = Utc::now();
+    for attempt in 1..=max_attempts {
+        repository
+            .claim(&assignment.id, "owner", claim_at)
+            .await
+            .unwrap();
+        let run = repository
+            .begin_attempt(&assignment.id, "pi", "model")
+            .await
+            .unwrap();
+        let finalized = repository
+            .fail_startup_attempt(
+                &assignment.id,
+                &run.id,
+                "session-startup",
+                "owner",
+                "engine failed to start",
+                claim_at,
+                Duration::from_secs(1),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM runs WHERE id = ?")
+                .bind(&run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "failed",
+            "startup-failed Run must leave a durable failed row"
+        );
+        if attempt < max_attempts {
+            assert_eq!(finalized.status, AssignmentStatus::Queued);
+            assert_eq!(
+                finalized.last_error.as_deref(),
+                Some("engine failed to start")
+            );
+            assert!(
+                finalized.next_attempt_at.is_some(),
+                "retry must be scheduled after a startup failure"
+            );
+            // Advance past the scheduled retry before the next claim.
+            claim_at = finalized.next_attempt_at.unwrap() + chrono::Duration::seconds(1);
+        } else {
+            assert_eq!(finalized.status, AssignmentStatus::DeadLetter);
+        }
+    }
+
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM events WHERE work_id = ? ORDER BY rowid")
+            .bind("work-startup-fail")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let payloads: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_str::<serde_json::Value>(row)
+                .unwrap()
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned()
+        })
+        .collect();
+    let failed = payloads
+        .iter()
+        .filter(|kind| kind.as_str() == "assignmentFailed")
+        .count();
+    let retried = payloads
+        .iter()
+        .filter(|kind| kind.as_str() == "assignmentRetryScheduled")
+        .count();
+    let dead_lettered = payloads
+        .iter()
+        .filter(|kind| kind.as_str() == "assignmentDeadLettered")
+        .count();
+    assert_eq!(
+        failed, 2,
+        "every startup failure journals assignmentFailed: {payloads:?}"
+    );
+    assert_eq!(
+        retried, 1,
+        "the first startup failure schedules a retry: {payloads:?}"
+    );
+    assert_eq!(
+        dead_lettered, 1,
+        "the exhausted startup failure dead-letters: {payloads:?}"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM assignments WHERE id = ?")
+            .bind(&assignment.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "dead_letter",
+        "the Assignment must never stay claimed after startup failures"
+    );
+}
+
+#[tokio::test]
 async fn repository_retry_backoff_and_dead_letter_respect_attempt_limit() {
     let temporary = tempfile::tempdir().unwrap();
     let database = Database::open(temporary.path().join("retry.db"))

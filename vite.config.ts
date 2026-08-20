@@ -8,6 +8,11 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      // Cargo rebuilds churn src-tauri/target during `tauri dev`; watching it
+      // exhausts the filesystem watcher on Windows.
+      ignored: ["**/src-tauri/target/**", "**/binaries/pi-sidecar/node_modules/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_ENV_"],
   test: {

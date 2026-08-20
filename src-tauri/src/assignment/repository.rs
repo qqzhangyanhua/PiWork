@@ -816,6 +816,145 @@ impl AssignmentRepository {
         Ok(assignment.summary)
     }
 
+    /// Finalizes an Assignment whose engine failed before the Run ever started
+    /// (Assignment `claimed`, Run `queued`). Applies the same retry policy as a
+    /// normal failure — retry with backoff while attempts remain, otherwise
+    /// dead-letter — so a startup failure is journaled and never strands a
+    /// claimed Assignment or a queued Run.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fail_startup_attempt(
+        &self,
+        assignment_id: &str,
+        run_id: &str,
+        session_id: &str,
+        runtime_owner: &str,
+        error: &str,
+        now: DateTime<Utc>,
+        base: Duration,
+        max: Duration,
+    ) -> Result<AssignmentSummary, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let run_id = validate_id("runId", run_id)?;
+        let session_id = validate_label("sessionId", session_id)?;
+        let runtime_owner = validate_label("runtimeOwner", runtime_owner)?;
+        let error = validate_text("error", error)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut assignment = load_assignment(&mut transaction, &assignment_id).await?;
+        let run = load_run(&mut transaction, &run_id).await?;
+        validate_active_identity(&assignment, &run, &runtime_owner, None)?;
+        if assignment.status != AssignmentStatus::Claimed || run.status != RunStatus::Queued {
+            return Err(invalid_assignment_state(
+                "assignment startup attempt is not claimed/queued",
+            ));
+        }
+        sqlx::query(
+            "UPDATE runs SET status = 'failed', completed_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(&run_id)
+        .execute(&mut *transaction)
+        .await?;
+        let attempts_remain = assignment.attempt_count < assignment.max_attempts;
+        if attempts_remain {
+            let delay = super::state_machine::retry_delay(
+                assignment.attempt_count,
+                base,
+                max,
+                stable_seed(&assignment.id),
+            );
+            let chrono_delay = chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::MAX);
+            let next_attempt_at = now
+                .checked_add_signed(chrono_delay)
+                .unwrap_or(DateTime::<Utc>::MAX_UTC);
+            sqlx::query("UPDATE assignments SET status = 'queued', runtime_owner_id = NULL, claimed_at = NULL, started_at = NULL, completed_at = NULL, last_error = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?")
+                .bind(&error)
+                .bind(next_attempt_at)
+                .bind(now)
+                .bind(&assignment_id)
+                .execute(&mut *transaction)
+                .await?;
+            assignment.status = AssignmentStatus::Queued;
+            assignment.claimed_at = None;
+            assignment.last_error = Some(error.clone());
+            assignment.next_attempt_at = Some(next_attempt_at);
+            assignment.updated_at = now;
+            assignment_event(
+                &mut transaction,
+                &assignment,
+                Some(&run_id),
+                Some(session_id.clone()),
+                now,
+                WorkEventPayload::AssignmentFailed {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    agent_session_id: session_id.clone(),
+                    error: error.clone(),
+                },
+            )
+            .await?;
+            assignment_event(
+                &mut transaction,
+                &assignment,
+                Some(&run_id),
+                Some(session_id.clone()),
+                now,
+                WorkEventPayload::AssignmentRetryScheduled {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    attempt_count: assignment.attempt_count,
+                    next_attempt_at,
+                    reason: error,
+                },
+            )
+            .await?;
+        } else {
+            sqlx::query("UPDATE assignments SET status = 'dead_letter', last_error = ?, completed_at = ?, updated_at = ? WHERE id = ?")
+                .bind(&error)
+                .bind(now)
+                .bind(now)
+                .bind(&assignment_id)
+                .execute(&mut *transaction)
+                .await?;
+            assignment.status = AssignmentStatus::DeadLetter;
+            assignment.last_error = Some(error.clone());
+            assignment.completed_at = Some(now);
+            assignment.updated_at = now;
+            assignment_event(
+                &mut transaction,
+                &assignment,
+                Some(&run_id),
+                Some(session_id.clone()),
+                now,
+                WorkEventPayload::AssignmentFailed {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    agent_session_id: session_id.clone(),
+                    error: error.clone(),
+                },
+            )
+            .await?;
+            assignment_event(
+                &mut transaction,
+                &assignment,
+                Some(&run_id),
+                Some(session_id.clone()),
+                now,
+                WorkEventPayload::AssignmentDeadLettered {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    attempt_count: assignment.attempt_count,
+                    error,
+                },
+            )
+            .await?;
+            resume_parent_if_dependencies_terminal(&mut transaction, &assignment).await?;
+        }
+        transaction.commit().await?;
+        self.drain_after_commit().await;
+        Ok(assignment.summary)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn dead_letter(
         &self,

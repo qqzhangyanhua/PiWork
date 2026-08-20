@@ -223,10 +223,14 @@ impl EngineHarness {
                     match result {
                         Ok(session_ref) => break session_ref,
                         Err(error) => {
-                            let _ = self
-                                .assignment_repository
-                                .mark_ready(&session.id, &run.id)
-                                .await;
+                            self.finalize_startup_failure(
+                                &session,
+                                &run,
+                                &assignment,
+                                &runtime_owner,
+                                &format!("engine failed to start: {error}"),
+                            )
+                            .await;
                             return Err(AppError::engine_start_failed_with_reason(
                                 &work.id,
                                 format!("engine failed to start: {error}"),
@@ -235,10 +239,14 @@ impl EngineHarness {
                     }
                 }
                 _ = tokio::time::sleep(self.startup_timeout) => {
-                    let _ = self
-                        .assignment_repository
-                        .mark_ready(&session.id, &run.id)
-                        .await;
+                    self.finalize_startup_failure(
+                        &session,
+                        &run,
+                        &assignment,
+                        &runtime_owner,
+                        "engine startup timed out",
+                    )
+                    .await;
                     return Err(AppError::engine_start_failed_with_reason(
                         &work.id,
                         "engine startup timed out",
@@ -250,17 +258,25 @@ impl EngineHarness {
                             buffered.push_back(event);
                         }
                         Some(_) => {
-                            let _ = self
-                                .assignment_repository
-                                .mark_ready(&session.id, &run.id)
-                                .await;
+                            self.finalize_startup_failure(
+                                &session,
+                                &run,
+                                &assignment,
+                                &runtime_owner,
+                                "engine emitted too many events before session attachment",
+                            )
+                            .await;
                             return Err(AppError::engine("engine emitted too many events before session attachment"));
                         }
                         None => {
-                            let _ = self
-                                .assignment_repository
-                                .mark_ready(&session.id, &run.id)
-                                .await;
+                            self.finalize_startup_failure(
+                                &session,
+                                &run,
+                                &assignment,
+                                &runtime_owner,
+                                "engine event stream closed before startup",
+                            )
+                            .await;
                             return Err(AppError::engine_start_failed_with_reason(
                                 &work.id,
                                 "engine event stream closed before startup",
@@ -365,6 +381,35 @@ impl EngineHarness {
                 .await?;
             Ok(AssignmentExecutionOutcome::Failed { message })
         }
+    }
+
+    /// Marks the claimed session ready and finalizes a startup failure through
+    /// the retry/dead-letter policy so the Assignment never stays claimed.
+    async fn finalize_startup_failure(
+        &self,
+        session: &AgentSessionSummary,
+        run: &RunSummary,
+        assignment: &AssignmentSummary,
+        runtime_owner: &str,
+        message: &str,
+    ) {
+        let _ = self
+            .assignment_repository
+            .mark_ready(&session.id, &run.id)
+            .await;
+        let _ = self
+            .assignment_repository
+            .fail_startup_attempt(
+                &assignment.id,
+                &run.id,
+                &session.id,
+                runtime_owner,
+                message,
+                Utc::now(),
+                RETRY_BASE,
+                RETRY_MAX,
+            )
+            .await;
     }
 
     /// Persists a failed attempt: schedule a retry while attempts remain,
