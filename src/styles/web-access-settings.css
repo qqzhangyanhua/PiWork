@@ -225,7 +225,7 @@
   .web-provider-row__credential { display: none; }
 }
 
-@media (max-width: 820px) {
+@media (max-width: 1050px) {
   .web-access-routing__controls { grid-template-columns: 1fr 1fr; }
   .web-access-fetch-toggle { grid-column: 1 / -1; }
   .web-provider-row { grid-template-columns: minmax(0, 1fr) auto; }
