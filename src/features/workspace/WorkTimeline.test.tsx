@@ -505,4 +505,61 @@ describe("WorkTimeline", () => {
     expect(screen.queryByText(/completed this Run/u)).not.toBeInTheDocument();
     expect(container.querySelector(".timeline-delivery")).toBeNull();
   });
+
+  it("merges pre-run assignment activity into its completed Run", () => {
+    const assignmentId = "assignment-1";
+    const withAssignment = (
+      envelope: WorkEventEnvelope,
+      eventId: string,
+    ): WorkEventEnvelope => ({
+      ...envelope,
+      assignmentId,
+      eventId,
+    });
+
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          withAssignment(
+            {
+              ...event(1, {
+                type: "assignmentQueued",
+                assignmentId,
+                assignedAgentId: "agent-instance:lead",
+                title: "Respond to the user",
+                priority: 10,
+              }),
+              runId: null,
+            },
+            "assignment-queued",
+          ),
+          withAssignment(
+            event(1, {
+              type: "assignmentCompleted",
+              assignmentId,
+              agentInstanceId: "agent-instance:lead",
+              agentSessionId: "session-1",
+              resultSummary: "done",
+            }),
+            "assignment-completed",
+          ),
+          withAssignment(
+            event(2, {
+              type: "runCompleted",
+              summary: "done",
+              artifacts: [],
+              validation: [],
+              limitations: [],
+            }),
+            "run-completed",
+          ),
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".execution-progress")).toHaveLength(1);
+    expect(screen.queryByText("Pi 正在准备执行")).not.toBeInTheDocument();
+    expect(screen.getByText("Pi 已完成")).toBeInTheDocument();
+  });
 });

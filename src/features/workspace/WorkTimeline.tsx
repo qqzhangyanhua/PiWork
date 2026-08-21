@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import { appErrorMessageKey, appErrorMessageValues } from "../../domain/appError";
 import {
   isWorkEventTimelineItem,
+  timelineItemKey,
   workEventSequenceKey,
   type AppError,
   type TimelineItem,
@@ -49,12 +50,32 @@ const formatTurnTimestamp = (value: string, locale: string) => {
 };
 
 const groupByRun = (timeline: TimelineItem[]) => {
+  const identityByIndex = new Array<string>(timeline.length);
+  const nextRunByAssignment = new Map<string, string>();
+
+  // Queue and claim events precede the Run they prepare. Link them to the
+  // nearest later attempt without collapsing retries that share an Assignment.
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (!item) continue;
+    if (!isWorkEventTimelineItem(item)) {
+      identityByIndex[index] = item.runId;
+      continue;
+    }
+
+    const linkedRun = item.assignmentId
+      ? nextRunByAssignment.get(item.assignmentId)
+      : undefined;
+    identityByIndex[index] = item.runId ?? linkedRun ?? workEventSequenceKey(item);
+    if (item.assignmentId && item.runId) {
+      nextRunByAssignment.set(item.assignmentId, item.runId);
+    }
+  }
+
   const groups: ConversationTurnGroup[] = [];
   const byRun = new Map<string, ConversationTurnGroup>();
-  for (const item of timeline) {
-    const identity = isWorkEventTimelineItem(item)
-      ? workEventSequenceKey(item)
-      : item.runId;
+  for (const [index, item] of timeline.entries()) {
+    const identity = identityByIndex[index] ?? timelineItemKey(item);
     let group = byRun.get(identity);
     if (!group) {
       group = { key: `run:${identity}`, items: [] };
