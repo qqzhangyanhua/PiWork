@@ -11,7 +11,9 @@ import { appErrorMessageKey, formatAppErrorDiagnostics } from "../../domain/appE
 import { AnimatedSurfaceState } from "../../components/motion/AnimatedSurfaceState";
 import { WorkSidebar, type WorkspaceView } from "../works/WorkSidebar";
 import { AgentCenterPage } from "../agent-center/AgentCenterPage";
-import { buildCapabilityPrompt, type AgentCapability } from "../agent-center/agentCapabilities";
+import { ExtensionMarketplacePage } from "../extensions/ExtensionMarketplacePage";
+import { ConnectorPage } from "../connectors/ConnectorPage";
+import { NotificationCenter } from "../notifications/NotificationCenter";
 import { useWorkEvents } from "../works/useWorkEvents";
 import { WorkStoreProvider, useWorkStore } from "../works/WorkStoreProvider";
 import { SettingsPage } from "../settings/SettingsPage";
@@ -34,6 +36,10 @@ import "../../styles/workspace.css";
 import "../../styles/linear-fidelity.css";
 import "../../styles/dashboard.css";
 import "../../styles/agent-center.css";
+import "../../styles/extensions.css";
+import "../../styles/web-access-settings.css";
+import "../../styles/connectors.css";
+import "../../styles/notifications.css";
 
 function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, onModelConfigured, pickProjectDirectory, pickAttachments }: { client: PiWorkClient; initialView: WorkspaceView; modelConfiguration: ModelConfigurationSummary | null; modelLabel: string; onModelConfigured?(configuration: ModelConfigurationSummary): void; pickProjectDirectory: PickProjectDirectory; pickAttachments: PickAttachments }) {
   const { t } = useTranslation();
@@ -126,14 +132,6 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
     setHomeDraft(({ revision }) => ({ revision: revision + 1, rootPath, prompt: undefined }));
     setActiveView("home");
   };
-  const startCapability = (capability: AgentCapability) => {
-    setHomeDraft(({ revision, rootPath }) => ({
-      revision: revision + 1,
-      rootPath: selectedWork?.rootPath ?? rootPath,
-      prompt: buildCapabilityPrompt(capability),
-    }));
-    setActiveView("home");
-  };
   const defaultRootPath = selectedWork?.rootPath ?? Object.values(works)[0]?.rootPath;
   useEffect(() => {
     const openSettings = (event: KeyboardEvent) => {
@@ -163,13 +161,16 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
         activeView={activeView}
         newWorkTriggerRef={newWorkTriggerRef}
         onAgentsRequest={() => setActiveView("agents")}
+        onConnectorsRequest={() => setActiveView("connectors")}
         onCreateRequest={openHomeDraft}
+        onPluginsRequest={() => setActiveView("plugins")}
         onSettingsRequest={() => setActiveView("settings")}
         onWorkSelected={() => {
           setActiveView("detail");
         }}
         settingsTriggerRef={settingsTriggerRef}
       />
+      <NotificationCenter client={client} onOpenConnectors={() => setActiveView("connectors")} />
       {!hydrated && loading ? (
         <AnimatedSurfaceState
           aria-label={t("state.loading")}
@@ -194,7 +195,6 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
         <AgentCenterPage
           client={client}
           currentWorkId={selectedWork?.id}
-          onStartCatalogCapability={startCapability}
         />
       ) : activeView === "settings" ? (
         <SettingsPage
@@ -202,6 +202,10 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
           configuration={modelConfiguration}
           onModelConfigured={(configuration) => onModelConfigured?.(configuration)}
         />
+      ) : activeView === "plugins" ? (
+        <ExtensionMarketplacePage client={client} />
+      ) : activeView === "connectors" ? (
+        <ConnectorPage client={client} works={Object.values(works)} />
       ) : activeView === "all" ? (
         <AllWorks works={Object.values(works)} onWorkSelected={(work) => openWork(work.id)} />
       ) : activeView === "home" || !selectedWork ? (

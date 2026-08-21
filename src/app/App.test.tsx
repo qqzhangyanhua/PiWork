@@ -26,7 +26,8 @@ describe("App", () => {
     const team = await client.getWorkTeam(work.summary.id);
 
     expect(instances).toHaveLength(4);
-    expect(packs.filter(({ status }) => status === "catalog_only")).toHaveLength(96);
+    expect(packs).toHaveLength(4);
+    expect(packs.every(({ status }) => status === "executable")).toBe(true);
     expect(packs.filter(({ status }) => status === "executable")).toMatchObject([
       {
         id: "capability-pack:lead-coordination:v1",
@@ -147,15 +148,6 @@ describe("App", () => {
 
     await expect(client.validateAgentAssembly({
       ...base,
-      capabilityPackIds: ["catalog-capability:001"],
-    })).resolves.toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        code: "not_executable",
-        capabilityPackId: "catalog-capability:001",
-      }),
-    ]));
-    await expect(client.validateAgentAssembly({
-      ...base,
       capabilityPackIds: ["capability-pack:source-research:v1"],
     })).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -187,10 +179,6 @@ describe("App", () => {
       ],
     })).rejects.toThrow("Capability pack ids must be unique");
 
-    await expect(client.saveAgentCopy({
-      ...base,
-      capabilityPackIds: ["catalog-capability:001"],
-    })).rejects.toThrow("is not executable");
     await expect(client.saveAgentCopy({
       ...base,
       capabilityPackIds: ["unknown-pack"],

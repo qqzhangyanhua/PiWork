@@ -6,6 +6,7 @@ import {
   Cpu,
   Database,
   Info,
+  Globe2,
   Plus,
   RefreshCw,
   Settings,
@@ -16,6 +17,9 @@ import { useTranslation } from "react-i18next";
 import type { ModelConfigurationSummary, ModelProvider, PiWorkClient } from "../../app/tauriClient";
 import { ModelConnectionEditor } from "../model-setup/ModelConnectionEditor";
 import { ProviderLogo } from "../model-setup/ProviderLogo";
+import { WebAccessSettingsPanel } from "./WebAccessSettingsPanel";
+
+type SettingsSection = "models" | "web-access";
 
 const providerLabels: Record<ModelProvider, string> = {
   openai: "OpenAI",
@@ -26,15 +30,15 @@ const providerLabels: Record<ModelProvider, string> = {
   custom: "OpenAI-compatible",
 };
 
-function NavigationItem({ icon, label, current = false }: { icon: ReactNode; label: string; current?: boolean }) {
+function NavigationItem({ icon, label, current = false, onClick }: { icon: ReactNode; label: string; current?: boolean; onClick?(): void }) {
   return (
-    <button aria-current={current ? "page" : undefined} className="settings-navigation__item" disabled={!current} type="button">
+    <button aria-current={current ? "page" : undefined} className="settings-navigation__item" disabled={!current && !onClick} onClick={onClick} type="button">
       {icon}<span>{label}</span>
     </button>
   );
 }
 
-function SettingsNavigation() {
+function SettingsNavigation({ section, onSectionChange }: { section: SettingsSection; onSectionChange(section: SettingsSection): void }) {
   const { t } = useTranslation();
   return (
     <nav aria-label={t("settings.settingsNavigation")} className="settings-navigation">
@@ -45,7 +49,8 @@ function SettingsNavigation() {
       </section>
       <section>
         <h2>{t("settings.modelRuntimeGroup")}</h2>
-        <NavigationItem current icon={<Cpu aria-hidden="true" size={16} />} label={t("settings.modelRuntimeNav")} />
+        <NavigationItem current={section === "models"} icon={<Cpu aria-hidden="true" size={16} />} label={t("settings.modelRuntimeNav")} onClick={() => onSectionChange("models")} />
+        <NavigationItem current={section === "web-access"} icon={<Globe2 aria-hidden="true" size={16} />} label={t("settings.webAccessNav")} onClick={() => onSectionChange("web-access")} />
         <NavigationItem icon={<Boxes aria-hidden="true" size={16} />} label={t("settings.localResources")} />
       </section>
       <section>
@@ -118,6 +123,7 @@ export function SettingsPage({
   const [adding, setAdding] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [section, setSection] = useState<SettingsSection>("models");
 
   const load = async () => {
     setLoading(true);
@@ -174,7 +180,10 @@ export function SettingsPage({
       </header>
 
       <div className="settings-page__layout">
-        <SettingsNavigation />
+        <SettingsNavigation onSectionChange={setSection} section={section} />
+        {section === "web-access" ? (
+          <WebAccessSettingsPanel client={client} />
+        ) : (
         <section aria-labelledby="settings-model-runtime-title" className="model-settings-panel">
           <header className="model-settings-panel__header">
             <div>
@@ -214,6 +223,7 @@ export function SettingsPage({
             </>
           )}
         </section>
+        )}
       </div>
     </section>
   );

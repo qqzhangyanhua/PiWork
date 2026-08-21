@@ -31,7 +31,6 @@ export function MemberDetailDrawer({
   onAddToWork,
   onClose,
   onSaved,
-  requestedCapabilityPackId,
   returnFocusTo,
 }: {
   capabilityPacks: readonly CapabilityPackSummary[];
@@ -42,7 +41,6 @@ export function MemberDetailDrawer({
   onAddToWork(member: AgentInstanceSummary): Promise<AppError | null>;
   onClose(): void;
   onSaved(member: AgentInstanceSummary): void;
-  requestedCapabilityPackId?: string;
   returnFocusTo: HTMLButtonElement | null;
 }) {
   const { t } = useTranslation();
@@ -217,8 +215,7 @@ export function MemberDetailDrawer({
             capabilityPacks={capabilityPacks}
             client={client}
             onSaved={onSaved}
-            requestedCapabilityPackId={requestedCapabilityPackId}
-            source={member}
+          source={member}
           />
         </div>
 

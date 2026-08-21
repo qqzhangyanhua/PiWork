@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    agent::service::AgentService, assignment::service::AssignmentService, model::ModelService,
+    agent::service::AgentService, assignment::service::AssignmentService,
+    connectors::ConnectorService, extensions::ExtensionService, model::ModelService,
     resource::service::ResourceService, work::service::WorkService,
 };
 
@@ -11,6 +12,8 @@ pub struct AppState {
     resource_service: Option<Arc<ResourceService>>,
     agent_service: Arc<AgentService>,
     assignment_service: Option<Arc<AssignmentService>>,
+    extension_service: Option<Arc<ExtensionService>>,
+    connector_service: Option<Arc<ConnectorService>>,
 }
 
 impl AppState {
@@ -21,6 +24,8 @@ impl AppState {
             resource_service: None,
             agent_service,
             assignment_service: None,
+            extension_service: None,
+            connector_service: None,
         }
     }
 
@@ -35,6 +40,8 @@ impl AppState {
             resource_service: None,
             agent_service,
             assignment_service: None,
+            extension_service: None,
+            connector_service: None,
         }
     }
 
@@ -50,11 +57,23 @@ impl AppState {
             resource_service: Some(resource_service),
             agent_service,
             assignment_service: None,
+            extension_service: None,
+            connector_service: None,
         }
     }
 
     pub fn with_assignment_service(mut self, assignment_service: Arc<AssignmentService>) -> Self {
         self.assignment_service = Some(assignment_service);
+        self
+    }
+
+    pub fn with_extension_service(mut self, extension_service: Arc<ExtensionService>) -> Self {
+        self.extension_service = Some(extension_service);
+        self
+    }
+
+    pub fn with_connector_service(mut self, connector_service: Arc<ConnectorService>) -> Self {
+        self.connector_service = Some(connector_service);
         self
     }
 
@@ -82,5 +101,17 @@ impl AppState {
         self.assignment_service
             .as_ref()
             .expect("production AppState must include AssignmentService")
+    }
+
+    pub fn extension_service(&self) -> &Arc<ExtensionService> {
+        self.extension_service
+            .as_ref()
+            .expect("production AppState must include ExtensionService")
+    }
+
+    pub fn connector_service(&self) -> &Arc<ConnectorService> {
+        self.connector_service
+            .as_ref()
+            .expect("production AppState must include ConnectorService")
     }
 }

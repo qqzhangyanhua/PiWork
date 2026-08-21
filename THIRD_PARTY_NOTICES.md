@@ -24,3 +24,14 @@ direct scheduling indexes, and fail-closed validation. Attempt interruption is
 distinct from terminal Work cancellation. It does not include multi-Assignment
 batch claims, Buzz prompt formatting, retry jitter, drop-mode deduplication, or
 native-steer transport state.
+
+## Pi Web Access
+
+PiWork bundles `pi-web-access` version 0.24.0 as its built-in web search and
+content retrieval extension.
+
+Upstream: https://github.com/nicobailon/pi-web-access
+License: MIT
+Copyright 2025 Nico Bailon
+Complete license text: bundled at
+`pi-sidecar/builtin-extensions/pi-web-access/node_modules/pi-web-access/LICENSE`

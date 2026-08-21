@@ -23,7 +23,7 @@ use crate::{
         repository::AssignmentRepository,
     },
     collaboration::context::{ContextBuildInput, build_assignment_context},
-    domain::{agent::RoleKind, assignment::AssignmentSummary},
+    domain::{agent::RoleKind, assignment::AssignmentSummary, collaboration::ResultEnvelope},
     engine::{
         EngineAdapter, EngineInput,
         harness::{
@@ -241,7 +241,11 @@ impl AssignmentScheduler {
 
         self.ensure_work_running(&work.summary.id).await;
 
-        let message = build_engine_prompt(&agent, &work.summary, &assignment);
+        let dependency_results = self
+            .repository
+            .validated_dependency_results(&assignment.id)
+            .await?;
+        let message = build_engine_prompt(&agent, &work.summary, &assignment, dependency_results);
 
         let request = AssignmentExecutionRequest {
             assignment: assignment.clone(),
@@ -304,6 +308,7 @@ impl AssignmentScheduler {
         let queue_outcome = match &outcome {
             Ok(AssignmentExecutionOutcome::Stopped) => QueueOutcome::Interrupted,
             Ok(AssignmentExecutionOutcome::Completed { .. })
+            | Ok(AssignmentExecutionOutcome::Waiting { .. })
             | Ok(AssignmentExecutionOutcome::Failed { .. })
             | Err(_) => QueueOutcome::Completed,
         };
@@ -345,6 +350,7 @@ impl AssignmentScheduler {
         use crate::domain::work::WorkStatus;
         let target = match outcome {
             Ok(AssignmentExecutionOutcome::Completed { .. }) => WorkStatus::Completed,
+            Ok(AssignmentExecutionOutcome::Waiting { .. }) => WorkStatus::Waiting,
             Ok(AssignmentExecutionOutcome::Stopped) => WorkStatus::Stopped,
             Ok(AssignmentExecutionOutcome::Failed { .. }) | Err(_) => WorkStatus::Failed,
         };
@@ -373,6 +379,7 @@ fn build_engine_prompt(
     agent: &crate::domain::agent::AgentInstanceSummary,
     work: &crate::domain::work::WorkSummary,
     assignment: &AssignmentSummary,
+    dependency_results: Vec<ResultEnvelope>,
 ) -> String {
     let input = ContextBuildInput {
         is_lead: agent.definition.role_kind == RoleKind::Lead,
@@ -380,6 +387,7 @@ fn build_engine_prompt(
         capability_packs: agent.definition.capability_packs.clone(),
         work: work.clone(),
         assignment: assignment.clone(),
+        dependency_results,
         ..ContextBuildInput::default()
     };
     build_assignment_context(input).rendered_prompt

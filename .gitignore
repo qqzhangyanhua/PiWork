@@ -15,6 +15,10 @@ skills-lock.json
 # JavaScript
 /node_modules/
 **/node_modules/
+!/src-tauri/binaries/pi-sidecar/builtin-extensions/
+!/src-tauri/binaries/pi-sidecar/builtin-extensions/pi-web-access/
+!/src-tauri/binaries/pi-sidecar/builtin-extensions/pi-web-access/node_modules/
+!/src-tauri/binaries/pi-sidecar/builtin-extensions/pi-web-access/node_modules/**
 /dist/
 **/dist/
 /coverage/

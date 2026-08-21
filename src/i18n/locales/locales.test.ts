@@ -20,21 +20,15 @@ describe("workspace locale resources", () => {
     expect(chineseKeys).toEqual(englishKeys);
   });
 
-  it("names persistent teams, honest capability states and task drafting in both locales", () => {
-    expect(zhCN.agentCenter.views).toMatchObject({ team: "我的团队", library: "能力库" });
-    expect(en.agentCenter.views).toMatchObject({ team: "My Team", library: "Capability Library" });
-    expect(zhCN.agentCenter.capability.status).toEqual({
-      catalog_only: "目录能力",
-      executable: "可装载",
-      deprecated: "已停用",
-    });
-    expect(en.agentCenter.capability.status).toEqual({
-      catalog_only: "Catalog entry",
-      executable: "Installable",
-      deprecated: "Deprecated",
-    });
-    expect(zhCN.agentCenter.drawer.createDraft).toBe("创建任务草稿");
-    expect(en.agentCenter.drawer.createDraft).toBe("Create task draft");
+  it("keeps the team, marketplace, connectors, and web settings vocabulary aligned", () => {
+    expect(zhCN.agentCenter.team.title).toBe("我的团队");
+    expect(en.agentCenter.team.title).toBe("My Team");
+    expect(zhCN.sidebar.nav).toMatchObject({ plugins: "插件市场", connectors: "连接器" });
+    expect(en.sidebar.nav).toMatchObject({ plugins: "Plugin Marketplace", connectors: "Connectors" });
+    expect(zhCN.settings.webAccessNav).toBe("联网搜索");
+    expect(en.settings.webAccessNav).toBe("Web access");
+    expect(JSON.stringify(zhCN)).not.toContain("MAGIC FACTORY");
+    expect(JSON.stringify(en)).not.toContain("MAGIC FACTORY");
   });
 
   it("does not retain locale keys from the retired summarized log renderer", () => {

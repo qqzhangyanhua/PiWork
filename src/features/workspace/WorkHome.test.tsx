@@ -136,7 +136,6 @@ describe("WorkHome", () => {
   it("keeps not-yet-available modules as disabled controls rather than misleading live features", () => {
     renderHome();
 
-    expect(screen.getByRole("button", { name: "通知（即将推出）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "需求分析师（即将推出）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "智能体（即将推出）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "知识库（即将推出）" })).toBeDisabled();

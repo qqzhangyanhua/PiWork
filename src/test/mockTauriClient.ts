@@ -159,27 +159,6 @@ export const createMockTauriClient = (): MockTauriClient => {
     version: 1,
     status: "executable",
   }));
-  const catalogPacks: CapabilityPackSummary[] = Array.from({ length: 96 }, (_, index) => {
-    const sequence = String(index + 1).padStart(3, "0");
-    return {
-      id: `catalog-capability:${sequence}`,
-      catalogCapabilityId: `catalog-capability:${sequence}`,
-      name: `Catalog capability ${sequence}`,
-      description: "",
-      instructions: "",
-      inputSchema: {},
-      outputSchema: {},
-      procedure: {},
-      validationRubric: {},
-      requiredTools: [],
-      defaultPermissionScope: "read_only",
-      compatibleRoleTemplateIds: [],
-      requiredEngineCapabilities: [],
-      conflictsWithCapabilityPackIds: [],
-      version: 1,
-      status: "catalog_only",
-    };
-  });
   const agentInstances: AgentInstanceSummary[] = roleKinds.map((roleKind, index) => {
     const permission = roleKind === "engineer" || roleKind === "lead"
       ? "inherit_work" as const
@@ -222,7 +201,7 @@ export const createMockTauriClient = (): MockTauriClient => {
       updatedAt: now(0),
     };
   });
-  const capabilityPacks = [...executablePacks, ...catalogPacks];
+  const capabilityPacks = executablePacks;
   const permissionRank = (
     permission: AgentInstanceSummary["definition"]["defaultPermissionPolicy"],
   ) => {

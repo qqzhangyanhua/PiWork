@@ -70,6 +70,151 @@ export type SelectModelForConfigurationInput = {
   modelId: string;
 };
 
+export type ExtensionTrustTier = "builtin" | "verified" | "community";
+
+export type ExtensionSummary = {
+  packageId: string;
+  displayName: string;
+  description: string;
+  publisher: string;
+  trustTier: ExtensionTrustTier;
+  sourceKind: "bundled" | "npm";
+  installedVersion: string | null;
+  latestVersion: string;
+  lifecycleStatus: "available" | "installed" | "disabled" | "revoked" | "pending_removal";
+  builtin: boolean;
+  manifest: Record<string, unknown>;
+  permissions: Record<string, unknown>;
+  enabledAgentIds: string[];
+};
+
+export type CommunityExtensionSummary = {
+  packageId: string;
+  version: string;
+  description: string;
+  publisher: string;
+  npmUrl: string | null;
+  score: number;
+  executable: false;
+};
+
+export type WebSearchProviderSummary = {
+  providerId: string;
+  enabled: boolean;
+  endpoint: string | null;
+  credentialConfigured: boolean;
+};
+
+export type WebAccessSettingsSummary = {
+  enabled: boolean;
+  urlFetchEnabled: boolean;
+  defaultProvider: string | null;
+  fallbackProvider: string | null;
+  providers: WebSearchProviderSummary[];
+};
+
+export type SaveWebAccessSettingsInput = {
+  enabled: boolean;
+  urlFetchEnabled: boolean;
+  defaultProvider: string | null;
+  fallbackProvider: string | null;
+  providers: Array<{
+    providerId: string;
+    enabled: boolean;
+    endpoint: string | null;
+    apiKey?: string | null;
+    clearCredential?: boolean;
+  }>;
+};
+
+export type ConnectorPermission = "metadata" | "read_body" | "send";
+
+export type ConnectorWorkGrantSummary = {
+  workId: string;
+  permissions: ConnectorPermission[];
+};
+
+export type EmailConnectorSummary = {
+  id: string;
+  displayName: string;
+  emailAddress: string;
+  username: string;
+  preset: string;
+  imapHost: string;
+  imapPort: number;
+  smtpHost: string;
+  smtpPort: number;
+  enabled: boolean;
+  pollIntervalMinutes: 1 | 2 | 5 | 15;
+  healthStatus: "untested" | "healthy" | "degraded" | "error";
+  lastErrorCode: string | null;
+  lastCheckedAt: string | null;
+  lastPolledAt: string | null;
+  credentialConfigured: boolean;
+  grantedWorkIds: string[];
+  workGrants: ConnectorWorkGrantSummary[];
+};
+
+export type SaveEmailConnectorInput = {
+  id?: string | null;
+  displayName: string;
+  emailAddress: string;
+  username: string;
+  password?: string | null;
+  preset: string;
+  imapHost: string;
+  imapPort: number;
+  smtpHost: string;
+  smtpPort: number;
+  pollIntervalMinutes: 1 | 2 | 5 | 15;
+};
+
+export type ConnectorTestResult = {
+  imapOk: boolean;
+  smtpOk: boolean;
+  errorCode: string | null;
+};
+
+export type EmailMetadataSummary = {
+  connectionId: string;
+  folder: string;
+  uid: number;
+  messageId: string | null;
+  senderName: string | null;
+  senderAddress: string;
+  subject: string;
+  sentAt: string | null;
+  receivedAt: string | null;
+  flagsJson: string;
+  attachmentCount: number;
+  sizeBytes: number | null;
+};
+
+export type AppNotificationSummary = {
+  id: string;
+  category: "mail" | "approval" | "plugin" | "connector";
+  connectionId: string | null;
+  workId: string | null;
+  title: string;
+  summary: string;
+  action: Record<string, unknown>;
+  readAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+};
+
+export type PendingConnectorActionSummary = {
+  id: string;
+  connectionId: string;
+  workId: string;
+  runId: string;
+  actionType: "read_email_body" | "send_email";
+  preview: Record<string, unknown>;
+  status: "pending" | "approved" | "denied" | "expired" | "executed" | "failed";
+  expiresAt: string;
+  createdAt: string;
+};
+
 export type PiWorkClient = {
   getDefaultProjectDirectory?(): Promise<string>;
   getRuntimeStatus?(): Promise<RuntimeStatus>;
@@ -89,6 +234,36 @@ export type PiWorkClient = {
   validateAgentAssembly(input: SaveAgentAssemblyInput): Promise<AssemblyDiagnostic[]>;
   saveAgentCopy(input: SaveAgentAssemblyInput): Promise<AgentInstanceSummary>;
   addWorkMember(workId: string, agentInstanceId: string): Promise<WorkTeamSummary>;
+  listExtensions?(): Promise<ExtensionSummary[]>;
+  searchCommunityExtensions?(query: string): Promise<CommunityExtensionSummary[]>;
+  setExtensionAgentEnabled?(
+    packageId: string,
+    agentInstanceId: string,
+    enabled: boolean,
+    toolAllowlist?: string[],
+  ): Promise<ExtensionSummary>;
+  getWebAccessSettings?(): Promise<WebAccessSettingsSummary>;
+  saveWebAccessSettings?(input: SaveWebAccessSettingsInput): Promise<WebAccessSettingsSummary>;
+  listEmailConnectors?(): Promise<EmailConnectorSummary[]>;
+  saveEmailConnector?(input: SaveEmailConnectorInput): Promise<EmailConnectorSummary>;
+  testEmailConnector?(input: SaveEmailConnectorInput): Promise<ConnectorTestResult>;
+  setEmailConnectorEnabled?(connectionId: string, enabled: boolean): Promise<EmailConnectorSummary>;
+  deleteEmailConnector?(connectionId: string): Promise<void>;
+  setConnectorWorkGrant?(
+    connectionId: string,
+    workId: string,
+    enabled: boolean,
+    permissions: ConnectorPermission[],
+  ): Promise<EmailConnectorSummary>;
+  listEmailMetadata?(connectionId: string, query?: string, limit?: number): Promise<EmailMetadataSummary[]>;
+  listAppNotifications?(limit?: number): Promise<AppNotificationSummary[]>;
+  markAppNotificationRead?(notificationId: string): Promise<void>;
+  clearAppNotification?(notificationId: string): Promise<void>;
+  listPendingConnectorActions?(workId?: string | null): Promise<PendingConnectorActionSummary[]>;
+  resolvePendingConnectorAction?(actionId: string, approve: boolean): Promise<PendingConnectorActionSummary>;
+  listenToAppNotifications?(
+    handler: (notification: AppNotificationSummary) => void,
+  ): Promise<UnlistenFn>;
   listProjectFiles(rootPath: string): Promise<ProjectFileSummary[]>;
   importResources(input: ImportResourcesInput): Promise<ResourceSummary[]>;
   listWorkResources(workId: string): Promise<ResourceSummary[]>;
@@ -150,6 +325,48 @@ export const tauriClient: PiWorkClient = {
   saveAgentCopy: (input) => invoke<AgentInstanceSummary>("save_agent_copy", { input }),
   addWorkMember: (workId, agentInstanceId) =>
     invoke<WorkTeamSummary>("add_work_member", { workId, agentInstanceId }),
+  listExtensions: () => invoke<ExtensionSummary[]>("list_extensions"),
+  searchCommunityExtensions: (query) =>
+    invoke<CommunityExtensionSummary[]>("search_community_extensions", { query }),
+  setExtensionAgentEnabled: (packageId, agentInstanceId, enabled, toolAllowlist = []) =>
+    invoke<ExtensionSummary>("set_extension_agent_enabled", {
+      packageId,
+      agentInstanceId,
+      enabled,
+      toolAllowlist,
+    }),
+  getWebAccessSettings: () =>
+    invoke<WebAccessSettingsSummary>("get_web_access_settings"),
+  saveWebAccessSettings: (input) =>
+    invoke<WebAccessSettingsSummary>("save_web_access_settings", { input }),
+  listEmailConnectors: () =>
+    invoke<EmailConnectorSummary[]>("list_email_connectors"),
+  saveEmailConnector: (input) =>
+    invoke<EmailConnectorSummary>("save_email_connector", { input }),
+  testEmailConnector: (input) =>
+    invoke<ConnectorTestResult>("test_email_connector", { input }),
+  setEmailConnectorEnabled: (connectionId, enabled) =>
+    invoke<EmailConnectorSummary>("set_email_connector_enabled", { connectionId, enabled }),
+  deleteEmailConnector: (connectionId) =>
+    invoke<void>("delete_email_connector", { connectionId }),
+  setConnectorWorkGrant: (connectionId, workId, enabled, permissions) =>
+    invoke<EmailConnectorSummary>("set_connector_work_grant", {
+      input: { connectionId, workId, enabled, permissions },
+    }),
+  listEmailMetadata: (connectionId, query = "", limit = 50) =>
+    invoke<EmailMetadataSummary[]>("list_email_metadata", { connectionId, query, limit }),
+  listAppNotifications: (limit = 50) =>
+    invoke<AppNotificationSummary[]>("list_app_notifications", { limit }),
+  markAppNotificationRead: (notificationId) =>
+    invoke<void>("mark_app_notification_read", { notificationId }),
+  clearAppNotification: (notificationId) =>
+    invoke<void>("clear_app_notification", { notificationId }),
+  listPendingConnectorActions: (workId = null) =>
+    invoke<PendingConnectorActionSummary[]>("list_pending_connector_actions", { workId }),
+  resolvePendingConnectorAction: (actionId, approve) =>
+    invoke<PendingConnectorActionSummary>("resolve_pending_connector_action", { actionId, approve }),
+  listenToAppNotifications: async (handler) =>
+    listen<AppNotificationSummary>("piwork://notification", ({ payload }) => handler(payload)),
   listProjectFiles: (rootPath) =>
     invoke<ProjectFileSummary[]>("list_project_files", { rootPath }),
   importResources: (input) =>

@@ -23,12 +23,13 @@ export type ExecutionPhase = {
 };
 
 export type ExecutionProgressModel = {
-  status: "preparing" | "running" | "completed" | "failed";
+  status: "preparing" | "running" | "waiting" | "completed" | "failed";
   currentPhase: ExecutionPhaseId;
   phases: ExecutionPhase[];
   toolCount: number;
   failedToolCount: number;
   failureMessage: string | null;
+  waitingReason: string | null;
 };
 
 type ToolPhase = Exclude<ExecutionPhaseId, "prepare" | "deliver">;
@@ -75,6 +76,7 @@ export function buildExecutionProgress(
     WorkEventEnvelope["payload"],
     { type: "runCompleted" | "runFailed" }
   > | null = null;
+  let waitingReason: string | null = null;
 
   for (const { payload } of sortedEvents) {
     if (payload.type === "toolPending" || payload.type === "toolStarted") {
@@ -109,6 +111,8 @@ export function buildExecutionProgress(
       payload.type === "runFailed"
     ) {
       terminal = payload;
+    } else if (payload.type === "waiting") {
+      waitingReason = payload.reason;
     }
   }
 
@@ -133,6 +137,8 @@ export function buildExecutionProgress(
     ? terminalFailed
       ? "failed"
       : "completed"
+    : waitingReason
+      ? "waiting"
     : tools.size === 0
       ? "preparing"
       : "running";
@@ -144,7 +150,10 @@ export function buildExecutionProgress(
     if (id === "prepare") {
       return {
         id,
-        status: tools.size === 0 && !terminal ? "active" : "completed",
+        status:
+          tools.size === 0 && !terminal && !waitingReason
+            ? "active"
+            : "completed",
         toolCount: 0,
         failedToolCount: 0,
       };
@@ -161,7 +170,7 @@ export function buildExecutionProgress(
     const records = phaseTools.get(id) ?? [];
     const failedToolCount = records.filter(({ failed }) => failed).length;
     let phaseStatus: ExecutionPhaseStatus;
-    if (terminal) {
+    if (terminal || waitingReason) {
       if (records.length === 0) {
         phaseStatus = "skipped";
       } else if (terminalFailed && id === highestVisited) {
@@ -202,5 +211,6 @@ export function buildExecutionProgress(
     toolCount: tools.size,
     failedToolCount,
     failureMessage: terminal?.type === "runFailed" ? terminal.message : null,
+    waitingReason,
   };
 }

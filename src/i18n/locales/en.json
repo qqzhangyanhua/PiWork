@@ -72,7 +72,8 @@
     "aboutPiWork": "About PiWork",
     "checkUpdates": "Check for updates",
     "advancedOptions": "Advanced options",
-    "advancedOptionsDescription": "Base URL and custom connection settings"
+    "advancedOptionsDescription": "Base URL and custom connection settings",
+    "webAccessNav": "Web access"
   },
   "runtime": {
     "desktopRequiredTitle": "Open the PiWork desktop app",
@@ -104,56 +105,34 @@
     "connectionError": "The provider could not be verified. Check the API key and try again.",
     "saveError": "The model configuration could not be saved. Try again."
   },
-  "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "creating": "Creating", "retry": "Retry" },
+  "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "creating": "Creating", "retry": "Retry", "save": "Save", "enabled": "Enabled", "disabled": "Disabled", "enable": "Enable", "disable": "Disable" },
   "work": { "new": "New conversation", "empty": "Create your first conversation" },
   "conversation": { "new": "New conversation", "newInProject": "New conversation in {{project}}" },
   "project": { "section": "Projects", "groupLabel": "Project {{name}}" },
   "sidebar": {
     "label": "Projects and conversations", "primary": "Primary navigation", "home": "Conversation home", "works": "All conversations", "recent": "Recent", "recentWorks": "Recent conversations", "projects": "Projects",
     "newProject": "New project",
-    "nav": { "home": "Home", "agents": "Agent Hub", "knowledge": "Knowledge Base", "dataSources": "Data Sources", "settings": "Settings" }
+    "nav": { "home": "Home", "agents": "Agent Hub", "plugins": "Plugin Marketplace", "connectors": "Connectors", "settings": "Settings" }
   },
   "agentCenter": {
     "title": "Agent Hub",
-    "headerKicker": "Industrial engineering intelligence platform",
-    "eyebrow": "MAGIC FACTORY · PERSISTENT TEAM",
-    "descriptions": {
-      "team": "Four persistent members have explicit responsibilities, permissions, and capability boundaries. They only run after joining a Work or accepting a task.",
-      "library": "All 96 business capabilities show their real status: catalog entries create task drafts, while executable packs can be assembled into members."
-    },
+    "headerKicker": "Local agent collaboration",
+    "eyebrow": "Persistent professional team",
+    "descriptions": { "team": "Persistent members have explicit responsibilities and tool access. They run only after joining a Work or accepting a task." },
     "stats": {
-      "teamLabel": "Persistent team statistics", "libraryLabel": "Capability catalog statistics",
-      "members": "persistent members", "leads": "team lead", "systemPacks": "system capability packs",
-      "domains": "capability domains", "capabilities": "capabilities", "p0": "launch capabilities"
+      "teamLabel": "Team statistics", "members": "persistent members", "leads": "team lead", "tools": "tool permissions"
     },
-    "views": { "label": "Agent hub views", "team": "My Team", "library": "Capability Library" },
-    "loading": "Loading team and capability library…",
-    "loadError": "Unable to load the team and capability library",
+    "loading": "Loading team…",
+    "loadError": "Unable to load the team",
     "team": {
-      "kicker": "Persistent members", "title": "My professional team",
-      "description": "Review every member's responsibilities, permissions, Engine, and fixed system capabilities.",
+      "kicker": "Persistent members", "title": "My Team", "membersTitle": "Team members",
+      "description": "Review each member's responsibilities, permissions, Engine, and fixed tool access.",
       "currentWorkHint": "Open a member to add them to the selected Work in advance.",
-      "runtimeNote": "This view shows persistent identities, not invented running states. Real execution state arrives with Assignments."
-    },
-    "libraryViews": { "label": "Capability library browsing mode", "recommended": "Launch collection", "all": "All capabilities" },
-    "paths": { "kicker": "Build paths", "title": "Discover capabilities by business loop", "description": "Choose the stage you need to advance, then see the professional capabilities composed for that stage." },
-    "recommended": { "kicker": "Path capabilities", "count": "{{count}} capabilities in this path" },
-    "catalog": { "kicker": "Capability catalog", "title": "Explore all 96 capabilities", "description": "Combine keyword, domain, and delivery-priority filters." },
-    "filters": {
-      "label": "Capability filters",
-      "search": "Search capabilities", "searchPlaceholder": "Search capability, audience, or output…",
-      "domain": "Capability domain", "allDomains": "All domains",
-      "priority": "Priority", "allPriorities": "All priorities"
-    },
-    "results": "{{count}} capabilities found",
-    "empty": { "title": "No matching capabilities", "body": "Try another keyword or clear the current domain and priority filters.", "clear": "Clear filters" },
-    "capability": {
-      "open": "View {{name}} details", "viewDetails": "View details",
-      "status": { "catalog_only": "Catalog entry", "executable": "Installable", "deprecated": "Deprecated" }
+      "runtimeNote": "This view shows persistent identities. Runtime state appears with Assignments."
     },
     "member": {
       "open": "View {{name}} details", "lead": "Lead", "modelDefault": "Default model",
-      "systemPacks": "System capabilities", "permission": "Permission", "runtime": "Engine / Model",
+      "systemPacks": "Tool access", "permission": "Permission", "runtime": "Engine / Model",
       "version": "Definition v{{version}}", "inCurrentWork": "In current Work", "longLived": "Persistent member",
       "builtin": "Built-in member", "local": "Local copy", "identityStable": "Persistent identity",
       "roles": { "lead": "Lead", "researcher": "Research", "engineer": "Engineering", "reviewer": "Review" },
@@ -162,7 +141,7 @@
     },
     "memberDrawer": {
       "close": "Close member details", "responsibilities": "Responsibilities", "boundaries": "Explicit boundaries",
-      "loadedPacks": "Loaded capabilities", "engineModel": "Engine / Model", "memory": "Memory policy",
+      "loadedPacks": "Tool access", "engineModel": "Engine / Model", "memory": "Memory policy",
       "memoryPolicies": { "confirmed_only": "Confirmed memories only" },
       "tools": "Tools", "noTools": "No tools declared", "participatingWorks": "Participating Works",
       "noParticipatingWorks": "No participation records are available.", "adding": "Adding…",
@@ -175,10 +154,7 @@
       "customize": "Customize a copy", "copySuffix": " copy", "displayName": "Member name",
       "engine": "Engine override", "model": "Model override", "permission": "Permission policy",
       "inheritDefinition": "Use definition default", "parallelism": "Parallelism limit",
-      "systemPacks": "System capabilities", "fixedInherited": "Fixed by role and cannot be removed",
-      "businessPacks": "Business capability packs", "executableCount": "{{count}} installable",
-      "catalogOnlyCount": "{{count}} catalog entries cannot be installed yet",
-      "catalogOnlyReason": "They do not yet have executable instructions, tool contracts, and validation rules. The copy can still save basic overrides.",
+      "systemPacks": "Tool access", "fixedInherited": "Inherited from the role and cannot be removed",
       "validation": "Assembly validation", "validating": "Validating assembly…", "valid": "Server validation passed",
       "displayNameRequired": "Enter a member name before saving.",
       "validationFailed": "Assembly validation could not complete", "repair": "Suggested fix", "saving": "Saving…",
@@ -192,17 +168,54 @@
         "capability_conflict": "Remove conflicting packs and keep one way of working.",
         "context_budget_exceeded": "Reduce the number of packs or shorten the assembly instructions."
       }
-    },
-    "drawer": {
-      "close": "Close details", "catalogId": "Capability #{{id}}", "audiences": "Intended users",
-      "coreCapability": "Core capability", "outputs": "Primary outputs", "implementation": "Implementation approach",
-      "preparation": "What to prepare", "availability": "Current availability",
-      "catalogOnlyReason": "This remains a catalog description and does not yet have the instructions, tools, and validation contract required for installation.",
-      "deprecatedReason": "This capability is deprecated and retained for reference only.",
-      "startHint": "PiWork will create an editable task draft. Confirm the inputs and constraints before sending.",
-      "createDraft": "Create task draft", "assembleHint": "Choose a compatible member and enter assembly. This does not start an Assignment.",
-      "chooseMember": "Choose member to assemble", "deprecatedHint": "Deprecated capabilities do not offer task or assembly actions."
     }
+  },
+  "extensions": {
+    "title": "Plugin Marketplace", "subtitle": "Manage built-in and verified plugins, and discover Pi community packages", "viewsLabel": "Marketplace views",
+    "views": { "catalog": "Catalog", "installed": "Installed", "community": "Community search" },
+    "tiers": { "builtin": "Built into PiWork", "verified": "PiWork verified", "community": "Community" },
+    "status": { "available": "Available", "installed": "Installed", "disabled": "Disabled", "revoked": "Revoked", "pending_removal": "Pending removal" },
+    "loading": "Loading plugins…", "loadError": "Unable to load the plugin catalog", "empty": "No plugins in this view.",
+    "tools": "Tools", "permissions": "Runtime permissions", "permissionNetwork": "Network", "permissionFiles": "Runtime cache", "permissionProcess": "Subprocess",
+    "trustedExecutionNotice": "Plugins are enabled per member. Changes apply to the next Run.", "agentAccess": "Member access", "grantError": "Unable to update member access.",
+    "noDescription": "No description was provided.", "unknownPublisher": "Unknown publisher",
+    "community": {
+      "title": "Search Pi community plugins", "description": "Results come from npm packages tagged pi-package.", "readOnly": "Discovery only in phase one",
+      "search": "Search", "searching": "Searching…", "placeholder": "Plugin name or keyword", "error": "Unable to reach the npm plugin catalog.",
+      "empty": "Enter a keyword to search community plugins.", "reviewRequired": "Awaiting security review"
+    }
+  },
+  "webAccess": {
+    "title": "Web access", "description": "Configure search providers, routing, and URL retrieval for Pi Web Access.",
+    "loading": "Loading web settings…", "loadError": "Unable to load web settings.", "saved": "Web settings saved", "saving": "Saving…", "saveError": "Unable to save web settings.",
+    "routingTitle": "Search routing", "routingDescription": "Fallback is used only for timeouts, quotas, network failures, or invalid responses.",
+    "defaultProvider": "Default provider", "fallbackProvider": "Fallback provider", "noProvider": "Enable a provider first", "noFallback": "No fallback",
+    "urlFetch": "URL content retrieval", "urlFetchDescription": "Allow reading links supplied by the user or returned in search results.",
+    "providersTitle": "Search providers", "providersDescription": "Keys stay in Windows Credential Manager; SQLite stores only routing metadata.",
+    "apiKey": "{{provider}} API key", "keyConfigured": "Stored securely; enter a new value to replace it", "keyPlaceholder": "Enter API key", "keyRequired": "Key required", "ready": "Ready",
+    "showKey": "Show key", "hideKey": "Hide key", "clearKey": "Remove stored key", "endpoint": "Service endpoint", "endpointOptional": "Optional custom endpoint",
+    "providerDescriptions": {
+      "exa": "Semantic search for agents", "brave": "Brave's independent search index", "tavily": "Search API for research workflows", "bocha": "Bocha Chinese and global search",
+      "jina": "Jina search and content reading", "firecrawl": "Search and web extraction", "openai": "OpenAI Responses search", "searxng": "Self-hosted metasearch without an API key"
+    }
+  },
+  "connectors": {
+    "title": "Connectors", "subtitle": "Connect external services securely and scope access per Work", "accounts": "Email accounts", "add": "Add email connector",
+    "loading": "Loading connectors…", "loadError": "Unable to load connectors", "empty": "No email connectors yet.", "newAccount": "New connection", "accountSettings": "Email connector", "addTitle": "Connect enterprise email",
+    "identity": "Account and credential", "identityDescription": "Passwords stay in Windows Credential Manager and are never written to projects or plugins.", "displayName": "Display name", "displayNamePlaceholder": "For example: Company email",
+    "emailAddress": "Email address", "username": "Login username", "password": "App password", "passwordStored": "Credential is stored; leave blank to keep it", "passwordPlaceholder": "Enter password or app password",
+    "servers": "Mail servers", "serversDescription": "Phase one supports TLS-encrypted IMAP and SMTP only.", "preset": "Service preset", "presets": { "aliyun": "Alibaba enterprise email", "custom": "Custom IMAP / SMTP" },
+    "pollInterval": "Poll interval", "minutes": "{{count}} min", "port": "Port", "tlsOnly": "TLS encrypted connections only",
+    "test": "Test connection", "testSuccess": "IMAP and SMTP connection tests passed", "testError": "Connection test failed. Check the servers, account, and app password.",
+    "saved": "Connector settings saved", "saveError": "Unable to save connector settings.", "enabledMessage": "Connector enabled with the current inbox UID as its baseline.", "disabledMessage": "Connector disabled.", "enableError": "Unable to enable the connector; pass the connection test first.",
+    "delete": "Delete connector", "deleteConfirm": "Delete “{{name}}” with its local mail metadata and grants?", "workAccess": "Work access", "workAccessDescription": "Connectors are hidden from Works by default. Sensitive actions still require per-action approval.",
+    "noWorks": "Create a Work before granting access.", "permissions": "Email permissions", "permission": { "metadata": "Search metadata", "read_body": "Read body · approval", "send": "Send email · approval" }, "grantError": "Unable to update the Work grant.",
+    "recentMail": "Recent mail", "metadataOnly": "Only sender, subject, time, and similar metadata are stored here. Bodies are not stored.",
+    "health": { "healthy": "Connected", "degraded": "Degraded", "error": "Connection error", "untested": "Not tested", "disabled": "Disabled" }
+  },
+  "notifications": {
+    "title": "Notifications", "unread": "{{count}} unread", "empty": "No new notifications", "clear": "Clear notification",
+    "approve": "Allow", "deny": "Deny", "to": "To", "subject": "Subject", "sender": "Sender", "preview": "Preview"
   },
   "workspace": {
     "home": "Conversation home",
@@ -371,6 +384,8 @@
     "toolRunning": "Running",
     "toolCompleted": "Completed",
     "toolFailed": "Failed",
+    "showToolError": "Show error details",
+    "hideToolError": "Hide error details",
     "toolBurst": "{{action}} {{count}} items",
     "actions": {
       "read": "Read",
@@ -416,6 +431,8 @@
     "label": "Execution progress",
     "preparing": "Pi is preparing",
     "running": "Pi is working",
+    "waiting": "Pi is waiting to continue",
+    "waitingOnAssignments": "Pi is waiting for member results",
     "completedWithoutTools": "Pi finished",
     "completed_one": "Pi completed {{count}} action",
     "completed_other": "Pi completed {{count}} actions",

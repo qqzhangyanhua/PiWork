@@ -3227,16 +3227,79 @@
 }
 
 .execution-progress__details {
-  margin: 2px 6px 6px 18px;
-  padding: 4px 0 4px 13px;
+  margin: 2px 6px 8px 37px;
+  padding: 0;
   border: 0;
-  border-left: 1px solid var(--pw-border-subtle);
   background: transparent;
 }
 
 .execution-progress__activity {
   padding: 0;
   border: 0;
+}
+
+.execution-progress__activity > .activity-feed {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--pw-border-subtle);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--pw-surface-panel) 72%, transparent);
+}
+
+.execution-progress__activity > .activity-feed > .activity-feed__entry + .activity-feed__entry {
+  border-top: 1px solid var(--pw-border-subtle);
+}
+
+.execution-progress__activity .activity-feed__tool,
+.execution-progress__activity .activity-feed__disclosure,
+.execution-progress__activity .activity-feed__burst,
+.execution-progress__activity .activity-feed__permission,
+.execution-progress__activity .activity-feed__lifecycle {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.execution-progress__activity .activity-feed__tool {
+  min-height: 38px;
+  align-items: center;
+  padding: 7px 9px;
+}
+
+.execution-progress__activity .activity-feed__entry--error .activity-feed__tool {
+  background: color-mix(in srgb, var(--pw-failure-50) 48%, transparent);
+}
+
+.execution-progress__activity .activity-feed__tool-copy strong {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.execution-progress__activity .activity-feed__tool-copy > small {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 2px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.execution-progress__activity .activity-feed__status {
+  align-self: start;
+  padding-top: 1px;
+}
+
+.execution-progress__activity .activity-feed__burst > summary {
+  min-height: 37px;
+  padding: 7px 9px;
+}
+
+.execution-progress__activity .activity-feed__burst-items {
+  gap: 0;
+  padding: 0 0 0 8px;
+}
+
+.execution-progress__activity .activity-feed__burst-items > .activity-feed__entry {
+  border-top: 1px solid var(--pw-border-subtle);
 }
 
 .execution-progress__activity .agent-activity__row {

@@ -106,6 +106,40 @@ const TOOLS: Record<string, ToolDefinition> = {
       "Ask the Lead or the user a clarifying question and put this Assignment into waiting.",
     parameters: object({ question: stringField, target: stringField }, ["question", "target"]),
   },
+  list_email_accounts: {
+    description:
+      "List enabled email accounts that the user granted to the current Work. Credentials are never returned.",
+    parameters: object({}),
+  },
+  search_email_metadata: {
+    description:
+      "Search locally cached email metadata for a granted account. This does not read message bodies.",
+    parameters: object(
+      { connectionId: stringField, query: stringField },
+      ["connectionId"],
+    ),
+  },
+  request_email_body: {
+    description:
+      "Request access to one email body. The first call creates an immutable user approval; retry the same call after approval.",
+    parameters: object(
+      { connectionId: stringField, folder: stringField, uid: numberField },
+      ["connectionId", "uid"],
+    ),
+  },
+  request_send_email: {
+    description:
+      "Request sending an email. Sending always requires explicit user approval; retry the identical call after approval.",
+    parameters: object(
+      {
+        connectionId: stringField,
+        to: stringField,
+        subject: stringField,
+        body: stringField,
+      },
+      ["connectionId", "to", "subject", "body"],
+    ),
+  },
 };
 
 interface ExtensionApi {

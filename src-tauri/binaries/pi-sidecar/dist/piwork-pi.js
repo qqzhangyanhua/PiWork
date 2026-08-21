@@ -332208,7 +332208,10 @@ async function loadExtensionModule(extensionPath, cacheToken) {
   }
   const jiti = createJiti(import.meta.url, {
     moduleCache: false,
-    ...isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }
+    // PiWork ships the Node sidecar as one bundle, so extension peer imports
+    // must resolve to the matching APIs already embedded in this file.
+    virtualModules: VIRTUAL_MODULES,
+    tryNative: false
   });
   const module3 = await jiti.import(extensionPath, { default: true });
   const factory = module3;

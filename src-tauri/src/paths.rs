@@ -66,6 +66,10 @@ impl AppPaths {
         self.roaming_root.join("resources")
     }
 
+    pub fn extensions_dir(&self) -> PathBuf {
+        self.roaming_root.join("extensions")
+    }
+
     pub fn default_workspace_dir(&self) -> PathBuf {
         self.roaming_root.join("workspace")
     }
@@ -101,6 +105,7 @@ mod tests {
             paths.engine_sessions_dir(),
             paths.backups_dir(),
             paths.resources_dir(),
+            paths.extensions_dir(),
             paths.default_workspace_dir(),
         ] {
             assert!(path.starts_with(&roaming_root));
@@ -121,6 +126,7 @@ mod tests {
         );
         assert_eq!(paths.backups_dir(), roaming_root.join("backups"));
         assert_eq!(paths.resources_dir(), roaming_root.join("resources"));
+        assert_eq!(paths.extensions_dir(), roaming_root.join("extensions"));
         assert_eq!(
             paths.default_workspace_dir(),
             roaming_root.join("workspace")

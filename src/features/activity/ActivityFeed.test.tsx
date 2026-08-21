@@ -365,6 +365,40 @@ describe("ActivityFeed", () => {
     expect(screen.getByText("src/two.ts")).toBeVisible();
   });
 
+  it("keeps verbose failed output behind a secondary disclosure", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActivityFeed
+        items={[
+          tool("failed-1", "failed", "workspace search", {
+            descriptor: {
+              renderClass: "error",
+              action: "execute",
+              object: "workspace search",
+              preview: "A long platform error that should not dominate the progress list",
+              tone: "neutral",
+              groupKey: null,
+            },
+          }),
+        ]}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: "查看错误详情" });
+    const output = screen.getByText(
+      "A long platform error that should not dominate the progress list",
+    );
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(output).not.toBeVisible();
+
+    await user.click(toggle);
+
+    expect(
+      screen.getByRole("button", { name: "收起错误详情" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(output).toBeVisible();
+  });
+
   it("reports resolved permission outcomes without retaining an emergency alert role", () => {
     render(
       <ActivityFeed

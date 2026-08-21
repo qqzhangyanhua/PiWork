@@ -2,6 +2,7 @@ import {
   Check,
   ChevronDown,
   CircleAlert,
+  Clock3,
   LoaderCircle,
 } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
@@ -21,6 +22,11 @@ export type ExecutionProgressCardProps = {
 const summaryKey = (progress: ExecutionProgressModel) => {
   if (progress.status === "preparing") return "progress.preparing";
   if (progress.status === "running") return "progress.running";
+  if (progress.status === "waiting") {
+    return progress.waitingReason === "waiting_on_assignments"
+      ? "progress.waitingOnAssignments"
+      : "progress.waiting";
+  }
   if (progress.status === "failed") return "progress.failed";
   if (progress.toolCount === 0) return "progress.completedWithoutTools";
   return "progress.completed";
@@ -40,6 +46,8 @@ export function ExecutionProgressCard({
       ? Check
       : progress.status === "failed"
         ? CircleAlert
+        : progress.status === "waiting"
+          ? Clock3
         : LoaderCircle;
   const summary = t(summaryKey(progress), { count: progress.toolCount });
 

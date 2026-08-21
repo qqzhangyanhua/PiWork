@@ -18,6 +18,7 @@ use tokio::{
 use crate::{
     agent::repository::DEFAULT_LEAD_INSTANCE_ID,
     domain::{event::SessionTransition, work::PermissionMode},
+    extensions::{ExtensionRuntimeSnapshot, ExtensionService},
     model::{ModelProvider, ModelService, RuntimeModelConfiguration},
 };
 
@@ -345,9 +346,31 @@ impl PiRunArguments {
         &self.values
     }
 
-    /// Appends an explicit `--extension` after `--no-extensions`: Pi treats
-    /// `--no-extensions` as "disable discovery", and still loads extension
-    /// paths given on the command line.
+    /// Loads the role-scoped host extension and admits its leased tools through
+    /// Pi's global `--tools` filter. `--no-extensions` only disables discovery;
+    /// explicit extension paths that follow it are still loaded.
+    pub fn with_host_tool_extension(mut self, path: &Path, host_tools: &[String]) -> Self {
+        let tool_index = self
+            .values
+            .iter()
+            .position(|value| value == "--tools")
+            .and_then(|index| index.checked_add(1))
+            .expect("Pi runtime arguments always include a tool allowlist");
+        let mut enabled_tools = self.values[tool_index]
+            .split(',')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for tool in host_tools {
+            if !enabled_tools.contains(tool) {
+                enabled_tools.push(tool.clone());
+            }
+        }
+        self.values[tool_index] = enabled_tools.join(",");
+        self.with_extension(path)
+    }
+
+    /// Appends an explicitly resolved extension after `--no-extensions`, which
+    /// keeps ambient discovery disabled without suppressing trusted paths.
     pub fn with_extension(mut self, path: &Path) -> Self {
         self.values.push("--extension".into());
         self.values.push(node_entrypoint_argument(path));
@@ -436,6 +459,7 @@ pub struct RpcEventTranslator {
     tool_count: usize,
     artifacts: Vec<String>,
     validation: Vec<String>,
+    delegated_assignment: bool,
     redactor: SensitiveRedactor,
 }
 
@@ -528,14 +552,25 @@ impl RpcEventTranslator {
                 tool_name: required_string(message, "toolName")?,
                 output_summary: summarize_tool_result(message.get("partialResult"), &self.redactor),
             }),
-            "tool_execution_end" => Some(EngineEvent::ToolFinished {
-                tool_call_id: required_string(message, "toolCallId")?,
-                tool_name: required_string(message, "toolName")?,
-                output_summary: summarize_tool_result(message.get("result"), &self.redactor),
-                success: !message
+            "tool_execution_end" => {
+                let tool_call_id = required_string(message, "toolCallId")?;
+                let tool_name = required_string(message, "toolName")?;
+                let success = !message
                     .get("isError")
                     .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                    .unwrap_or(false);
+                if tool_name == "delegate_assignment" && success {
+                    self.delegated_assignment = true;
+                }
+                Some(EngineEvent::ToolFinished {
+                    tool_call_id,
+                    tool_name,
+                    output_summary: summarize_tool_result(message.get("result"), &self.redactor),
+                    success,
+                })
+            }
+            "agent_end" if self.delegated_assignment => Some(EngineEvent::Waiting {
+                reason: super::WAITING_ON_ASSIGNMENTS_REASON.into(),
             }),
             "agent_end" => Some(EngineEvent::RunCompleted {
                 summary: format!(
@@ -897,6 +932,7 @@ pub struct PiEngineAdapter {
     command: PiCommand,
     active: Arc<PiActiveRuns>,
     host_tool_extension: Option<PathBuf>,
+    extension_service: Option<Arc<ExtensionService>>,
 }
 
 impl PiEngineAdapter {
@@ -931,6 +967,7 @@ impl PiEngineAdapter {
                 command: PiCommand::discover(executable.as_deref())?,
                 active: Arc::new(Mutex::new(HashMap::new())),
                 host_tool_extension: None,
+                extension_service: None,
             })
         }
     }
@@ -940,6 +977,11 @@ impl PiEngineAdapter {
     /// Run's private extension directory and loads it explicitly.
     pub fn with_host_tool_extension(mut self, path: PathBuf) -> Self {
         self.host_tool_extension = Some(path);
+        self
+    }
+
+    pub fn with_extension_service(mut self, service: Arc<ExtensionService>) -> Self {
+        self.extension_service = Some(service);
         self
     }
 }
@@ -990,6 +1032,7 @@ impl PiEngineAdapter {
             startup: startup_sender,
             caller_acknowledgement: caller_acknowledgement_receiver,
             host_tool_extension: self.host_tool_extension.clone(),
+            extension_service: self.extension_service.clone(),
         }));
 
         let startup = startup_receiver
@@ -1089,6 +1132,7 @@ struct PiLifecycleRequest {
     startup: oneshot::Sender<Result<EngineSessionRef, EngineError>>,
     caller_acknowledgement: oneshot::Receiver<()>,
     host_tool_extension: Option<PathBuf>,
+    extension_service: Option<Arc<ExtensionService>>,
 }
 
 struct StartedPiRun {
@@ -1125,6 +1169,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         startup,
         mut caller_acknowledgement,
         host_tool_extension,
+        extension_service,
     } = request;
     let mut dispatcher = EventDispatcher::new(sink);
     let mut startup = Some(startup);
@@ -1144,6 +1189,18 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             configuration = model_service.runtime_configuration() => {
                 configuration.map_err(|_| EngineError::Start("model configuration is unavailable".into()))?
             }
+        };
+        let extension_snapshot = match extension_service.as_ref() {
+            Some(service) => tokio::select! {
+                biased;
+                _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
+                    return Err(EngineError::Aborted);
+                }
+                snapshot = service.runtime_snapshot(context.agent_instance_id(), context.work_id()) => {
+                    snapshot.map_err(|_| EngineError::Start("extension runtime snapshot could not be prepared".into()))?
+                }
+            },
+            None => ExtensionRuntimeSnapshot::default(),
         };
         let session_directory = {
             let new_directory = session_directory(
@@ -1177,6 +1234,26 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         std::fs::write(agent_directory.join("models.json"), provider_config).map_err(|_| {
             EngineError::Start("Pi provider configuration could not be written".into())
         })?;
+        for (relative_path, contents) in &extension_snapshot.runtime_files {
+            if relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(EngineError::Start(
+                    "extension runtime file path is invalid".into(),
+                ));
+            }
+            let target = agent_directory.join(relative_path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| {
+                    EngineError::Start("extension runtime directory could not be prepared".into())
+                })?;
+            }
+            std::fs::write(&target, contents).map_err(|_| {
+                EngineError::Start("extension runtime configuration could not be written".into())
+            })?;
+        }
 
         // Stage the PiWork host tools extension for this Run and capture the
         // lease so the endpoint/token/allowlist can be injected into the child
@@ -1209,7 +1286,10 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             &configuration.model_id,
             context.effective_permission(),
         );
-        if let Some((path, _)) = &host_tools {
+        if let Some((path, lease)) = &host_tools {
+            arguments = arguments.with_host_tool_extension(path, &lease.allowed_tools);
+        }
+        for path in &extension_snapshot.extension_paths {
             arguments = arguments.with_extension(path);
         }
         let mut process = command.process(&arguments);
@@ -1264,6 +1344,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             context.agent_session_id().to_owned(),
             configuration.model_id.clone(),
         ];
+        sensitive_values.extend(extension_snapshot.sensitive_values.clone());
         if let Some((_, lease)) = &host_tools {
             sensitive_values.push(lease.token.to_hex());
         }
@@ -1409,6 +1490,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
         let _ = stderr_task.await;
     }
     let _ = std::fs::remove_file(agent_directory.join("models.json"));
+    let _ = std::fs::remove_file(agent_directory.join("web-search.json"));
     let _ = std::fs::remove_file(
         agent_directory
             .join("extensions")
@@ -1595,8 +1677,15 @@ async fn run_rpc_loop(
                     };
                 };
                 if let Some(event) = translator.translate(message) {
-                    let terminal = event.is_terminal();
-                    let outcome = if matches!(event, EngineEvent::RunCompleted { .. }) {
+                    let waiting_on_assignments = matches!(
+                        &event,
+                        EngineEvent::Waiting { reason }
+                            if reason == super::WAITING_ON_ASSIGNMENTS_REASON
+                    );
+                    let terminal = event.is_terminal() || waiting_on_assignments;
+                    let outcome = if matches!(event, EngineEvent::RunCompleted { .. })
+                        || waiting_on_assignments
+                    {
                         PiRunOutcome::Completed
                     } else if terminal {
                         PiRunOutcome::Failed
@@ -1914,6 +2003,32 @@ mod tests {
         assert_eq!(super::summarize_text_parts([""]), None);
     }
 
+    #[test]
+    fn successful_delegate_ends_the_lead_turn_waiting_on_assignments() {
+        let mut translator = super::RpcEventTranslator::default();
+
+        translator.translate(serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": "delegate-1",
+            "toolName": "delegate_assignment",
+            "args": {"assignedAgentId": "agent-instance:piwork-researcher"}
+        }));
+        translator.translate(serde_json::json!({
+            "type": "tool_execution_end",
+            "toolCallId": "delegate-1",
+            "toolName": "delegate_assignment",
+            "result": {"content": [{"type": "text", "text": "accepted"}]},
+            "isError": false
+        }));
+
+        assert_eq!(
+            translator.translate(serde_json::json!({"type": "agent_end"})),
+            Some(super::EngineEvent::Waiting {
+                reason: "waiting_on_assignments".into(),
+            })
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn node_entrypoint_removes_the_windows_verbatim_disk_prefix() {
@@ -1933,9 +2048,10 @@ mod tests {
             "model-1",
             crate::domain::work::PermissionMode::Balanced,
         )
-        .with_extension(std::path::Path::new(
-            r"D:\runtime\run-1\agent\extensions\piwork-host-tools.ts",
-        ));
+        .with_host_tool_extension(
+            std::path::Path::new(r"D:\runtime\run-1\agent\extensions\piwork-host-tools.ts"),
+            &["delegate_assignment".to_owned()],
+        );
 
         let values = arguments.values();
         let no_extensions = values
@@ -1953,6 +2069,16 @@ mod tests {
         assert_eq!(
             values[extension + 1],
             r"D:\runtime\run-1\agent\extensions\piwork-host-tools.ts"
+        );
+        let tools = values
+            .windows(2)
+            .find(|pair| pair[0] == "--tools")
+            .expect("Pi runtime arguments include a tool allowlist")[1]
+            .split(',')
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            tools.contains("delegate_assignment"),
+            "the explicit host extension tool must survive Pi's --tools allowlist"
         );
     }
 

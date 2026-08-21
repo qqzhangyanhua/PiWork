@@ -26,13 +26,13 @@ use crate::{
     },
     domain::{
         agent::AgentInstanceSummary,
-        assignment::{AgentSessionSummary, AssignmentSummary},
+        assignment::{AgentSessionSummary, AssignmentStatus, AssignmentSummary},
         event::WorkEventEnvelope,
         work::{PermissionMode, RunSummary, WorkSummary},
     },
     engine::{
         EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineRunIdentity,
-        EngineSessionRef, publisher::EventPublisher,
+        EngineSessionRef, WAITING_ON_ASSIGNMENTS_REASON, publisher::EventPublisher,
     },
     error::AppError,
     work::repository::WorkRepository,
@@ -68,6 +68,9 @@ pub enum AssignmentExecutionOutcome {
     },
     Failed {
         message: String,
+    },
+    Waiting {
+        reason: String,
     },
     Stopped,
 }
@@ -304,6 +307,8 @@ impl EngineHarness {
         let mut previous_event_id: Option<String> = None;
         let mut terminal: Option<TerminalOutcome> = None;
         let mut failed: Option<String> = None;
+        let mut waiting: Option<String> = None;
+        let mut completed_by_host_tool = false;
 
         loop {
             let event = match buffered.pop_front() {
@@ -314,6 +319,34 @@ impl EngineHarness {
                 // Stream closed without a terminal event.
                 break;
             };
+            if matches!(
+                event,
+                EngineEvent::RunCompleted { .. } | EngineEvent::RunFailed { .. }
+            ) && let Some(current) = self
+                .assignment_repository
+                .get_assignment(&assignment.id)
+                .await?
+                && current.status == AssignmentStatus::Completed
+            {
+                let (artifacts, validation, limitations) = match event {
+                    EngineEvent::RunCompleted {
+                        artifacts,
+                        validation,
+                        limitations,
+                        ..
+                    } => (artifacts, validation, limitations),
+                    EngineEvent::RunFailed { .. } => (Vec::new(), Vec::new(), Vec::new()),
+                    _ => unreachable!(),
+                };
+                terminal = Some((
+                    current.result_summary.unwrap_or_else(|| "Completed".into()),
+                    artifacts,
+                    validation,
+                    limitations,
+                ));
+                completed_by_host_tool = true;
+                break;
+            }
             let envelope = self.envelope(
                 &work,
                 &run,
@@ -342,6 +375,10 @@ impl EngineHarness {
                     failed = Some(message);
                     break;
                 }
+                EngineEvent::Waiting { reason } if reason == WAITING_ON_ASSIGNMENTS_REASON => {
+                    waiting = Some(reason);
+                    break;
+                }
                 _ => {}
             }
             let Some(next) = sequence.checked_add(1) else {
@@ -355,22 +392,39 @@ impl EngineHarness {
             self.assignment_repository
                 .mark_ready(&session.id, &run.id)
                 .await?;
-            self.assignment_repository
-                .complete(
-                    &assignment.id,
-                    &run.id,
-                    &session.id,
-                    &runtime_owner,
-                    &summary,
-                    now,
-                )
-                .await?;
+            if !completed_by_host_tool {
+                self.assignment_repository
+                    .complete(
+                        &assignment.id,
+                        &run.id,
+                        &session.id,
+                        &runtime_owner,
+                        &summary,
+                        now,
+                    )
+                    .await?;
+            }
             Ok(AssignmentExecutionOutcome::Completed {
                 result_summary: summary,
                 artifacts,
                 validation,
                 limitations,
             })
+        } else if let Some(reason) = waiting {
+            self.assignment_repository
+                .mark_waiting(
+                    &assignment.id,
+                    &run.id,
+                    &session.id,
+                    &runtime_owner,
+                    &reason,
+                    now,
+                )
+                .await?;
+            self.assignment_repository
+                .mark_ready(&session.id, &run.id)
+                .await?;
+            Ok(AssignmentExecutionOutcome::Waiting { reason })
         } else {
             let message = failed
                 .unwrap_or_else(|| "engine event stream closed before a terminal event".to_owned());

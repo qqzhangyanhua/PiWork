@@ -1,4 +1,4 @@
-import { Bell, Bot, Search } from "lucide-react";
+import { Bot, Search } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
@@ -29,14 +29,6 @@ export function DashboardHeader({
         >
           <Bot aria-hidden="true" size={15} />
           <span>{t("dashboard.header.exploreAgents")}</span>
-        </button>
-        <button
-          aria-label={t("dashboard.comingSoon", { feature: t("dashboard.header.notifications") })}
-          className="dashboard-header__bell"
-          disabled
-          type="button"
-        >
-          <Bell aria-hidden="true" size={16} />
         </button>
       </div>
     </header>

@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
@@ -16,13 +23,193 @@ use piwork_lib::{
         assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus},
         collaboration::{DelegateAssignmentInput, ResultEnvelope, ResultStatus},
         event::WorkEventEnvelope,
+        work::PermissionMode,
     },
-    engine::{fake::FakeEngineAdapter, publisher::EventPublisher},
+    engine::{
+        EngineAdapter, EngineError, EngineEvent, EngineInput, EngineRunContext, EngineSessionRef,
+        fake::FakeEngineAdapter,
+        harness::{AssignmentExecutionOutcome, AssignmentExecutionRequest, EngineHarness},
+        publisher::EventPublisher,
+    },
     error::AppError,
     storage::sqlite::Database,
     work::repository::WorkRepository,
 };
 use serde_json::json;
+use tokio::sync::{Notify, mpsc};
+
+#[derive(Clone, Default)]
+struct WaitingLoopEngine {
+    calls: Arc<AtomicUsize>,
+    started_assignments: Arc<Mutex<Vec<String>>>,
+    first_started: Arc<Notify>,
+    release_first: Arc<Notify>,
+    second_started: Arc<Notify>,
+    release_second: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
+struct CapturingEngine {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[derive(Clone, Default)]
+struct ExternallyCompletableEngine {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl EngineAdapter for ExternallyCompletableEngine {
+    fn kind(&self) -> &'static str {
+        "externally-completable"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        _input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        let started = Arc::clone(&self.started);
+        let release = Arc::clone(&self.release);
+        tokio::spawn(async move {
+            let _ = sink
+                .send(EngineEvent::RunStarted {
+                    model_label: "Externally completable".into(),
+                })
+                .await;
+            started.notify_one();
+            release.notified().await;
+            let _ = sink
+                .send(EngineEvent::RunCompleted {
+                    summary: "engine terminal".into(),
+                    artifacts: vec![],
+                    validation: vec![],
+                    limitations: vec![],
+                })
+                .await;
+        });
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: "externally-completable-session".into(),
+        })
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for CapturingEngine {
+    fn kind(&self) -> &'static str {
+        "capturing"
+    }
+
+    async fn start(
+        &self,
+        _context: EngineRunContext,
+        input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        self.prompts.lock().unwrap().push(input.message);
+        tokio::spawn(async move {
+            let _ = sink
+                .send(EngineEvent::RunStarted {
+                    model_label: "Capturing".into(),
+                })
+                .await;
+            let _ = sink
+                .send(EngineEvent::RunCompleted {
+                    summary: "completed".into(),
+                    artifacts: vec![],
+                    validation: vec![],
+                    limitations: vec![],
+                })
+                .await;
+        });
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: "capturing-session".into(),
+        })
+    }
+}
+
+#[async_trait]
+impl EngineAdapter for WaitingLoopEngine {
+    fn kind(&self) -> &'static str {
+        "waiting-loop"
+    }
+
+    async fn start(
+        &self,
+        context: EngineRunContext,
+        _input: EngineInput,
+        sink: mpsc::Sender<EngineEvent>,
+    ) -> Result<EngineSessionRef, EngineError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let assignment_id = context.assignment_id().to_owned();
+        self.started_assignments.lock().unwrap().push(assignment_id);
+        let first_started = Arc::clone(&self.first_started);
+        let release_first = Arc::clone(&self.release_first);
+        let second_started = Arc::clone(&self.second_started);
+        let release_second = Arc::clone(&self.release_second);
+        tokio::spawn(async move {
+            let _ = sink
+                .send(EngineEvent::RunStarted {
+                    model_label: "Waiting loop".into(),
+                })
+                .await;
+            if call == 0 {
+                first_started.notify_one();
+                release_first.notified().await;
+                let _ = sink
+                    .send(EngineEvent::Waiting {
+                        reason: "waiting_on_assignments".into(),
+                    })
+                    .await;
+            } else {
+                if call == 1 {
+                    second_started.notify_one();
+                    release_second.notified().await;
+                }
+                let _ = sink
+                    .send(EngineEvent::RunCompleted {
+                        summary: "completed".into(),
+                        artifacts: vec![],
+                        validation: vec![],
+                        limitations: vec![],
+                    })
+                    .await;
+            }
+        });
+        Ok(EngineSessionRef {
+            engine_kind: self.kind().into(),
+            session_id: format!("waiting-loop-session-{call}"),
+        })
+    }
+}
+
+async fn wait_for_assignment_status(
+    repository: &AssignmentRepository,
+    assignment_id: &str,
+    expected: AssignmentStatus,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let actual = repository
+            .get_assignment(assignment_id)
+            .await
+            .unwrap()
+            .map(|assignment| assignment.status);
+        if actual == Some(expected) {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!(
+                "assignment {assignment_id} did not reach {expected:?}; actual status: {actual:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
 
 #[derive(Default)]
 struct RecordingPublisher(std::sync::Mutex<Vec<WorkEventEnvelope>>);
@@ -236,6 +423,296 @@ async fn lead_delegates_a_single_level_member_assignment() {
     .await
     .unwrap();
     assert_eq!(delegated, 1);
+}
+
+#[tokio::test]
+async fn lead_resume_waiting_releases_the_work_slot_and_runs_the_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-waiting-loop", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let work_repository = WorkRepository::new(pool.clone());
+    let agent_repository = AgentRepository::new(pool);
+    let engine = Arc::new(WaitingLoopEngine::default());
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        work_repository,
+        agent_repository.clone(),
+        engine.clone(),
+        Arc::clone(&publisher) as _,
+        "waiting-loop-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    let service = LeadToolService::new(
+        repository.clone(),
+        WorkRepository::new(database.pool().clone()),
+        agent_repository,
+        handle.clone(),
+    );
+
+    let lead_id = accept_lead(&repository, "work-waiting-loop").await;
+    handle.wake().unwrap();
+    engine.first_started.notified().await;
+    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Running).await;
+
+    let delegated = service
+        .delegate_assignment(
+            &lead_id,
+            DelegateAssignmentInput {
+                assigned_agent_id: "agent-instance:piwork-researcher".into(),
+                capability_pack_id: None,
+                title: "Inspect independently".into(),
+                instruction: "Inspect the relevant implementation".into(),
+                context_manifest: json!({}),
+                expected_result_schema: json!({}),
+                acceptance_criteria: json!([]),
+                permission_scope: json!({"mode": "read_only"}),
+                priority: 5,
+                max_attempts: 1,
+            },
+        )
+        .await
+        .unwrap();
+
+    engine.release_first.notify_one();
+    engine.second_started.notified().await;
+    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Waiting).await;
+    wait_for_assignment_status(
+        &repository,
+        &delegated.assignment_id,
+        AssignmentStatus::Running,
+    )
+    .await;
+    assert_eq!(
+        engine.started_assignments.lock().unwrap().as_slice(),
+        [lead_id.as_str(), delegated.assignment_id.as_str()],
+        "the child must acquire the same-Work slot after the Lead yields"
+    );
+
+    engine.release_second.notify_one();
+    wait_for_assignment_status(
+        &repository,
+        &delegated.assignment_id,
+        AssignmentStatus::Completed,
+    )
+    .await;
+    handle.wake().unwrap();
+    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Completed).await;
+    assert_eq!(
+        engine.started_assignments.lock().unwrap().as_slice(),
+        [
+            lead_id.as_str(),
+            delegated.assignment_id.as_str(),
+            lead_id.as_str(),
+        ],
+        "the Lead must start a fresh Run after the child becomes terminal"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn lead_resume_context_includes_validated_dependency_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-result-context", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let lead_id = accept_lead(&repository, "work-result-context").await;
+    let child = repository
+        .accept(AcceptAssignmentInput {
+            id: None,
+            work_id: "work-result-context".into(),
+            parent_assignment_id: Some(lead_id.clone()),
+            created_by_agent_id: Some("agent-instance:piwork-lead".into()),
+            assigned_agent_id: "agent-instance:piwork-researcher".into(),
+            capability_pack_id: None,
+            kind: AssignmentKind::Member,
+            side_effect: AssignmentSideEffect::ReadOnly,
+            title: "Inspect dependency".into(),
+            instruction: "Produce an evidence-backed result".into(),
+            context_manifest: json!({}),
+            expected_result_schema: json!({}),
+            acceptance_criteria: json!([]),
+            permission_scope: json!({"mode": "read_only"}),
+            priority: 5,
+            max_attempts: 1,
+            not_before: None,
+        })
+        .await
+        .unwrap();
+    repository
+        .add_dependency(&lead_id, &child.id)
+        .await
+        .unwrap();
+
+    let now = Utc::now();
+    repository
+        .claim(&child.id, "result-context-owner", now)
+        .await
+        .unwrap();
+    let child_run = repository
+        .begin_attempt(&child.id, "capturing", "Pi")
+        .await
+        .unwrap();
+    repository
+        .mark_running(
+            &child.id,
+            &child_run.id,
+            "result-context-session",
+            "result-context-owner",
+            now,
+        )
+        .await
+        .unwrap();
+    let mut envelope = minimal_envelope();
+    envelope.summary = "The dependency found the scheduler invariant".into();
+    repository
+        .record_result(
+            &child.id,
+            "agent-instance:piwork-researcher",
+            &serde_json::to_string(&envelope).unwrap(),
+            "valid",
+            0,
+        )
+        .await
+        .unwrap();
+    repository
+        .complete_by_assignment(&child.id, &envelope.summary, "result-context-owner")
+        .await
+        .unwrap();
+
+    let engine = Arc::new(CapturingEngine::default());
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        WorkRepository::new(pool.clone()),
+        AgentRepository::new(pool),
+        engine.clone(),
+        Arc::clone(&publisher) as _,
+        "result-context-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    handle.wake().unwrap();
+    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Completed).await;
+
+    let prompts = engine.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(
+        prompts[0].contains("The dependency found the scheduler invariant"),
+        "the resumed Lead must receive validated dependency Result Envelopes"
+    );
+    drop(prompts);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn harness_accepts_completion_already_committed_by_a_host_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-host-completion", &root_path).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let work_repository = WorkRepository::new(pool.clone());
+    let agent_repository = AgentRepository::new(pool);
+    let assignment_id = accept_lead(&repository, "work-host-completion").await;
+    let assignment = repository
+        .claim(&assignment_id, "host-completion-owner", Utc::now())
+        .await
+        .unwrap();
+    let run = repository
+        .begin_attempt(&assignment.id, "externally-completable", "Pi")
+        .await
+        .unwrap();
+    let run_id = run.id.clone();
+    let work = work_repository
+        .get(&assignment.work_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .summary;
+    let agent = agent_repository
+        .get_agent_instance(&assignment.assigned_agent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let engine = Arc::new(ExternallyCompletableEngine::default());
+    let harness = Arc::new(EngineHarness::new(
+        engine.clone(),
+        work_repository,
+        repository.clone(),
+        Arc::clone(&publisher) as _,
+    ));
+    let execution_harness = Arc::clone(&harness);
+    let execution_assignment = assignment.clone();
+    let execution = tokio::spawn(async move {
+        execution_harness
+            .execute(AssignmentExecutionRequest {
+                assignment: execution_assignment,
+                work,
+                agent,
+                run,
+                input: EngineInput {
+                    message: "Complete through a host tool".into(),
+                    images: vec![],
+                    documents: vec![],
+                },
+                effective_permission: PermissionMode::Balanced,
+                runtime_owner: "host-completion-owner".into(),
+            })
+            .await
+    });
+
+    engine.started.notified().await;
+    wait_for_assignment_status(&repository, &assignment_id, AssignmentStatus::Running).await;
+    let event_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let started: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE run_id = ? AND json_extract(payload, '$.type') = 'runStarted'",
+        )
+        .bind(&run_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        if started == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < event_deadline,
+            "RunStarted was not journaled before the host tool call"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    repository
+        .complete_by_assignment(
+            &assignment_id,
+            "committed by complete_work_delivery",
+            "host-completion-owner",
+        )
+        .await
+        .unwrap();
+    engine.release.notify_one();
+
+    let outcome = execution.await.unwrap().unwrap();
+    assert!(matches!(
+        outcome,
+        AssignmentExecutionOutcome::Completed { result_summary, .. }
+            if result_summary == "committed by complete_work_delivery"
+    ));
 }
 
 #[tokio::test]

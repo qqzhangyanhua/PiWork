@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Copy, LockKeyhole, Save } from "lucide-react";
+import { Check, Copy, LockKeyhole, Save } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -22,13 +22,11 @@ export function MemberAssembler({
   capabilityPacks,
   client,
   onSaved,
-  requestedCapabilityPackId,
   source,
 }: {
   capabilityPacks: readonly CapabilityPackSummary[];
   client: PiWorkClient;
   onSaved(instance: AgentInstanceSummary): void;
-  requestedCapabilityPackId?: string;
   source: AgentInstanceSummary;
 }) {
   const { t } = useTranslation();
@@ -48,18 +46,7 @@ export function MemberAssembler({
     source.parallelismOverride?.toString() ?? "",
   );
   const [selectedPackIds, setSelectedPackIds] = useState<Set<string>>(
-    () => {
-      const next = new Set(source.definition.capabilityPacks.map(({ id }) => id));
-      if (
-        requestedCapabilityPackId
-        && capabilityPacks.some(({ id, status }) =>
-          id === requestedCapabilityPackId && status === "executable"
-        )
-      ) {
-        next.add(requestedCapabilityPackId);
-      }
-      return next;
-    },
+    () => new Set(source.definition.capabilityPacks.map(({ id }) => id)),
   );
   const [diagnostics, setDiagnostics] = useState<AssemblyDiagnostic[]>([]);
   const [validationPending, setValidationPending] = useState(false);
@@ -83,33 +70,18 @@ export function MemberAssembler({
     setModelOverride(source.modelConfigurationOverride ?? "");
     setPermissionOverride(source.permissionPolicyOverride ?? "");
     setParallelismOverride(source.parallelismOverride?.toString() ?? "");
-    const nextPackIds = new Set(source.definition.capabilityPacks.map(({ id }) => id));
-    if (
-      requestedCapabilityPackId
-      && capabilityPacks.some(({ id, status }) =>
-        id === requestedCapabilityPackId && status === "executable"
-      )
-    ) {
-      nextPackIds.add(requestedCapabilityPackId);
-    }
-    setSelectedPackIds(nextPackIds);
+    setSelectedPackIds(new Set(source.definition.capabilityPacks.map(({ id }) => id)));
     setDiagnostics([]);
     setValidationError(null);
     setSaving(false);
     setSaveError(null);
-  }, [capabilityPacks, requestedCapabilityPackId, source]);
+  }, [source]);
 
   const fixedSystemPackIds = useMemo(() => new Set(
     source.definition.capabilityPacks
       .filter(({ catalogCapabilityId }) => catalogCapabilityId === null)
       .map(({ id }) => id),
   ), [source]);
-  const executableBusinessPacks = useMemo(() => capabilityPacks.filter(
-    (pack) => pack.catalogCapabilityId !== null && pack.status === "executable",
-  ), [capabilityPacks]);
-  const catalogOnlyCount = useMemo(() => capabilityPacks.filter(
-    ({ status }) => status === "catalog_only",
-  ).length, [capabilityPacks]);
   const inheritedSystemPacks = useMemo(() => capabilityPacks.filter(
     ({ id }) => fixedSystemPackIds.has(id),
   ), [capabilityPacks, fixedSystemPackIds]);
@@ -168,14 +140,6 @@ export function MemberAssembler({
   const beginCopy = () => {
     setDisplayName(`${source.displayName}${t("agentCenter.assembler.copySuffix")}`);
     setIsEditing(true);
-  };
-  const togglePack = (packId: string) => {
-    setSelectedPackIds((current) => {
-      const next = new Set(current);
-      if (next.has(packId)) next.delete(packId);
-      else next.add(packId);
-      return next;
-    });
   };
   const save = async () => {
     const generation = saveGenerationRef.current + 1;
@@ -316,36 +280,6 @@ export function MemberAssembler({
               <LockKeyhole aria-hidden="true" size={13} />
             </label>
           ))}
-        </div>
-      </section>
-
-      <section className="member-assembler__packs">
-        <div className="member-assembler__section-title">
-          <h4>{t("agentCenter.assembler.businessPacks")}</h4>
-          <span>{t("agentCenter.assembler.executableCount", { count: executableBusinessPacks.length })}</span>
-        </div>
-        {executableBusinessPacks.length > 0 && (
-          <div className="member-assembler__pack-list">
-            {executableBusinessPacks.map((pack) => (
-              <label className="member-pack-option" key={pack.id}>
-                <input
-                  aria-describedby={isEditing ? validationId : undefined}
-                  checked={selectedPackIds.has(pack.id)}
-                  disabled={!isEditing || saving}
-                  onChange={() => togglePack(pack.id)}
-                  type="checkbox"
-                />
-                <span><strong>{pack.name}</strong><small>{pack.description}</small></span>
-              </label>
-            ))}
-          </div>
-        )}
-        <div className="member-assembler__catalog-note">
-          <AlertTriangle aria-hidden="true" size={14} />
-          <span>
-            <strong>{t("agentCenter.assembler.catalogOnlyCount", { count: catalogOnlyCount })}</strong>
-            <small>{t("agentCenter.assembler.catalogOnlyReason")}</small>
-          </span>
         </div>
       </section>
 

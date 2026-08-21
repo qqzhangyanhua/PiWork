@@ -143,6 +143,31 @@ describe("ExecutionProgressCard", () => {
     expect(screen.queryByText("最后一个安全活动")).not.toBeInTheDocument();
   });
 
+  it("renders a delegated Lead turn as stable waiting instead of endless loading", () => {
+    const { container } = render(
+      <ExecutionProgressCard
+        events={[
+          event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+          event(2, { type: "waiting", reason: "waiting_on_assignments" }),
+        ]}
+      >
+        <div>等待成员活动</div>
+      </ExecutionProgressCard>,
+    );
+
+    expect(screen.getByText("Pi 正在等待成员结果")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "执行进度" })).toHaveAttribute(
+      "data-status",
+      "waiting",
+    );
+    expect(
+      container
+        .querySelector("[data-progress-icon] svg")
+        ?.getAttribute("class"),
+    ).toContain("clock");
+    expect(container.querySelector(".lucide-loader-circle")).toBeNull();
+  });
+
   it("reports recovered tool failures without overriding final success", () => {
     render(
       <ExecutionProgressCard

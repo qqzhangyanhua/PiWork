@@ -17,10 +17,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 async-trait = "0.1"
+async-imap = { version = "0.11.3", default-features = false, features = ["runtime-tokio"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 dunce = "1"
+futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1-native-tls"] }
+mail-parser = "0.11.7"
+native-tls = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -29,6 +34,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "chr
 tauri = { version = "2", features = [] }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-native-tls = "0.3.1"
 ts-rs = { version = "11", features = ["chrono-impl", "uuid-impl"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"

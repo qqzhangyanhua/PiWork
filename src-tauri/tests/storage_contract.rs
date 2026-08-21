@@ -61,6 +61,18 @@ fn work_memory_migration_uses_stable_lf_line_endings() {
     assert!(!migration.contains('\r'));
 }
 
+#[test]
+fn memory_candidate_assignment_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0009_memory_candidate_assignment.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[test]
+fn extensions_and_connectors_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0010_extensions_and_connectors.sql");
+    assert!(!migration.contains('\r'));
+}
+
 #[tokio::test]
 async fn assignment_outbox_has_explicit_global_ordinal_and_delivery_metadata() {
     let database = Database::open_in_memory().await.unwrap();
@@ -180,70 +192,11 @@ async fn agent_domain_migration_seeds_builtin_team_and_capabilities() {
             .fetch_one(database.pool())
             .await
             .unwrap();
-    assert_eq!(catalog_count, 96);
+    assert_eq!(catalog_count, 0);
     let system_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM capability_packs WHERE status = 'executable' AND catalog_capability_id IS NULL",
     ).fetch_one(database.pool()).await.unwrap();
     assert_eq!(system_count, 4);
-    let catalog_ids = sqlx::query_scalar::<_, String>(
-        "SELECT catalog_capability_id FROM capability_packs WHERE status = 'catalog_only' ORDER BY catalog_capability_id",
-    ).fetch_all(database.pool()).await.unwrap();
-    assert_eq!(
-        catalog_ids,
-        (1..=96)
-            .map(|id| format!("catalog-capability:{id:03}"))
-            .collect::<Vec<_>>()
-    );
-    let mismatched_catalog_ids: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM capability_packs \
-         WHERE status = 'catalog_only' AND id <> catalog_capability_id",
-    )
-    .fetch_one(database.pool())
-    .await
-    .unwrap();
-    assert_eq!(mismatched_catalog_ids, 0);
-    let catalog_rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT catalog_capability_id, name FROM capability_packs \
-         WHERE status = 'catalog_only' ORDER BY catalog_capability_id",
-    )
-    .fetch_all(database.pool())
-    .await
-    .unwrap();
-    let source = include_str!("../../src/features/agent-center/agentCapabilities.ts");
-    let rows_source = source
-        .split_once("const ROWS")
-        .unwrap()
-        .1
-        .split_once("\n];")
-        .unwrap()
-        .0;
-    let source_catalog_rows = rows_source
-        .lines()
-        .filter_map(|line| {
-            let row = line.trim().strip_prefix('[')?;
-            let (id, remainder) = row.split_once(',')?;
-            let name = remainder.trim().strip_prefix('"')?.split_once('"')?.0;
-            Some((
-                format!("catalog-capability:{:03}", id.trim().parse::<u8>().unwrap()),
-                name.to_string(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(catalog_rows, source_catalog_rows);
-    let catalog_placeholders: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM capability_packs WHERE status = 'catalog_only' \
-         AND description = '' AND instructions = '' \
-         AND input_schema_json = '{}' AND output_schema_json = '{}' \
-         AND procedure_json = '{}' AND validation_rubric_json = '{}' \
-         AND required_tools_json = '[]' AND compatible_role_template_ids_json = '[]' \
-         AND required_engine_capabilities_json = '[]' \
-         AND conflicts_with_capability_pack_ids_json = '[]' \
-         AND default_permission_scope = 'read_only' AND version = 1",
-    )
-    .fetch_one(database.pool())
-    .await
-    .unwrap();
-    assert_eq!(catalog_placeholders, 96);
 
     let executable_registries = sqlx::query_as::<_, (String, String, String)>(
         "SELECT id, required_tools_json, required_engine_capabilities_json \
@@ -811,7 +764,10 @@ async fn agent_domain_foreign_key_owner_policies_are_enforced() {
         "INSERT INTO agent_instances (id, definition_id, display_name, engine_override, model_configuration_override, permission_policy_override, parallelism_override, builtin, status, created_at, updated_at) SELECT 'agent-instance:test', 'agent-definition:test:v1', display_name, engine_override, model_configuration_override, permission_policy_override, parallelism_override, 0, status, created_at, updated_at FROM agent_instances WHERE id = 'agent-instance:piwork-engineer'",
     ).execute(database.pool()).await.unwrap();
     sqlx::query(
-        "INSERT INTO agent_capability_bindings (agent_definition_id, capability_pack_id, installed_at) VALUES ('agent-definition:test:v1', 'catalog-capability:001', '2026-01-01T00:00:00Z')",
+        "INSERT INTO capability_packs (id, catalog_capability_id, name, description, instructions, input_schema_json, output_schema_json, procedure_json, validation_rubric_json, required_tools_json, default_permission_scope, compatible_role_template_ids_json, required_engine_capabilities_json, conflicts_with_capability_pack_ids_json, version, status, created_at, updated_at) SELECT 'capability-pack:test:v1', NULL, name, description, instructions, input_schema_json, output_schema_json, procedure_json, validation_rubric_json, required_tools_json, default_permission_scope, compatible_role_template_ids_json, required_engine_capabilities_json, conflicts_with_capability_pack_ids_json, version, status, created_at, updated_at FROM capability_packs WHERE id = 'capability-pack:engineering-execution:v1'",
+    ).execute(database.pool()).await.unwrap();
+    sqlx::query(
+        "INSERT INTO agent_capability_bindings (agent_definition_id, capability_pack_id, installed_at) VALUES ('agent-definition:test:v1', 'capability-pack:test:v1', '2026-01-01T00:00:00Z')",
     ).execute(database.pool()).await.unwrap();
 
     assert_agent_domain_statement_rejected(
@@ -822,7 +778,7 @@ async fn agent_domain_foreign_key_owner_policies_are_enforced() {
     .await;
     assert_agent_domain_statement_rejected(
         &database,
-        "DELETE FROM capability_packs WHERE id = 'catalog-capability:001'",
+        "DELETE FROM capability_packs WHERE id = 'capability-pack:test:v1'",
         "FOREIGN KEY constraint failed",
     )
     .await;

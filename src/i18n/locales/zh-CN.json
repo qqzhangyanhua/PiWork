@@ -72,7 +72,8 @@
     "aboutPiWork": "关于 PiWork",
     "checkUpdates": "检查更新",
     "advancedOptions": "高级选项",
-    "advancedOptionsDescription": "Base URL 与自定义连接设置"
+    "advancedOptionsDescription": "Base URL 与自定义连接设置",
+    "webAccessNav": "联网搜索"
   },
   "runtime": {
     "desktopRequiredTitle": "请在 PiWork 桌面应用中打开",
@@ -104,56 +105,34 @@
     "connectionError": "无法验证 Provider，请检查 API Key 后重试。",
     "saveError": "无法保存模型配置，请重试。"
   },
-  "common": { "cancel": "取消", "close": "关闭", "create": "创建", "creating": "正在创建", "retry": "重试" },
+  "common": { "cancel": "取消", "close": "关闭", "create": "创建", "creating": "正在创建", "retry": "重试", "save": "保存", "enabled": "已开启", "disabled": "已关闭", "enable": "开启", "disable": "关闭" },
   "work": { "new": "新对话", "empty": "创建第一个对话" },
   "conversation": { "new": "新对话", "newInProject": "在 {{project}} 中新建对话" },
   "project": { "section": "项目", "groupLabel": "项目 {{name}}" },
   "sidebar": {
     "label": "项目与对话", "primary": "主要导航", "home": "对话主页", "works": "全部对话", "recent": "最近", "recentWorks": "最近对话", "projects": "项目",
     "newProject": "新建项目",
-    "nav": { "home": "首页", "agents": "智能体中心", "knowledge": "知识库", "dataSources": "数据源", "settings": "设置" }
+    "nav": { "home": "首页", "agents": "智能体中心", "plugins": "插件市场", "connectors": "连接器", "settings": "设置" }
   },
   "agentCenter": {
     "title": "智能体中心",
-    "headerKicker": "制造业工程化智能工作平台",
-    "eyebrow": "MAGIC FACTORY · 持久团队",
-    "descriptions": {
-      "team": "四个长期成员各有明确职责、权限和能力边界；他们只在加入 Work 或接受任务时运行。",
-      "library": "96 项业务能力按真实状态展示：目录能力用于创建任务草稿，可执行能力包才可装配到成员。"
-    },
+    "headerKicker": "本地智能体协作",
+    "eyebrow": "持久化专业团队",
+    "descriptions": { "team": "长期成员拥有明确职责和工具权限；只有加入 Work 或接受任务后才会运行。" },
     "stats": {
-      "teamLabel": "长期团队统计", "libraryLabel": "能力目录统计",
-      "members": "位长期成员", "leads": "位主理人", "systemPacks": "个系统基础能力",
-      "domains": "大能力域", "capabilities": "项能力", "p0": "项首期能力"
+      "teamLabel": "团队统计", "members": "位长期成员", "leads": "位主理人", "tools": "项工具权限"
     },
-    "views": { "label": "智能体中心视图", "team": "我的团队", "library": "能力库" },
-    "loading": "正在读取团队和能力库…",
-    "loadError": "无法加载团队和能力库",
+    "loading": "正在读取团队…",
+    "loadError": "无法加载团队",
     "team": {
-      "kicker": "长期成员", "title": "我的专业团队",
-      "description": "查看每个成员的职责、权限、Engine 与固定系统能力。",
+      "kicker": "长期成员", "title": "我的团队", "membersTitle": "团队成员",
+      "description": "查看每个成员的职责、权限、Engine 与固定工具权限。",
       "currentWorkHint": "可从成员详情把合适成员提前加入当前 Work。",
-      "runtimeNote": "这里展示长期身份，不展示伪造的运行状态；Assignment 上线后才会出现真实执行态。"
-    },
-    "libraryViews": { "label": "能力库浏览方式", "recommended": "首期推荐", "all": "全部能力" },
-    "paths": { "kicker": "建设路径", "title": "从业务闭环发现能力", "description": "先选择要推进的业务阶段，再查看这一阶段会组合调用的专业能力。" },
-    "recommended": { "kicker": "路径能力", "count": "当前路径包含 {{count}} 项能力" },
-    "catalog": { "kicker": "能力目录", "title": "探索全部 96 项能力", "description": "按关键词、能力域和建设优先级组合筛选。" },
-    "filters": {
-      "label": "能力筛选",
-      "search": "搜索能力", "searchPlaceholder": "搜索能力、使用对象或输出…",
-      "domain": "能力域", "allDomains": "全部能力域",
-      "priority": "优先级", "allPriorities": "全部优先级"
-    },
-    "results": "找到 {{count}} 项能力",
-    "empty": { "title": "没有匹配的能力", "body": "换一个关键词，或清除当前领域和优先级筛选。", "clear": "清除筛选" },
-    "capability": {
-      "open": "查看{{name}}详情", "viewDetails": "查看详情",
-      "status": { "catalog_only": "目录能力", "executable": "可装载", "deprecated": "已停用" }
+      "runtimeNote": "这里只展示长期身份；实际运行状态会随 Assignment 产生。"
     },
     "member": {
       "open": "查看{{name}}详情", "lead": "主理人", "modelDefault": "默认模型",
-      "systemPacks": "系统基础能力", "permission": "权限", "runtime": "Engine / Model",
+      "systemPacks": "工具权限", "permission": "权限", "runtime": "Engine / Model",
       "version": "定义 v{{version}}", "inCurrentWork": "已加入当前 Work", "longLived": "长期成员",
       "builtin": "内置成员", "local": "本地副本", "identityStable": "持久身份",
       "roles": { "lead": "主理", "researcher": "研究", "engineer": "工程", "reviewer": "审阅" },
@@ -162,7 +141,7 @@
     },
     "memberDrawer": {
       "close": "关闭成员详情", "responsibilities": "长期职责", "boundaries": "明确边界",
-      "loadedPacks": "已装载能力", "engineModel": "Engine / Model", "memory": "记忆策略",
+      "loadedPacks": "工具权限", "engineModel": "Engine / Model", "memory": "记忆策略",
       "memoryPolicies": { "confirmed_only": "仅保留已确认记忆" },
       "tools": "工具", "noTools": "未声明工具", "participatingWorks": "已参与 Work",
       "noParticipatingWorks": "暂无可用的参与记录。", "adding": "正在加入…",
@@ -175,10 +154,7 @@
       "customize": "自定义副本", "copySuffix": " 副本", "displayName": "成员名称",
       "engine": "Engine 覆盖", "model": "Model 覆盖", "permission": "权限策略",
       "inheritDefinition": "使用定义默认值", "parallelism": "并行上限",
-      "systemPacks": "系统基础能力", "fixedInherited": "随角色固定继承，不可卸载",
-      "businessPacks": "业务能力包", "executableCount": "{{count}} 个可装载",
-      "catalogOnlyCount": "{{count}} 项目录能力暂不可安装",
-      "catalogOnlyReason": "它们尚未补齐可执行指令、工具合同和验证规则；复制仍可保存基础覆盖项。",
+      "systemPacks": "工具权限", "fixedInherited": "随角色固定继承，不可移除",
       "validation": "装配校验", "validating": "正在校验装配…", "valid": "服务端校验通过",
       "displayNameRequired": "请输入成员名称后再保存。",
       "validationFailed": "无法完成装配校验", "repair": "修复建议", "saving": "正在保存…",
@@ -192,17 +168,54 @@
         "capability_conflict": "移除互相冲突的能力包，只保留一种工作方式。",
         "context_budget_exceeded": "减少能力包或缩短装配指令后重试。"
       }
-    },
-    "drawer": {
-      "close": "关闭详情", "catalogId": "能力编号 #{{id}}", "audiences": "使用对象",
-      "coreCapability": "核心能力", "outputs": "主要输出", "implementation": "实现方式",
-      "preparation": "使用前准备", "availability": "当前可用性",
-      "catalogOnlyReason": "该能力仍是目录说明，尚未具备可装载所需的指令、工具与验证合同。",
-      "deprecatedReason": "该能力已停用，仅保留历史说明。",
-      "startHint": "将创建一份可编辑任务草稿，确认资料和约束后再发送。",
-      "createDraft": "创建任务草稿", "assembleHint": "选择兼容成员并进入装配；此操作不会启动 Assignment。",
-      "chooseMember": "选择成员装配", "deprecatedHint": "已停用能力不提供任务或装配入口。"
     }
+  },
+  "extensions": {
+    "title": "插件市场", "subtitle": "管理内置与已验证插件，并发现 Pi 社区资源", "viewsLabel": "插件市场视图",
+    "views": { "catalog": "插件目录", "installed": "已安装", "community": "社区搜索" },
+    "tiers": { "builtin": "PiWork 内置", "verified": "PiWork 已验证", "community": "社区" },
+    "status": { "available": "可安装", "installed": "已安装", "disabled": "已停用", "revoked": "已撤销", "pending_removal": "待移除" },
+    "loading": "正在读取插件…", "loadError": "无法读取插件目录", "empty": "当前视图没有插件。",
+    "tools": "工具", "permissions": "运行权限", "permissionNetwork": "网络访问", "permissionFiles": "运行时缓存", "permissionProcess": "子进程",
+    "trustedExecutionNotice": "插件按成员授权；新的授权会从下一次 Run 开始生效。", "agentAccess": "成员授权", "grantError": "无法更新成员授权。",
+    "noDescription": "此插件没有提供说明。", "unknownPublisher": "未知发布者",
+    "community": {
+      "title": "搜索 Pi 社区插件", "description": "结果来自 npm 中标记 pi-package 的软件包。", "readOnly": "一期仅供发现，不直接执行",
+      "search": "搜索", "searching": "正在搜索…", "placeholder": "插件名称或关键词", "error": "无法连接 npm 插件目录。",
+      "empty": "输入关键词搜索社区插件。", "reviewRequired": "等待安全审核"
+    }
+  },
+  "webAccess": {
+    "title": "联网搜索", "description": "配置 Pi Web Access 使用的搜索服务、路由与 URL 抓取能力。",
+    "loading": "正在读取联网设置…", "loadError": "无法读取联网设置。", "saved": "联网设置已保存", "saving": "正在保存…", "saveError": "无法保存联网设置。",
+    "routingTitle": "搜索路由", "routingDescription": "默认服务失败时，仅在超时、限流、网络或无效响应场景使用备用服务。",
+    "defaultProvider": "默认服务", "fallbackProvider": "备用服务", "noProvider": "先开启搜索服务", "noFallback": "不使用备用服务",
+    "urlFetch": "URL 内容抓取", "urlFetchDescription": "允许读取用户或搜索结果中的网页链接。",
+    "providersTitle": "搜索服务", "providersDescription": "密钥保存在 Windows 凭据管理器；SQLite 只保存启停和路由信息。",
+    "apiKey": "{{provider}} API Key", "keyConfigured": "已安全保存，输入新值可替换", "keyPlaceholder": "输入 API Key", "keyRequired": "需要密钥", "ready": "可用",
+    "showKey": "显示密钥", "hideKey": "隐藏密钥", "clearKey": "移除已保存密钥", "endpoint": "服务地址", "endpointOptional": "可选自定义地址",
+    "providerDescriptions": {
+      "exa": "面向智能体的语义搜索", "brave": "Brave 独立搜索索引", "tavily": "面向研究任务的搜索 API", "bocha": "博查中文与全球搜索",
+      "jina": "Jina Search 与内容读取", "firecrawl": "搜索与网页内容提取", "openai": "OpenAI Responses 搜索", "searxng": "自托管聚合搜索，无需 API Key"
+    }
+  },
+  "connectors": {
+    "title": "连接器", "subtitle": "将外部服务安全接入 PiWork，并按 Work 控制访问范围", "accounts": "邮箱账户", "add": "添加邮箱连接器",
+    "loading": "正在读取连接器…", "loadError": "无法读取连接器", "empty": "还没有邮箱连接器。", "newAccount": "新连接", "accountSettings": "邮箱连接器", "addTitle": "接入企业邮箱",
+    "identity": "账户与凭据", "identityDescription": "密码只保存在 Windows 凭据管理器，不会写入项目或插件。", "displayName": "显示名称", "displayNamePlaceholder": "例如：公司邮箱",
+    "emailAddress": "邮箱地址", "username": "登录用户名", "password": "客户端专用密码", "passwordStored": "凭据已保存，留空则保持不变", "passwordPlaceholder": "输入邮箱密码或客户端专用密码",
+    "servers": "邮件服务器", "serversDescription": "一期仅支持 TLS 加密的 IMAP 与 SMTP。", "preset": "服务预设", "presets": { "aliyun": "阿里企业邮箱", "custom": "自定义 IMAP / SMTP" },
+    "pollInterval": "轮询频率", "minutes": "{{count}} 分钟", "port": "端口", "tlsOnly": "仅使用 TLS 加密连接",
+    "test": "测试连接", "testSuccess": "IMAP 与 SMTP 连接测试通过", "testError": "连接测试失败，请检查服务器、账户和客户端专用密码。",
+    "saved": "连接器配置已保存", "saveError": "无法保存连接器配置。", "enabledMessage": "连接器已开启，并以当前收件箱 UID 建立基线。", "disabledMessage": "连接器已关闭。", "enableError": "无法开启连接器；请先通过连接测试。",
+    "delete": "删除连接器", "deleteConfirm": "删除“{{name}}”及其本地邮件元数据和授权？", "workAccess": "Work 访问权限", "workAccessDescription": "连接器默认不向 Work 暴露；敏感操作即使已授权也必须逐次确认。",
+    "noWorks": "创建 Work 后可在这里授权。", "permissions": "邮箱权限", "permission": { "metadata": "搜索元数据", "read_body": "读取正文 · 需确认", "send": "发送邮件 · 需确认" }, "grantError": "无法更新 Work 授权。",
+    "recentMail": "最近邮件", "metadataOnly": "这里只保存发件人、主题、时间等元数据，不保存正文。",
+    "health": { "healthy": "连接正常", "degraded": "连接不稳定", "error": "连接异常", "untested": "尚未测试", "disabled": "已关闭" }
+  },
+  "notifications": {
+    "title": "通知", "unread": "{{count}} 条未读", "empty": "没有新通知", "clear": "清除此通知",
+    "approve": "允许", "deny": "拒绝", "to": "收件人", "subject": "主题", "sender": "发件人", "preview": "内容预览"
   },
   "workspace": {
     "home": "对话主页",
@@ -371,6 +384,8 @@
     "toolRunning": "正在执行",
     "toolCompleted": "已完成",
     "toolFailed": "失败",
+    "showToolError": "查看错误详情",
+    "hideToolError": "收起错误详情",
     "toolBurst": "{{action}}了 {{count}} 项",
     "actions": {
       "read": "读取",
@@ -416,6 +431,8 @@
     "label": "执行进度",
     "preparing": "Pi 正在准备执行",
     "running": "Pi 正在执行",
+    "waiting": "Pi 正在等待继续",
+    "waitingOnAssignments": "Pi 正在等待成员结果",
     "completedWithoutTools": "Pi 已完成",
     "completed_one": "Pi 已完成 {{count}} 个操作",
     "completed_other": "Pi 已完成 {{count}} 个操作",

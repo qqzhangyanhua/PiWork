@@ -553,6 +553,7 @@ pub enum SubmitOutcome {
 pub struct HostToolDispatcher {
     lead: LeadToolService,
     member: MemberResultService,
+    connectors: Option<std::sync::Arc<crate::connectors::ConnectorService>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -561,8 +562,17 @@ impl HostToolDispatcher {
         Self {
             lead,
             member,
+            connectors: None,
             runtime: tokio::runtime::Handle::current(),
         }
+    }
+
+    pub fn with_connector_service(
+        mut self,
+        connectors: std::sync::Arc<crate::connectors::ConnectorService>,
+    ) -> Self {
+        self.connectors = Some(connectors);
+        self
     }
 
     pub fn dispatch(
@@ -679,6 +689,17 @@ impl HostToolDispatcher {
                         })
                         .await?;
                     Ok(serde_json::to_value(outcome).map_err(json_error)?)
+                }
+                crate::connectors::TOOL_LIST_EMAIL_ACCOUNTS
+                | crate::connectors::TOOL_SEARCH_EMAIL_METADATA
+                | crate::connectors::TOOL_REQUEST_EMAIL_BODY
+                | crate::connectors::TOOL_REQUEST_SEND_EMAIL => {
+                    let connectors = self.connectors.as_ref().ok_or_else(|| {
+                        AppError::invalid_input("tool", "connector service is unavailable")
+                    })?;
+                    connectors
+                        .dispatch_host_tool(tool, context, arguments)
+                        .await
                 }
                 other => Err(AppError::invalid_input(
                     "tool",

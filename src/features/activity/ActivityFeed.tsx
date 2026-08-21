@@ -110,6 +110,25 @@ function ToolStatusMarker({ status }: { status: ToolStatus }) {
   );
 }
 
+function ToolErrorDisclosure({ preview }: { preview: string }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+
+  return (
+    <details
+      className="activity-feed__tool-result"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      open={open}
+    >
+      <summary aria-expanded={open} role="button">
+        <span>{t(open ? "activity.hideToolError" : "activity.showToolError")}</span>
+        <ChevronDown aria-hidden="true" />
+      </summary>
+      <pre>{preview}</pre>
+    </details>
+  );
+}
+
 function ToolRow({ item }: { item: ToolItem }) {
   const { t } = useTranslation();
   const object = item.descriptor.object ?? item.toolName;
@@ -131,7 +150,13 @@ function ToolRow({ item }: { item: ToolItem }) {
             </span>{" "}
             <span className="activity-feed__object">{object}</span>
           </strong>
-          {preview && preview !== object ? <small>{preview}</small> : null}
+          {preview && preview !== object ? (
+            item.status === "failed" || item.isError ? (
+              <ToolErrorDisclosure preview={preview} />
+            ) : (
+              <small>{preview}</small>
+            )
+          ) : null}
         </div>
         <ToolStatusMarker status={item.status} />
       </article>

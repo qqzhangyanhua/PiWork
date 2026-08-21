@@ -1569,7 +1569,7 @@ describe("WorkSurface", () => {
     expect(toggle).toHaveFocus();
   });
 
-  it("从侧栏进入智能体中心，同时保留未落地模块的禁用状态", async () => {
+  it("从侧栏进入团队、插件市场和连接器", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     render(<WorkSurface client={client} initialView="home" />);
@@ -1580,32 +1580,16 @@ describe("WorkSurface", () => {
     const agents = within(sidebar).getByRole("button", { name: "智能体中心" });
     expect(agents).toBeEnabled();
     await user.click(agents);
-    expect(await screen.findByRole("heading", { name: "智能体中心" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "我的团队", level: 1 })).toBeInTheDocument();
     expect(agents).toHaveAttribute("aria-current", "page");
-    expect(within(sidebar).getByRole("button", { name: "知识库（即将推出）" })).toBeDisabled();
-    expect(within(sidebar).getByRole("button", { name: "数据源（即将推出）" })).toBeDisabled();
-  });
-
-  it("shows_catalog_badges_and_keeps_prompt_drafting", async () => {
-    const user = userEvent.setup();
-    const client = createMockTauriClient();
-    render(<WorkSurface client={client} initialView="home" />);
-
-    const sidebar = await screen.findByRole("complementary", { name: "项目与对话" });
-    await user.click(within(sidebar).getByRole("button", { name: "智能体中心" }));
-    await user.click(await screen.findByRole("tab", { name: "能力库" }));
-    expect(screen.getAllByText("目录能力").length).toBeGreaterThan(0);
-    await user.click(await screen.findByRole("button", { name: "查看需求澄清智能体详情" }));
-    const capabilityDialog = screen.getByRole("dialog", { name: "需求澄清智能体" });
-    expect(within(capabilityDialog).getByText("目录能力")).toBeInTheDocument();
-    await user.click(within(capabilityDialog).getByRole("button", { name: "创建任务草稿" }));
-
-    const home = await screen.findByRole("region", { name: "对话主页" });
-    const editor = within(home).getByLabelText("首个任务");
-    expect(editor).toHaveTextContent("需求澄清智能体");
-    expect(editor).toHaveTextContent("业务目标：");
-    expect(client.createWork).not.toHaveBeenCalled();
-    expect(client.startWork).not.toHaveBeenCalled();
+    const plugins = within(sidebar).getByRole("button", { name: "插件市场" });
+    const connectors = within(sidebar).getByRole("button", { name: "连接器" });
+    expect(plugins).toBeEnabled();
+    expect(connectors).toBeEnabled();
+    await user.click(plugins);
+    expect(await screen.findByRole("heading", { name: "插件市场" })).toBeInTheDocument();
+    await user.click(connectors);
+    expect(await screen.findByRole("heading", { name: "连接器" })).toBeInTheDocument();
   });
 
   it("侧栏设置导航项打开设置页", async () => {

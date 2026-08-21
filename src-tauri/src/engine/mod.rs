@@ -18,6 +18,8 @@ pub mod pi;
 pub mod publisher;
 pub mod supervisor;
 
+pub const WAITING_ON_ASSIGNMENTS_REASON: &str = "waiting_on_assignments";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineImage {
     pub media_type: String,

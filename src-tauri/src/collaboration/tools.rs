@@ -28,7 +28,7 @@ pub const TOOL_COMPLETE_WORK_DELIVERY: &str = "complete_work_delivery";
 pub const TOOL_SUBMIT_ASSIGNMENT_RESULT: &str = "submit_assignment_result";
 pub const TOOL_REQUEST_CLARIFICATION: &str = "request_clarification";
 
-pub const LEAD_TOOLS: [&str; 9] = [
+pub const LEAD_TOOLS: [&str; 13] = [
     TOOL_LIST_WORK_MEMBERS,
     TOOL_INSPECT_CAPABILITY_PACKS,
     TOOL_DELEGATE_ASSIGNMENT,
@@ -38,16 +38,26 @@ pub const LEAD_TOOLS: [&str; 9] = [
     TOOL_RECORD_WORK_DECISION,
     TOOL_UPDATE_WORK_PLAN,
     TOOL_COMPLETE_WORK_DELIVERY,
+    crate::connectors::TOOL_LIST_EMAIL_ACCOUNTS,
+    crate::connectors::TOOL_SEARCH_EMAIL_METADATA,
+    crate::connectors::TOOL_REQUEST_EMAIL_BODY,
+    crate::connectors::TOOL_REQUEST_SEND_EMAIL,
 ];
 
-pub const MEMBER_TOOLS: [&str; 3] = [
+pub const MEMBER_TOOLS: [&str; 7] = [
     TOOL_GET_ASSIGNMENT_STATUS,
     TOOL_SUBMIT_ASSIGNMENT_RESULT,
     TOOL_REQUEST_CLARIFICATION,
+    crate::connectors::TOOL_LIST_EMAIL_ACCOUNTS,
+    crate::connectors::TOOL_SEARCH_EMAIL_METADATA,
+    crate::connectors::TOOL_REQUEST_EMAIL_BODY,
+    crate::connectors::TOOL_REQUEST_SEND_EMAIL,
 ];
 
 /// The role-scoped tool allowlist carried by a Run's host tool lease. Lead gets
-/// the nine Lead tools, every other role gets the three Member tools.
+/// the Lead collaboration tools, every other role gets the Member collaboration
+/// tools, and both sets include connector tools that are re-authorized against
+/// the current Work grant by `ConnectorService` on every call.
 pub fn role_tool_allowlist(role_kind: RoleKind) -> Vec<String> {
     let tools: &[&str] = if role_kind == RoleKind::Lead {
         &LEAD_TOOLS

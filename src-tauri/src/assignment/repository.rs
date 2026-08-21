@@ -12,6 +12,7 @@ use crate::{
             AgentSessionStatus, AgentSessionSummary, AssignmentKind, AssignmentSideEffect,
             AssignmentStatus, AssignmentSummary,
         },
+        collaboration::ResultEnvelope,
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{RunStatus, RunSummary},
     },
@@ -1647,6 +1648,38 @@ impl AssignmentRepository {
         dependencies_terminal_in(&mut connection, &assignment_id).await
     }
 
+    /// Loads the latest validated Result Envelope for each direct dependency.
+    /// Invalid and repair-requested submissions never enter another Agent's
+    /// context, and malformed durable data fails closed.
+    pub async fn validated_dependency_results(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Vec<ResultEnvelope>, AppError> {
+        let assignment_id = validate_id("assignmentId", assignment_id)?;
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT results.envelope_json \
+             FROM assignment_dependencies dependencies \
+             INNER JOIN assignment_results results \
+                ON results.assignment_id = dependencies.depends_on_assignment_id \
+             WHERE dependencies.assignment_id = ? AND results.status = 'valid' \
+               AND results.repair_attempt = ( \
+                   SELECT MAX(latest.repair_attempt) FROM assignment_results latest \
+                   WHERE latest.assignment_id = results.assignment_id AND latest.status = 'valid' \
+               ) \
+             ORDER BY dependencies.depends_on_assignment_id",
+        )
+        .bind(assignment_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|_| AppError::engine("stored dependency Result Envelope is malformed"))
+            })
+            .collect()
+    }
+
     /// Emits the `assignmentDelegated` collaboration event for a newly accepted
     /// child Assignment, using the child's product identity.
     pub async fn record_delegation(
@@ -2325,12 +2358,30 @@ async fn resume_parent_if_dependencies_terminal(
         return Ok(());
     }
     let now = Utc::now();
-    sqlx::query("UPDATE assignments SET status = 'queued', updated_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(parent_id)
-        .execute(&mut **transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE runs SET status = 'completed', completed_at = ?, updated_at = ? \
+         WHERE assignment_id = ? AND status = 'waiting'",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(parent_id)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE assignments SET status = 'queued', runtime_owner_id = NULL, claimed_at = NULL, \
+         started_at = NULL, completed_at = NULL, next_attempt_at = NULL, recovery_reason = NULL, \
+         updated_at = ? WHERE id = ?",
+    )
+    .bind(now)
+    .bind(parent_id)
+    .execute(&mut **transaction)
+    .await?;
     parent.status = AssignmentStatus::Queued;
+    parent.claimed_at = None;
+    parent.started_at = None;
+    parent.completed_at = None;
+    parent.next_attempt_at = None;
+    parent.recovery_reason = None;
     parent.updated_at = now;
     assignment_event(
         transaction,

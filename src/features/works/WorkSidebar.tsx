@@ -1,11 +1,11 @@
 import {
   Bot,
+  Blocks,
+  Cable,
   ChevronDown,
   ChevronRight,
   CircleAlert,
-  Database,
   Folder,
-  LibraryBig,
   LoaderCircle,
   MessageSquare,
   Plus,
@@ -21,12 +21,22 @@ import { AccountMenu } from "../settings/AccountMenu";
 import { projectGroups } from "../workspace/WorkList";
 import { useWorkStore } from "./WorkStoreProvider";
 
-export type WorkspaceView = "home" | "new" | "all" | "detail" | "agents" | "settings";
+export type WorkspaceView =
+  | "home"
+  | "new"
+  | "all"
+  | "detail"
+  | "agents"
+  | "plugins"
+  | "connectors"
+  | "settings";
 
 type WorkSidebarProps = {
   activeView: WorkspaceView;
   onAgentsRequest(): void;
+  onConnectorsRequest(): void;
   onCreateRequest(rootPath?: string): void;
+  onPluginsRequest(): void;
   onSettingsRequest(): void;
   onWorkSelected(): void;
   newWorkTriggerRef: RefObject<HTMLButtonElement | null>;
@@ -46,7 +56,9 @@ function ConversationIcon({ status }: { status: WorkSummary["status"] }) {
 export function WorkSidebar({
   activeView,
   onAgentsRequest,
+  onConnectorsRequest,
   onCreateRequest,
+  onPluginsRequest,
   onSettingsRequest,
   onWorkSelected,
   newWorkTriggerRef,
@@ -103,22 +115,22 @@ export function WorkSidebar({
           <span>{t("sidebar.nav.agents")}</span>
         </button>
         <button
-          aria-label={t("dashboard.comingSoon", { feature: t("sidebar.nav.knowledge") })}
+          aria-current={activeView === "plugins" ? "page" : undefined}
           className="work-sidebar__nav-item"
-          disabled
+          onClick={onPluginsRequest}
           type="button"
         >
-          <LibraryBig aria-hidden="true" size={16} />
-          <span>{t("sidebar.nav.knowledge")}</span>
+          <Blocks aria-hidden="true" size={16} />
+          <span>{t("sidebar.nav.plugins")}</span>
         </button>
         <button
-          aria-label={t("dashboard.comingSoon", { feature: t("sidebar.nav.dataSources") })}
+          aria-current={activeView === "connectors" ? "page" : undefined}
           className="work-sidebar__nav-item"
-          disabled
+          onClick={onConnectorsRequest}
           type="button"
         >
-          <Database aria-hidden="true" size={16} />
-          <span>{t("sidebar.nav.dataSources")}</span>
+          <Cable aria-hidden="true" size={16} />
+          <span>{t("sidebar.nav.connectors")}</span>
         </button>
         <button
           aria-current={activeView === "settings" ? "page" : undefined}

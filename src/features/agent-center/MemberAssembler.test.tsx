@@ -9,7 +9,7 @@ import { AgentCenterPage } from "./AgentCenterPage";
 import { MemberAssembler } from "./MemberAssembler";
 
 const DIAGNOSTICS: AssemblyDiagnostic[] = [
-  { code: "not_executable", capabilityPackId: "catalog-capability:001", message: "目录能力不可执行" },
+  { code: "not_executable", capabilityPackId: "capability-pack:unavailable", message: "工具权限不可执行" },
   { code: "incompatible_role", capabilityPackId: "capability-pack:other", message: "能力包与角色不兼容" },
   { code: "missing_tool", capabilityPackId: "capability-pack:tool", message: "缺少必要工具" },
   { code: "missing_engine_capability", capabilityPackId: "capability-pack:engine", message: "Engine 能力不足" },
@@ -33,7 +33,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 
@@ -76,19 +75,13 @@ describe("MemberAssembler", () => {
       builtin: false,
     };
     const capabilityPacks = await client.listCapabilityPacks();
-    const businessPack = {
-      ...capabilityPacks.find(({ id }) => id === "catalog-capability:001")!,
-      compatibleRoleTemplateIds: [source.definition.roleTemplateId],
-      name: "可切换业务能力",
-      status: "executable" as const,
-    };
     let resolveSave!: (member: AgentInstanceSummary) => void;
     client.saveAgentCopy.mockReturnValue(new Promise((resolve) => {
       resolveSave = resolve;
     }));
     render(
       <MemberAssembler
-        capabilityPacks={[...capabilityPacks, businessPack]}
+        capabilityPacks={capabilityPacks}
         client={client}
         onSaved={vi.fn()}
         source={source}
@@ -104,7 +97,6 @@ describe("MemberAssembler", () => {
     expect(screen.getByRole("textbox", { name: "Model 覆盖" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "权限策略" })).toBeDisabled();
     expect(screen.getByRole("spinbutton", { name: "并行上限" })).toBeDisabled();
-    expect(screen.getByRole("checkbox", { name: /可切换业务能力/u })).toBeDisabled();
 
     await act(async () => resolveSave(source));
   });
@@ -116,7 +108,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 
@@ -142,7 +133,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 
@@ -177,7 +167,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 
@@ -218,7 +207,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 
@@ -248,7 +236,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 
@@ -348,7 +335,6 @@ describe("MemberAssembler", () => {
     render(
       <AgentCenterPage
         client={client}
-        onStartCatalogCapability={vi.fn()}
       />,
     );
 

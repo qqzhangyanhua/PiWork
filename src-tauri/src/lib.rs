@@ -8,14 +8,17 @@ pub mod agent;
 pub mod app_state;
 pub mod assignment;
 pub mod collaboration;
+pub mod connectors;
 pub mod document_runtime;
 pub mod domain;
 pub mod engine;
 pub mod environment;
 pub mod error;
+pub mod extensions;
 pub mod model;
 pub mod paths;
 pub mod resource;
+pub mod secret;
 pub mod storage;
 pub mod work;
 
@@ -175,6 +178,13 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 .path()
                 .resolve("piwork-host-tools.ts", BaseDirectory::Resource)
                 .ok();
+            let bundled_web_access = app
+                .path()
+                .resolve(
+                    "pi-sidecar/builtin-extensions/pi-web-access/node_modules/pi-web-access/index.ts",
+                    BaseDirectory::Resource,
+                )
+                .ok();
             let observer = engine::activity_observer::ActivityObserverHandle::in_process();
             tauri::async_runtime::block_on(orchestrate_startup(
                 || {
@@ -243,6 +253,14 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 )| -> StartupResult<()> {
                     let model_service =
                         Arc::new(model::ModelService::production(model_repository)?);
+                    let extension_service = Arc::new(extensions::ExtensionService::new(
+                        pool.clone(),
+                        bundled_web_access.clone(),
+                    )?);
+                    let connector_service = Arc::new(connectors::ConnectorService::new(
+                        pool.clone(),
+                        Some(app.handle().clone()),
+                    ));
                     let host_tool_extension = bundled_host_tools.clone().ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -256,7 +274,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             runtime_dir.clone(),
                             bundled_pi.clone(),
                         )?
-                        .with_host_tool_extension(host_tool_extension),
+                        .with_host_tool_extension(host_tool_extension)
+                        .with_extension_service(Arc::clone(&extension_service)),
                     );
                     if !app.manage(observer.clone()) {
                         return Err(std::io::Error::new(
@@ -304,8 +323,11 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         scheduler_handle.clone(),
                     )
                     .with_memory(collaboration::memory::MemoryService::new(pool.clone()));
-                    let dispatcher =
-                        collaboration::service::HostToolDispatcher::new(lead_tools, member_tools);
+                    let dispatcher = collaboration::service::HostToolDispatcher::new(
+                        lead_tools,
+                        member_tools,
+                    )
+                    .with_connector_service(Arc::clone(&connector_service));
                     let dispatch: Arc<collaboration::tool_server::ToolDispatch> =
                         Arc::new(move |tool, context, arguments| {
                             dispatcher.dispatch(tool, context, arguments)
@@ -353,7 +375,9 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             resource_service,
                             agent_service,
                         )
-                        .with_assignment_service(assignment_service),
+                        .with_assignment_service(assignment_service)
+                        .with_extension_service(extension_service)
+                        .with_connector_service(Arc::clone(&connector_service)),
                     ) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
@@ -361,6 +385,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         )
                         .into());
                     }
+                    connector_service.start_poller();
                     Ok(())
                 },
                 || -> StartupResult<()> {
@@ -404,7 +429,24 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             agent::commands::get_work_team,
             agent::commands::validate_agent_assembly,
             agent::commands::save_agent_copy,
-            agent::commands::add_work_member
+            agent::commands::add_work_member,
+            extensions::commands::list_extensions,
+            extensions::commands::search_community_extensions,
+            extensions::commands::set_extension_agent_enabled,
+            extensions::commands::get_web_access_settings,
+            extensions::commands::save_web_access_settings,
+            connectors::commands::list_email_connectors,
+            connectors::commands::save_email_connector,
+            connectors::commands::test_email_connector,
+            connectors::commands::set_email_connector_enabled,
+            connectors::commands::delete_email_connector,
+            connectors::commands::set_connector_work_grant,
+            connectors::commands::list_email_metadata,
+            connectors::commands::list_app_notifications,
+            connectors::commands::mark_app_notification_read,
+            connectors::commands::clear_app_notification,
+            connectors::commands::list_pending_connector_actions,
+            connectors::commands::resolve_pending_connector_action,
         ])
 }
 
