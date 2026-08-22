@@ -1,4 +1,5 @@
 use std::{
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -7,32 +8,12 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use xberg::{ExtractInput, ExtractionConfig, OcrConfig, OcrStrategy, OutputFormat};
 
-use super::{
-    DocumentRequest, DocumentResult, DocumentRuntime, DocumentRuntimeError, is_supported_media_type,
+use piwork_lib::document_runtime::{
+    DocumentFailureCode, DocumentRequest, DocumentResult, DocumentRuntime, DocumentRuntimeError,
+    DocumentRuntimeResponse, MAX_DOCUMENT_OUTPUT_BYTES, validate_request,
 };
 
-pub const MAX_DOCUMENT_OUTPUT_BYTES: u64 = 10 * 1024 * 1024;
-
-pub fn validate_request(
-    request: &DocumentRequest,
-    derivative_root: &Path,
-) -> Result<(), DocumentRuntimeError> {
-    let has_parent = request
-        .output_path
-        .components()
-        .any(|component| component == Component::ParentDir);
-    if !request.source_path.is_absolute()
-        || !request.source_path.is_file()
-        || !request.output_path.is_absolute()
-        || !derivative_root.is_absolute()
-        || has_parent
-        || !request.output_path.starts_with(derivative_root)
-        || !is_supported_media_type(&request.media_type)
-    {
-        return Err(DocumentRuntimeError::InvalidRequest);
-    }
-    Ok(())
-}
+const MAX_PROTOCOL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct XbergDocumentRuntime {
@@ -112,4 +93,51 @@ async fn extract_document(
         extractor: "xberg".into(),
         extractor_version: "1.0.5".into(),
     })
+}
+
+pub fn run_child_from_stdio(derivative_root: PathBuf) -> i32 {
+    std::thread::Builder::new()
+        .name("piwork-document-runtime".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run_child_inner(derivative_root))
+        .and_then(|worker| {
+            worker
+                .join()
+                .map_err(|_| std::io::Error::other("document runtime worker panicked"))
+        })
+        .unwrap_or(1)
+}
+
+fn run_child_inner(derivative_root: PathBuf) -> i32 {
+    let response = (|| {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(u64::try_from(MAX_PROTOCOL_BYTES + 1).unwrap_or(u64::MAX))
+            .read_to_end(&mut bytes)
+            .map_err(|_| DocumentRuntimeError::InvalidRequest)?;
+        if bytes.len() > MAX_PROTOCOL_BYTES {
+            return Err(DocumentRuntimeError::InvalidRequest);
+        }
+        let request = serde_json::from_slice::<DocumentRequest>(&bytes)
+            .map_err(|_| DocumentRuntimeError::InvalidRequest)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| DocumentRuntimeError::Unavailable)?;
+        runtime.block_on(XbergDocumentRuntime::new(derivative_root).extract(request))
+    })();
+    let (protocol, exit_code) = match response {
+        Ok(result) => (DocumentRuntimeResponse::Success { result }, 0),
+        Err(error) => (
+            DocumentRuntimeResponse::Failure {
+                code: DocumentFailureCode::from(&error),
+            },
+            1,
+        ),
+    };
+    if let Ok(json) = serde_json::to_vec(&protocol) {
+        let _ = std::io::stdout().write_all(&json);
+        let _ = std::io::stdout().flush();
+    }
+    exit_code
 }

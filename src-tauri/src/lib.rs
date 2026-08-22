@@ -1,5 +1,3 @@
-#![allow(linker_messages)] // Xberg's bundled static Tesseract selects a release CRT in debug builds.
-
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
 use tauri::{Manager, path::BaseDirectory};

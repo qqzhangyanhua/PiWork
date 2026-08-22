@@ -1,14 +1,35 @@
 mod process;
 mod protocol;
-mod xberg;
 
-use std::path::PathBuf;
+use std::path::{Component, Path};
 
 use async_trait::async_trait;
 
 pub use process::ProcessDocumentRuntime;
 pub use protocol::{DocumentFailureCode, DocumentRequest, DocumentResult, DocumentRuntimeResponse};
-pub use xberg::{MAX_DOCUMENT_OUTPUT_BYTES, XbergDocumentRuntime, validate_request};
+
+pub const MAX_DOCUMENT_OUTPUT_BYTES: u64 = 10 * 1024 * 1024;
+
+pub fn validate_request(
+    request: &DocumentRequest,
+    derivative_root: &Path,
+) -> Result<(), DocumentRuntimeError> {
+    let has_parent = request
+        .output_path
+        .components()
+        .any(|component| component == Component::ParentDir);
+    if !request.source_path.is_absolute()
+        || !request.source_path.is_file()
+        || !request.output_path.is_absolute()
+        || !derivative_root.is_absolute()
+        || has_parent
+        || !request.output_path.starts_with(derivative_root)
+        || !is_supported_media_type(&request.media_type)
+    {
+        return Err(DocumentRuntimeError::InvalidRequest);
+    }
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentRuntimeError {
@@ -45,8 +66,4 @@ pub fn is_supported_media_type(media_type: &str) -> bool {
             | "application/vnd.ms-excel.sheet.binary.macroenabled.12"
             | "text/csv"
     )
-}
-
-pub fn run_child_from_stdio(derivative_root: PathBuf) -> i32 {
-    process::run_child_from_stdio(derivative_root)
 }

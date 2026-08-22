@@ -1,10 +1,4 @@
-use std::{
-    io::{Read, Write},
-    path::PathBuf,
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::{
@@ -14,7 +8,7 @@ use tokio::{
 
 use super::{
     DocumentFailureCode, DocumentRequest, DocumentResult, DocumentRuntime, DocumentRuntimeError,
-    DocumentRuntimeResponse, XbergDocumentRuntime,
+    DocumentRuntimeResponse,
 };
 
 const DOCUMENT_RUNTIME_TIMEOUT: Duration = Duration::from_secs(120);
@@ -138,51 +132,4 @@ impl From<&DocumentRuntimeError> for DocumentFailureCode {
             DocumentRuntimeError::Unavailable | DocumentRuntimeError::Timeout => Self::Unavailable,
         }
     }
-}
-
-pub fn run_child_from_stdio(derivative_root: PathBuf) -> i32 {
-    std::thread::Builder::new()
-        .name("piwork-document-runtime".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || run_child_inner(derivative_root))
-        .and_then(|worker| {
-            worker
-                .join()
-                .map_err(|_| std::io::Error::other("document runtime worker panicked"))
-        })
-        .unwrap_or(1)
-}
-
-fn run_child_inner(derivative_root: PathBuf) -> i32 {
-    let response = (|| {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .take(u64::try_from(MAX_PROTOCOL_BYTES + 1).unwrap_or(u64::MAX))
-            .read_to_end(&mut bytes)
-            .map_err(|_| DocumentRuntimeError::InvalidRequest)?;
-        if bytes.len() > MAX_PROTOCOL_BYTES {
-            return Err(DocumentRuntimeError::InvalidRequest);
-        }
-        let request = serde_json::from_slice::<DocumentRequest>(&bytes)
-            .map_err(|_| DocumentRuntimeError::InvalidRequest)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| DocumentRuntimeError::Unavailable)?;
-        runtime.block_on(XbergDocumentRuntime::new(derivative_root).extract(request))
-    })();
-    let (protocol, exit_code) = match response {
-        Ok(result) => (DocumentRuntimeResponse::Success { result }, 0),
-        Err(error) => (
-            DocumentRuntimeResponse::Failure {
-                code: DocumentFailureCode::from(&error),
-            },
-            1,
-        ),
-    };
-    if let Ok(json) = serde_json::to_vec(&protocol) {
-        let _ = std::io::stdout().write_all(&json);
-        let _ = std::io::stdout().flush();
-    }
-    exit_code
 }
