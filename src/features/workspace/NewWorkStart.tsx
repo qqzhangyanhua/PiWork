@@ -1,22 +1,14 @@
 import {
   ArrowUp,
-  ArrowUpRight,
-  Bot,
-  BookOpen,
-  Bug,
   Check,
-  FileText,
   Folder,
   FolderOpen,
-  GitPullRequest,
-  Globe,
-  Hammer,
   Laptop,
   Plus,
   Search,
   X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { appErrorMessageKey, appErrorMessageValues } from "../../domain/appError";
@@ -30,7 +22,7 @@ import { ComposerModelIndicator } from "./ComposerModelIndicator";
 import { ProjectPromptEditor } from "./ProjectPromptEditor";
 import { AttachmentButton } from "./AttachmentButton";
 import { AttachmentDraftList } from "./AttachmentDraftList";
-import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
+import { CoDoLogo } from "../../components/brand/CoDoLogo";
 
 const workTitle = (prompt: string) => {
   const firstLine = prompt.trim().split(/\r?\n/, 1)[0] ?? prompt.trim();
@@ -46,7 +38,6 @@ export function NewWorkStart({
   pickProjectDirectory,
   pickAttachments,
   variant = "standalone",
-  dashboardExtras,
 }: {
   initialPrompt?: string;
   initialRootPath?: string;
@@ -56,7 +47,6 @@ export function NewWorkStart({
   pickProjectDirectory: PickProjectDirectory;
   pickAttachments: PickAttachments;
   variant?: "standalone" | "dashboard";
-  dashboardExtras?: ReactNode;
 }) {
   const { t } = useTranslation();
   const createWork = useWorkStore((state) => state.createWork);
@@ -87,13 +77,6 @@ export function NewWorkStart({
     path.toLocaleLowerCase().includes(projectQuery.trim().toLocaleLowerCase()),
   );
   const effectiveRootPath = rootPath || defaultRootPath;
-  const suggestions = [
-    { key: "explore", icon: Search },
-    { key: "build", icon: Hammer },
-    { key: "review", icon: GitPullRequest },
-    { key: "fix", icon: Bug },
-    { key: "docs", icon: FileText },
-  ] as const;
   useEffect(() => {
     if (error && !submitting) promptRef.current?.focus();
   }, [error, submitting]);
@@ -249,9 +232,6 @@ export function NewWorkStart({
       type="button"
     >
       <ArrowUp aria-hidden="true" size={17} />
-      {variant === "dashboard" && (
-        <span className="new-work-start__send-hint" aria-hidden="true">{t("dashboard.composer.sendHint")}</span>
-      )}
     </button>
   );
 
@@ -263,33 +243,18 @@ export function NewWorkStart({
       {variant === "standalone" && (
         <div className="new-work-start__intro">
           <span className="new-work-start__mark" aria-hidden="true">
-            <ContinuousLoopLogo size={28} />
+            <CoDoLogo size={28} />
           </span>
           <h1 id="new-work-heading">{t("newWork.heading")}</h1>
         </div>
       )}
-      <div aria-label={t("newWork.suggestions.label")} className="new-work-suggestions">
-        {suggestions.map(({ key, icon: Icon }) => (
-          <button
-            aria-label={t(`newWork.suggestions.${key}.title`)}
-            className="new-work-suggestion"
-            disabled={submitting}
-            key={key}
-            onClick={() => {
-              setPrompt(t(`newWork.suggestions.${key}.prompt`));
-              setReferencedFiles([]);
-              queueMicrotask(() => promptRef.current?.focus());
-            }}
-            type="button"
-          >
-            <span className="new-work-suggestion__icon"><Icon aria-hidden="true" size={17} /></span>
-            <strong>{t(`newWork.suggestions.${key}.title`)}</strong>
-            <small>{t(`newWork.suggestions.${key}.body`)}</small>
-            <ArrowUpRight aria-hidden="true" className="new-work-suggestion__arrow" size={14} />
-          </button>
-        ))}
-      </div>
-      {dashboardExtras}
+      {variant === "dashboard" && (
+        <div className="new-work-start__home-intro">
+          <CoDoLogo size={72} variant="signature" />
+          <h1>{t("dashboard.greeting.title")}</h1>
+          <p className="sr-only">{t("app.slogan")}</p>
+        </div>
+      )}
       <div
         className="new-work-start__composer"
         data-testid={variant === "dashboard" ? "dashboard-composer" : undefined}
@@ -413,30 +378,6 @@ export function NewWorkStart({
             <>
               <div className="new-work-start__tool-group" data-testid="dashboard-composer-tools">
                 {attachmentButton}
-                <button
-                  aria-label={t("dashboard.comingSoon", { feature: t("dashboard.composer.agentButton") })}
-                  className="new-work-start__extra-action"
-                  disabled
-                  type="button"
-                >
-                  <Bot aria-hidden="true" size={16} />
-                </button>
-                <button
-                  aria-label={t("dashboard.comingSoon", { feature: t("dashboard.composer.knowledgeButton") })}
-                  className="new-work-start__extra-action"
-                  disabled
-                  type="button"
-                >
-                  <BookOpen aria-hidden="true" size={16} />
-                </button>
-                <button
-                  aria-label={t("dashboard.comingSoon", { feature: t("dashboard.composer.webSearchButton") })}
-                  className="new-work-start__extra-action"
-                  disabled
-                  type="button"
-                >
-                  <Globe aria-hidden="true" size={16} />
-                </button>
               </div>
               <div className="new-work-start__submit-group" data-testid="dashboard-composer-submit">
                 <ComposerModelIndicator modelLabel={modelLabel} />

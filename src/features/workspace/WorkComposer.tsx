@@ -1,4 +1,4 @@
-import { ArrowUp, Square } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { type Ref, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -37,11 +37,8 @@ export function WorkComposer({
   const [attachmentResults, setAttachmentResults] = useState<ResourceSummary[]>([]);
   const [selectedResourceIds, setSelectedResourceIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [stopping, setStopping] = useState(false);
   const submittingRef = useRef(false);
   const startWork = useWorkStore((state) => state.startWork);
-  const stopWork = useWorkStore((state) => state.stopWork);
-  const interruptWork = useWorkStore((state) => state.interruptWork);
   const loading = useWorkStore((state) => state.loading);
   const runActive = queueStatuses.includes(work.status);
   const actionLabel = continueStatuses.includes(work.status)
@@ -78,36 +75,6 @@ export function WorkComposer({
         clearDraft();
       }
       // The store normalizes and exposes the error in the product UI.
-    } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
-    }
-  };
-
-  const stop = async () => {
-    if (!runActive || stopping) return;
-    setStopping(true);
-    try {
-      await stopWork(work.id);
-    } catch {
-      // The store exposes the normalized error in the product UI.
-    } finally {
-      setStopping(false);
-    }
-  };
-
-  const interrupt = async () => {
-    const instruction = prompt.trim();
-    if (!instruction && readyResourceIds.length === 0) return;
-    if (!runActive || submittingRef.current) return;
-    if (!window.confirm(t("composer.interruptConfirm"))) return;
-    submittingRef.current = true;
-    setSubmitting(true);
-    try {
-      await interruptWork(work.id, instruction, referencedFiles, readyResourceIds);
-      clearDraft();
-    } catch {
-      // The store exposes the normalized error in the product UI.
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
@@ -166,28 +133,6 @@ export function WorkComposer({
           >
             <ArrowUp aria-hidden="true" size={16} />
           </button>
-          {runActive && (
-            <button
-              aria-label={t("composer.interrupt")}
-              className="button composer-submit--interrupt"
-              type="button"
-              disabled={submitting || loading || !canSubmit}
-              onClick={() => void interrupt()}
-            >
-              {t("composer.interrupt")}
-            </button>
-          )}
-          {runActive && (
-            <button
-              aria-label={t("composer.stop")}
-              className="button composer-submit--stop"
-              type="button"
-              disabled={stopping || loading}
-              onClick={() => void stop()}
-            >
-              <Square aria-hidden="true" fill="currentColor" size={11} />
-            </button>
-          )}
         </div>
       </div>
     </footer>

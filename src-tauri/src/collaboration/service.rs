@@ -66,7 +66,12 @@ impl LeadToolService {
             .await?
             .ok_or_else(|| AppError::invalid_input("workId", "work team not found"))?;
         let mut members = team.members;
-        members.push(team.lead);
+        if !members
+            .iter()
+            .any(|member| member.instance.id == team.lead.instance.id)
+        {
+            members.push(team.lead);
+        }
         Ok(members)
     }
 
@@ -160,16 +165,43 @@ impl LeadToolService {
             .get_work_team(&lead.work_id)
             .await?
             .ok_or_else(|| AppError::invalid_input("workId", "work team not found"))?;
-        let is_member = team
+        let member = team
             .members
             .iter()
-            .any(|member| member.instance.id == input.assigned_agent_id);
-        if !is_member {
-            return Err(AppError::invalid_input(
-                "assignedAgentId",
-                "target is not an active Work member",
-            ));
-        }
+            .find(|member| member.instance.id == input.assigned_agent_id)
+            .ok_or_else(|| {
+                AppError::invalid_input("assignedAgentId", "target is not an active Work member")
+            })?;
+        let capability_pack_id = match input.capability_pack_id.as_deref() {
+            Some(pack_id) => {
+                if !member
+                    .instance
+                    .definition
+                    .capability_packs
+                    .iter()
+                    .any(|pack| pack.id == pack_id)
+                {
+                    return Err(AppError::invalid_input(
+                        "capabilityPackId",
+                        "capability pack is not bound to the target Agent",
+                    ));
+                }
+                Some(pack_id.to_owned())
+            }
+            None if member.instance.definition.capability_packs.len() == 1 => member
+                .instance
+                .definition
+                .capability_packs
+                .first()
+                .map(|pack| pack.id.clone()),
+            None if member.instance.definition.capability_packs.len() > 1 => {
+                return Err(AppError::invalid_input(
+                    "capabilityPackId",
+                    "target Agent has multiple capability packs; select one explicitly",
+                ));
+            }
+            None => None,
+        };
 
         let child = self
             .repository
@@ -179,7 +211,7 @@ impl LeadToolService {
                 parent_assignment_id: Some(lead.id.clone()),
                 created_by_agent_id: Some(lead.assigned_agent_id.clone()),
                 assigned_agent_id: input.assigned_agent_id.clone(),
-                capability_pack_id: input.capability_pack_id,
+                capability_pack_id,
                 kind: AssignmentKind::Member,
                 side_effect: AssignmentSideEffect::Unknown,
                 title: input.title.clone(),

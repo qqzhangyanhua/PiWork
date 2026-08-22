@@ -582,6 +582,20 @@ export const createMockTauriClient = (): MockTauriClient => {
     detail.summary.updatedAt = activeRun.completedAt;
     return detail;
   });
+  const archiveWork: Mock<PiWorkClient["archiveWork"]> = vi.fn(async (workId) => {
+    const detail = details.get(workId);
+    if (!detail) throw new Error(`Work not found: ${workId}`);
+    detail.summary.status = "archived";
+    detail.summary.updatedAt = now(60 + runSequence);
+    return cloneDto(detail);
+  });
+  const restoreWork: Mock<PiWorkClient["restoreWork"]> = vi.fn(async (workId) => {
+    const detail = details.get(workId);
+    if (!detail) throw new Error(`Work not found: ${workId}`);
+    detail.summary.status = "idle";
+    detail.summary.updatedAt = now(70 + runSequence);
+    return cloneDto(detail);
+  });
   const listenToWorkEvents = vi.fn(
     async (handler: (event: WorkEventEnvelope) => void) => {
       handlers.add(handler);
@@ -643,6 +657,8 @@ export const createMockTauriClient = (): MockTauriClient => {
     detachDraftResource,
     startWork,
     stopWork,
+    archiveWork,
+    restoreWork,
     drainAssignmentEventOutbox,
     listWorkAssignments,
     queueWorkInput,

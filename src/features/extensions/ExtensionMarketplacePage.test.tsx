@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,36 +28,19 @@ describe("ExtensionMarketplacePage", () => {
     await i18n.changeLanguage("zh-CN");
   });
 
-  it("shows the bundled web plugin and grants it to an agent", async () => {
-    const user = userEvent.setup();
+  it("shows the bundled web plugin as available to every Agent", async () => {
     const client = createMockTauriClient();
-    const agents = await client.listAgentInstances();
-    const lead = agents.find(({ definition }) => definition.roleKind === "lead")!;
     const listExtensions = vi.fn(async () => [webAccess]);
-    const setExtensionAgentEnabled = vi.fn(async () => ({
-      ...webAccess,
-      enabledAgentIds: [lead.id],
-    }));
     client.listExtensions = listExtensions;
-    client.setExtensionAgentEnabled = setExtensionAgentEnabled;
 
     render(<ExtensionMarketplacePage client={client} />);
 
     const extension = await screen.findByRole("article");
     expect(within(extension).getByText("Pi Web Access")).toBeInTheDocument();
-    expect(within(extension).getByText("PiWork 内置")).toBeInTheDocument();
+    expect(within(extension).getByText("CoDo 内置")).toBeInTheDocument();
     expect(within(extension).getByText("web_search")).toBeInTheDocument();
 
-    await user.click(within(extension).getByRole("checkbox", { name: /lead/u }));
-
-    expect(setExtensionAgentEnabled).toHaveBeenCalledWith(
-      "pi-web-access",
-      lead.id,
-      true,
-    );
-    await waitFor(() => expect(
-      within(extension).getByRole("checkbox", { name: /lead/u }),
-    ).toBeChecked());
+    expect(within(extension).getByText("自动提供给当前及未来的所有智能体")).toBeInTheDocument();
   });
 
   it("searches npm pi-package resources as review-only community results", async () => {

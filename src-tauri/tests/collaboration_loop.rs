@@ -272,6 +272,40 @@ async fn seed_work(pool: &sqlx::SqlitePool, work_id: &str, root_path: &str) {
     .unwrap();
 }
 
+async fn add_alternate_research_pack(pool: &sqlx::SqlitePool) {
+    sqlx::query(
+        "INSERT INTO capability_packs (
+             id, catalog_capability_id, name, description, instructions,
+             input_schema_json, output_schema_json, procedure_json, validation_rubric_json,
+             required_tools_json, default_permission_scope, compatible_role_template_ids_json,
+             required_engine_capabilities_json, conflicts_with_capability_pack_ids_json,
+             version, status, created_at, updated_at
+         )
+         SELECT 'capability-pack:alternate-research:v1', NULL, 'Alternate research',
+                'An alternate research method.', 'ALTERNATE_RESEARCH_INSTRUCTIONS',
+                input_schema_json, output_schema_json, procedure_json, validation_rubric_json,
+                required_tools_json, default_permission_scope, compatible_role_template_ids_json,
+                required_engine_capabilities_json, conflicts_with_capability_pack_ids_json,
+                version, status, created_at, updated_at
+         FROM capability_packs WHERE id = 'capability-pack:source-research:v1'",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_capability_bindings (
+             agent_definition_id, capability_pack_id, installed_at
+         ) VALUES (
+             'agent-definition:piwork-researcher:v1',
+             'capability-pack:alternate-research:v1',
+             '2026-08-16T10:00:00Z'
+         )",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn accept_lead(repository: &AssignmentRepository, work_id: &str) -> String {
     repository
         .accept(AcceptAssignmentInput {
@@ -404,6 +438,11 @@ async fn lead_delegates_a_single_level_member_assignment() {
         Some(lead_id.as_str())
     );
     assert_eq!(child.assigned_agent_id, "agent-instance:piwork-researcher");
+    assert_eq!(
+        child.capability_pack_id.as_deref(),
+        Some("capability-pack:source-research:v1"),
+        "a single bound expert capability should be selected automatically"
+    );
 
     let dependency: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM assignment_dependencies WHERE assignment_id = ? AND depends_on_assignment_id = ?",
@@ -423,6 +462,119 @@ async fn lead_delegates_a_single_level_member_assignment() {
     .await
     .unwrap();
     assert_eq!(delegated, 1);
+}
+
+#[tokio::test]
+async fn delegation_requires_an_explicit_pack_when_the_agent_has_multiple() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-pack-selection", &root_path).await;
+    add_alternate_research_pack(&pool).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        WorkRepository::new(pool.clone()),
+        AgentRepository::new(pool.clone()),
+        Arc::new(FakeEngineAdapter::new(Duration::ZERO)),
+        Arc::clone(&publisher) as _,
+        "pack-selection-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    let service = LeadToolService::new(
+        repository.clone(),
+        WorkRepository::new(pool.clone()),
+        AgentRepository::new(pool),
+        handle.clone(),
+    );
+    let lead_id = accept_lead(&repository, "work-pack-selection").await;
+
+    let error = service
+        .delegate_assignment(
+            &lead_id,
+            DelegateAssignmentInput {
+                assigned_agent_id: "agent-instance:piwork-researcher".into(),
+                capability_pack_id: None,
+                title: "Investigate with a selected method".into(),
+                instruction: "Use the explicitly selected expert method".into(),
+                context_manifest: json!({}),
+                expected_result_schema: json!({}),
+                acceptance_criteria: json!([]),
+                permission_scope: json!({"mode": "read_only"}),
+                priority: 5,
+                max_attempts: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        AppError::InvalidInput { ref field, ref message }
+            if field == "capabilityPackId" && message.contains("multiple capability packs")
+    ));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn scheduler_injects_only_the_assignment_selected_capability_pack() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    let pool = database.pool().clone();
+    let root_path = temp.path().to_string_lossy().into_owned();
+    seed_work(&pool, "work-selected-pack", &root_path).await;
+    add_alternate_research_pack(&pool).await;
+
+    let publisher = Arc::new(RecordingPublisher::default());
+    let repository =
+        AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
+    let assignment = repository
+        .accept(AcceptAssignmentInput {
+            id: None,
+            work_id: "work-selected-pack".into(),
+            parent_assignment_id: None,
+            created_by_agent_id: Some("agent-instance:piwork-lead".into()),
+            assigned_agent_id: "agent-instance:piwork-researcher".into(),
+            capability_pack_id: Some("capability-pack:source-research:v1".into()),
+            kind: AssignmentKind::Member,
+            side_effect: AssignmentSideEffect::ReadOnly,
+            title: "Use source research".into(),
+            instruction: "Run the selected research method".into(),
+            context_manifest: json!({}),
+            expected_result_schema: json!({}),
+            acceptance_criteria: json!([]),
+            permission_scope: json!({"mode": "read_only"}),
+            priority: 5,
+            max_attempts: 1,
+            not_before: None,
+        })
+        .await
+        .unwrap();
+    let engine = Arc::new(CapturingEngine::default());
+    let scheduler = AssignmentScheduler::new(
+        repository.clone(),
+        WorkRepository::new(pool.clone()),
+        AgentRepository::new(pool),
+        engine.clone(),
+        Arc::clone(&publisher) as _,
+        "selected-pack-owner",
+        "Pi",
+    );
+    let handle = scheduler.spawn();
+    handle.wake().unwrap();
+    wait_for_assignment_status(&repository, &assignment.id, AssignmentStatus::Completed).await;
+
+    let prompts = engine.prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("优先使用原始可信来源"));
+    assert!(!prompts[0].contains("ALTERNATE_RESEARCH_INSTRUCTIONS"));
+    drop(prompts);
+    handle.shutdown().await;
 }
 
 #[tokio::test]

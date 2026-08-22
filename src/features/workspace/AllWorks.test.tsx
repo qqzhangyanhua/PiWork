@@ -24,13 +24,16 @@ describe("AllWorks", () => {
 
   it("uses the Linear-style view tabs to filter the authoritative Work list", async () => {
     const user = userEvent.setup();
+    const onWorkRestore = vi.fn();
     render(
       <AllWorks
+        onWorkRestore={onWorkRestore}
         onWorkSelected={vi.fn()}
         works={[
           work("active", "正在执行", "running"),
           work("draft", "等待继续", "draft"),
           work("done", "已经完成", "completed"),
+          work("archived", "旧对话", "archived"),
         ]}
       />,
     );
@@ -46,5 +49,9 @@ describe("AllWorks", () => {
     await user.click(within(tabs).getByRole("tab", { name: "已完成" }));
     expect(screen.getByRole("button", { name: /已经完成/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /正在执行/ })).not.toBeInTheDocument();
+
+    await user.click(within(tabs).getByRole("tab", { name: "已归档" }));
+    await user.click(screen.getByRole("button", { name: "恢复对话“旧对话”" }));
+    expect(onWorkRestore).toHaveBeenCalledWith(expect.objectContaining({ id: "archived" }));
   });
 });

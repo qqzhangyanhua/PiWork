@@ -241,12 +241,12 @@ impl WorkRepository {
         .map(WorkEventEnvelope::try_from)
         .collect::<Result<Vec<_>, _>>()?;
         let mut messages = sqlx::query_as::<_, MessageRow>(
-            "SELECT messages.id, messages.work_id, messages.run_id, messages.role, \
-                    messages.content, messages.created_at \
+            "SELECT messages.id, messages.work_id, \
+                    COALESCE(messages.run_id, 'assignment:' || messages.assignment_id) AS run_id, \
+                    messages.role, messages.content, messages.created_at \
              FROM messages \
-             INNER JOIN runs \
-                ON runs.id = messages.run_id AND runs.work_id = messages.work_id \
              WHERE messages.work_id = ? \
+               AND (messages.run_id IS NOT NULL OR messages.assignment_id IS NOT NULL) \
              ORDER BY messages.created_at ASC, messages.id ASC",
         )
         .bind(id)
@@ -415,13 +415,15 @@ impl WorkRepository {
             created_at: now,
         };
         sqlx::query(
-            "INSERT INTO messages (id, work_id, run_id, role, content, created_at) \
-             VALUES (?, ?, NULL, 'user', ?, ?)",
+            "INSERT INTO messages \
+             (id, work_id, run_id, role, content, created_at, assignment_id) \
+             VALUES (?, ?, NULL, 'user', ?, ?, ?)",
         )
         .bind(&message.id)
         .bind(&message.work_id)
         .bind(&message.content)
         .bind(message.created_at)
+        .bind(assignment_id)
         .execute(&self.pool)
         .await?;
         Ok(message)
@@ -1043,7 +1045,12 @@ impl WorkRepository {
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(|| AppError::work_not_found(work_id))?;
-        let transition_result = work_action_for_target(status)
+        let action = if current == WorkStatus::Archived && status == WorkStatus::Idle {
+            Some(WorkAction::Restore)
+        } else {
+            work_action_for_target(status)
+        };
+        let transition_result = action
             .and_then(|action| transition(current, action).ok())
             .filter(|next| *next == status);
         if transition_result.is_none() {

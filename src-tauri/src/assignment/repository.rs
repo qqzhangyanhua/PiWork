@@ -497,6 +497,15 @@ impl AssignmentRepository {
             .bind(&run.id).bind(&run.work_id).bind(&run.engine_kind).bind(&run.model_label)
             .bind(now).bind(now).bind(&assignment_id).bind(&assignment.assigned_agent_id)
             .bind(i64::from(attempt_number)).execute(&mut *transaction).await?;
+        sqlx::query(
+            "UPDATE messages SET run_id = ? \
+             WHERE assignment_id = ? AND work_id = ? AND run_id IS NULL",
+        )
+        .bind(&run.id)
+        .bind(&assignment_id)
+        .bind(&assignment.work_id)
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
         Ok(run)
     }

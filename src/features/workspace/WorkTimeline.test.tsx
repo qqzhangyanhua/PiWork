@@ -112,7 +112,10 @@ describe("WorkTimeline", () => {
 
     expect(container.querySelectorAll(".timeline-event--assistant")).toHaveLength(1);
     expect(screen.getByText("检查完成").tagName).toBe("STRONG");
-    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+    expect(screen.getByRole("button", { name: "收起执行详情" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(container.querySelectorAll(".activity-feed__tool")).toHaveLength(1);
     expect(screen.getAllByText("src/app.tsx")).toHaveLength(1);
     expect(screen.getByText("读取完成")).toBeVisible();
@@ -166,8 +169,6 @@ describe("WorkTimeline", () => {
     );
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.queryByText("本次允许")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
     expect(screen.getByText("本次允许")).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -239,7 +240,7 @@ describe("WorkTimeline", () => {
     const delivery = container.querySelector(".timeline-delivery");
     expect(activity).not.toBeNull();
     expect(container.querySelectorAll(".execution-progress")).toHaveLength(1);
-    expect(activity).toHaveTextContent("Pi 已完成 1 个操作");
+    expect(activity).toHaveTextContent("CoDo 已完成 1 个操作");
     expect(activity).not.toHaveTextContent("读取 src/app.tsx");
     fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
     expect(activity).toHaveTextContent("读取 src/app.tsx");
@@ -264,6 +265,21 @@ describe("WorkTimeline", () => {
     expect(screen.queryByText(/Run/u)).not.toBeInTheDocument();
   });
 
+  it("shows preparation immediately after a Run starts", () => {
+    render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[event(1, { type: "runStarted", modelLabel: "GPT-5.6" })]}
+      />,
+    );
+
+    expect(screen.getByRole("status", { name: "执行进度" })).toHaveAttribute(
+      "data-status",
+      "preparing",
+    );
+    expect(screen.getByText("正在理解你的要求并准备执行")).toBeVisible();
+  });
+
   it("renders a failed Run as a safe failure node with diagnostics", () => {
     const onOpenDiagnostics = vi.fn();
     const { container } = render(
@@ -284,7 +300,7 @@ describe("WorkTimeline", () => {
     expect(onOpenDiagnostics).toHaveBeenCalledTimes(1);
   });
 
-  it("announces a failed Run once when execution details are expanded", () => {
+  it("announces a failed Run once while keeping its execution record visible", () => {
     const { container } = render(
       <WorkTimeline
         resources={[]}
@@ -295,7 +311,6 @@ describe("WorkTimeline", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
     expect(
       container.querySelector(
         '.activity-feed__lifecycle[data-kind="runFailed"]',
@@ -323,7 +338,6 @@ describe("WorkTimeline", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
     const permission = container.querySelector(".activity-feed__permission");
     expect(permission).toBeVisible();
     expect(permission).toHaveAttribute("role", "status");
@@ -333,7 +347,7 @@ describe("WorkTimeline", () => {
     expect(alerts[0]).toBe(container.querySelector(".timeline-failure"));
   });
 
-  it("keeps the current Pi activity group collapsed while a Run is active", () => {
+  it("keeps the current CoDo activity group open while a Run is active", () => {
     const { container } = render(
       <WorkTimeline
         resources={[]}
@@ -349,10 +363,10 @@ describe("WorkTimeline", () => {
       />,
     );
 
-    expect(container.querySelector(".execution-progress")).toHaveTextContent("Pi 正在执行");
+    expect(container.querySelector(".execution-progress")).toHaveTextContent("CoDo 正在执行");
     expect(container.querySelector(".execution-progress__summary")).toHaveAttribute(
       "aria-expanded",
-      "false",
+      "true",
     );
   });
 
@@ -364,6 +378,51 @@ describe("WorkTimeline", () => {
     expect(container.querySelector(".timeline-user")).toHaveTextContent("帮我检查项目");
     expect(container.querySelector(".timeline-event--assistant")).toHaveTextContent("检查完成");
     expect(container.querySelector(".timeline-user")).not.toHaveTextContent("检查完成");
+  });
+
+  it("keeps a pre-run user question above the answer from its eventual Run", () => {
+    const assignmentId = "assignment-weather";
+    const withAssignment = (
+      envelope: WorkEventEnvelope,
+      overrides: Partial<WorkEventEnvelope> = {},
+    ): WorkEventEnvelope => ({
+      ...envelope,
+      assignmentId,
+      ...overrides,
+    });
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          withAssignment(
+            event(0, {
+              type: "assignmentQueued",
+              assignmentId,
+              assignedAgentId: "agent-instance:lead",
+              title: "Respond to the user",
+              priority: 10,
+            }),
+            { eventId: "assignment-queued", runId: null },
+          ),
+          message("user", "今天天气怎么样", {
+            id: "weather-question",
+            runId: `assignment:${assignmentId}`,
+            createdAt: "2026-07-29T00:00:00.500Z",
+          }),
+          withAssignment(
+            event(1, { type: "assistantDelta", text: "今天多云，约 26°C。" }),
+            { eventId: "assistant-answer" },
+          ),
+        ]}
+      />,
+    );
+
+    const conversation = [...container.querySelectorAll(
+      ".timeline-user, .timeline-event--assistant",
+    )];
+    expect(conversation).toHaveLength(2);
+    expect(conversation[0]).toHaveTextContent("今天天气怎么样");
+    expect(conversation[1]).toHaveTextContent("今天多云，约 26°C。");
   });
 
   it("follows new output near the bottom but preserves an active reading position", () => {
@@ -506,6 +565,121 @@ describe("WorkTimeline", () => {
     expect(container.querySelector(".timeline-delivery")).toBeNull();
   });
 
+  it("keeps process narration and deduplicates repeated completion summaries", () => {
+    const summary = "已检查邮箱，当前没有可读取的新邮件。";
+    const processNarration = "搜索完成，正在综合结论并交付。参数格式有误，重新提交。";
+    const assignmentId = "assignment-email";
+    const withAssignment = (
+      envelope: WorkEventEnvelope,
+      eventId: string,
+    ): WorkEventEnvelope => ({
+      ...envelope,
+      assignmentId,
+      eventId,
+    });
+
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          message("user", "查看最新邮件", {
+            id: "email-question",
+            runId: `assignment:${assignmentId}`,
+          }),
+          withAssignment(event(1, { type: "assistantDelta", text: processNarration }), "process-narration"),
+          withAssignment(event(2, {
+            type: "toolStarted",
+            toolCallId: "list-accounts",
+            toolName: "list_email_accounts",
+            inputSummary: "{}",
+          }), "list-started"),
+          withAssignment(event(3, {
+            type: "toolFinished",
+            toolCallId: "list-accounts",
+            toolName: "list_email_accounts",
+            outputSummary: "1 account",
+            success: true,
+          }), "list-finished"),
+          withAssignment(event(4, {
+            type: "workDecisionRecorded",
+            decisionId: "decision-1",
+            summary: "邮箱元数据搜索结果为空。",
+            version: 1,
+          }), "decision-recorded"),
+          withAssignment(event(5, {
+            type: "workDeliveryCompleted",
+            summary,
+            artifacts: [],
+            validation: [],
+            limitations: [],
+          }), "delivery-completed"),
+          withAssignment(event(6, {
+            type: "assignmentCompleted",
+            assignmentId,
+            agentInstanceId: "agent-instance:lead",
+            agentSessionId: "session-1",
+            resultSummary: summary,
+          }), "assignment-completed"),
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".timeline-event--assistant")).toHaveLength(2);
+    expect(screen.getAllByText(summary)).toHaveLength(1);
+    expect(screen.getByText(processNarration)).toBeVisible();
+    expect(container.querySelector(".timeline-delivery")).toBeNull();
+    expect(screen.queryByText("list_email_accounts")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
+    expect(screen.getByText("list_email_accounts")).toBeVisible();
+    expect(screen.getAllByText(summary)).toHaveLength(1);
+    expect(screen.queryByText("邮箱元数据搜索结果为空。")).not.toBeInTheDocument();
+    expect(screen.getByText(processNarration)).toBeVisible();
+  });
+
+  it("keeps streamed assistant output visible when a shorter delivery summary arrives", () => {
+    const streamedAnswer = [
+      "## 21个月宝宝每日陪玩指南",
+      "",
+      "每天安排大运动、精细动作、语言互动和生活自理练习。",
+      "这是一段已经展示给用户的完整回答，任务完成后不能被摘要替换。",
+    ].join("\n");
+
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "assistantDelta", text: streamedAnswer }),
+          event(2, {
+            type: "workDeliveryCompleted",
+            summary: "已交付《21个月宝宝每日陪玩指南》。",
+            artifacts: [],
+            validation: [],
+            limitations: [],
+          }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelectorAll(".timeline-event--assistant")).toHaveLength(2);
+    expect(screen.getByRole("heading", { name: "21个月宝宝每日陪玩指南" })).toBeVisible();
+    expect(screen.getByText(/完整回答，任务完成后不能被摘要替换/u)).toBeVisible();
+    expect(screen.getByText("已交付《21个月宝宝每日陪玩指南》。")).toBeVisible();
+  });
+
+  it("does not render a message for whitespace-only assistant output", () => {
+    const { container } = render(
+      <WorkTimeline
+        resources={[]}
+        timeline={[
+          event(1, { type: "assistantDelta", text: "\n  \n" }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelector(".timeline-event--assistant")).toBeNull();
+  });
+
   it("merges pre-run assignment activity into its completed Run", () => {
     const assignmentId = "assignment-1";
     const withAssignment = (
@@ -559,7 +733,7 @@ describe("WorkTimeline", () => {
     );
 
     expect(container.querySelectorAll(".execution-progress")).toHaveLength(1);
-    expect(screen.queryByText("Pi 正在准备执行")).not.toBeInTheDocument();
-    expect(screen.getByText("Pi 已完成")).toBeInTheDocument();
+    expect(screen.queryByText("CoDo 正在准备执行")).not.toBeInTheDocument();
+    expect(screen.getByText("CoDo 已完成")).toBeInTheDocument();
   });
 });

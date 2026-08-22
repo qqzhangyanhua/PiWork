@@ -11,7 +11,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./i18n";
 import { App } from "./app/App";
-import type { PiWorkClient } from "./app/tauriClient";
+import type { MemorySettingsSummary, PiWorkClient } from "./app/tauriClient";
 import type {
   AgentInstanceSummary,
   AssignmentSummary,
@@ -493,6 +493,31 @@ const memoryCandidates = [
   },
 ];
 
+let demoMemorySettings: MemorySettingsSummary = {
+  enabled: true,
+  hubEndpoint: "http://124.221.254.61",
+  endpoint: "http://124.221.254.61/mem",
+  authMode: "basic",
+  authUsername: "tdai",
+  allowInsecureHttp: false,
+  serviceId: "default",
+  teamId: "team-eb16plgnne",
+  userId: "usr-1faz3ley78",
+  requestTimeoutMs: 5000,
+  recallTimeoutMs: 1500,
+  maxRecallItems: 8,
+  maxRecallChars: 6000,
+  captureEnabled: true,
+  recallEnabled: true,
+  apiKeyConfigured: false,
+  userKeyConfigured: false,
+};
+
+let demoMemoryBindings = [
+  { rootPath: demoWorkSummary.rootPath, taskId: "task-revenue", enabled: true, captureEnabled: true, recallEnabled: true, pendingCaptureCount: 0 },
+  { rootPath: draftWorkSummary.rootPath, taskId: "task-draft", enabled: false, captureEnabled: true, recallEnabled: true, pendingCaptureCount: 0 },
+];
+
 const demoClient: PiWorkClient = {
   getDefaultProjectDirectory: async () => "D:/workspace",
   getRuntimeStatus: async () => ({
@@ -538,6 +563,32 @@ const demoClient: PiWorkClient = {
     active: true,
     credentialConfigured: true,
   }),
+  getMemorySettings: async () => structuredClone(demoMemorySettings),
+  saveMemorySettings: async (input) => {
+    demoMemorySettings = {
+      ...input,
+      apiKeyConfigured: Boolean(input.apiKey) || demoMemorySettings.apiKeyConfigured,
+      userKeyConfigured: Boolean(input.userKey) || demoMemorySettings.userKeyConfigured,
+    };
+    return structuredClone(demoMemorySettings);
+  },
+  testMemoryConnection: async () => ({
+    healthy: true,
+    authenticated: true,
+    latencyMs: 84,
+    failureCode: null,
+    resolvedUserId: demoMemorySettings.userId,
+  }),
+  listWorkspaceMemoryBindings: async () => structuredClone(demoMemoryBindings),
+  saveWorkspaceMemoryBinding: async (input) => {
+    const existing = demoMemoryBindings.find(({ rootPath }) => rootPath === input.rootPath);
+    const saved = { ...input, taskId: existing?.taskId ?? "task-auto", pendingCaptureCount: 0 };
+    demoMemoryBindings = demoMemoryBindings.some(({ rootPath }) => rootPath === input.rootPath)
+      ? demoMemoryBindings.map((binding) => binding.rootPath === input.rootPath ? saved : binding)
+      : [...demoMemoryBindings, saved];
+    return structuredClone(saved);
+  },
+  drainMemoryCaptureOutbox: async () => 0,
   createWork: async (input) => ({
     summary: {
       id: `work-${Date.now()}`,
@@ -665,6 +716,18 @@ const demoClient: PiWorkClient = {
   stopWork: async (workId) => {
     const detail = workId === "work-demo" ? demoDetail : draftDetail;
     detail.summary.status = "stopped";
+    detail.summary.updatedAt = new Date().toISOString();
+    return structuredClone(detail);
+  },
+  archiveWork: async (workId) => {
+    const detail = workId === "work-demo" ? demoDetail : draftDetail;
+    detail.summary.status = "archived";
+    detail.summary.updatedAt = new Date().toISOString();
+    return structuredClone(detail);
+  },
+  restoreWork: async (workId) => {
+    const detail = workId === "work-demo" ? demoDetail : draftDetail;
+    detail.summary.status = "idle";
     detail.summary.updatedAt = new Date().toISOString();
     return structuredClone(detail);
   },

@@ -7,7 +7,7 @@ import type {
   ModelProvider,
   PiWorkClient,
 } from "../../app/tauriClient";
-import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
+import { CoDoLogo } from "../../components/brand/CoDoLogo";
 
 const providers: Array<{ id: ModelProvider; label: string; baseUrl: string }> = [
   { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
@@ -134,7 +134,7 @@ export function ModelSetup({
   const { t } = useTranslation();
   return (
     <main className="model-setup">
-      <ContinuousLoopLogo showWordmark />
+      <CoDoLogo showWordmark />
       <section className="model-setup__card">
         <p className="model-setup__eyebrow">{t("model.required")}</p>
         <h1>{t("model.connectTitle")}</h1>

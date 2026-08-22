@@ -25,6 +25,7 @@ type WorkDetailProps = {
   work: WorkSummary;
   workspaceRef: Ref<HTMLElement>;
   onExperienceChange(experience: DetailExperience): void;
+  onArchive(): void;
   onInspectorClose(): void;
   onInspectorOpenDiagnostics(): void;
   onInspectorResizeReset(): void;
@@ -48,6 +49,7 @@ export function WorkDetail({
   work,
   workspaceRef,
   onExperienceChange,
+  onArchive,
   onInspectorClose,
   onInspectorOpenDiagnostics,
   onInspectorResizeReset,
@@ -71,6 +73,7 @@ export function WorkDetail({
         inspectorToggleRef={inspectorToggleRef}
         modelLabel={modelLabel}
         work={work}
+        onArchive={onArchive}
         onExperienceChange={onExperienceChange}
         onInspectorToggle={onInspectorToggle}
       />

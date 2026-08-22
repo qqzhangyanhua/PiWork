@@ -33,6 +33,7 @@ use crate::{
         publisher::EventPublisher,
     },
     error::AppError,
+    memory::{MemoryCaptureRequest, MemoryRecallRequest, WorkspaceMemoryService},
     work::repository::WorkRepository,
 };
 
@@ -82,6 +83,7 @@ pub struct AssignmentScheduler {
     model_label: String,
     limits: QueueLimits,
     active_runs: Arc<Mutex<HashMap<String, (String, String)>>>,
+    memory_service: Option<Arc<WorkspaceMemoryService>>,
 }
 
 impl AssignmentScheduler {
@@ -110,6 +112,7 @@ impl AssignmentScheduler {
             model_label: model_label.into(),
             limits: default_limits(),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
+            memory_service: None,
         }
     }
 
@@ -117,6 +120,11 @@ impl AssignmentScheduler {
     /// a role-scoped lease and loads the Pi extension.
     pub fn with_host_tools(mut self, config: HostToolBridgeConfig) -> Self {
         self.harness = self.harness.clone().with_host_tools(config);
+        self
+    }
+
+    pub fn with_memory_service(mut self, memory_service: Arc<WorkspaceMemoryService>) -> Self {
+        self.memory_service = Some(memory_service);
         self
     }
 
@@ -245,7 +253,27 @@ impl AssignmentScheduler {
             .repository
             .validated_dependency_results(&assignment.id)
             .await?;
-        let message = build_engine_prompt(&agent, &work.summary, &assignment, dependency_results);
+        let agent_memory = match self.memory_service.as_ref() {
+            Some(memory) => memory
+                .recall_for_assignment(MemoryRecallRequest {
+                    root_path: work.summary.root_path.clone(),
+                    agent_id: agent.id.clone(),
+                    query: assignment.instruction.clone(),
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("CoDo workspace memory context degraded: {error}");
+                    Vec::new()
+                }),
+            None => Vec::new(),
+        };
+        let message = build_engine_prompt(
+            &agent,
+            &work.summary,
+            &assignment,
+            dependency_results,
+            agent_memory,
+        );
 
         let request = AssignmentExecutionRequest {
             assignment: assignment.clone(),
@@ -260,7 +288,24 @@ impl AssignmentScheduler {
             effective_permission: effective_permission(&assignment),
             runtime_owner: self.owner_id.clone(),
         };
-        self.harness.execute(request).await
+        let outcome = self.harness.execute(request).await;
+        if let (Some(memory), Ok(AssignmentExecutionOutcome::Completed { result_summary, .. })) =
+            (self.memory_service.as_ref(), &outcome)
+        {
+            let capture = MemoryCaptureRequest {
+                root_path: work.summary.root_path.clone(),
+                work_id: work.summary.id.clone(),
+                assignment_id: assignment.id.clone(),
+                run_id: run.id.clone(),
+                agent_id: assignment.assigned_agent_id.clone(),
+                user_message: assignment.instruction.clone(),
+                assistant_message: result_summary.clone(),
+            };
+            if let Err(error) = memory.queue_capture(capture).await {
+                eprintln!("CoDo workspace memory capture was not queued: {error}");
+            }
+        }
+        outcome
     }
 
     async fn ensure_work_running(&self, work_id: &str) {
@@ -380,14 +425,29 @@ fn build_engine_prompt(
     work: &crate::domain::work::WorkSummary,
     assignment: &AssignmentSummary,
     dependency_results: Vec<ResultEnvelope>,
+    agent_memory: Vec<String>,
 ) -> String {
+    let capability_packs = assignment
+        .capability_pack_id
+        .as_ref()
+        .map(|selected| {
+            agent
+                .definition
+                .capability_packs
+                .iter()
+                .filter(|pack| &pack.id == selected)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
     let input = ContextBuildInput {
         is_lead: agent.definition.role_kind == RoleKind::Lead,
         agent_definition: agent.definition.clone(),
-        capability_packs: agent.definition.capability_packs.clone(),
+        capability_packs,
         work: work.clone(),
         assignment: assignment.clone(),
         dependency_results,
+        agent_memory,
         ..ContextBuildInput::default()
     };
     build_assignment_context(input).rendered_prompt

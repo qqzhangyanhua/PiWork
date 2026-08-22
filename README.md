@@ -1,6 +1,6 @@
-# PiWork
+# CoDo
 
-PiWork is a local-first desktop product for continuous collaboration around durable work. A Work keeps its goal, local workspace, Runs, and event history in PiWork-owned SQLite storage so collaboration can continue across sessions. The pi coding agent is intended to remain a hidden, replaceable execution engine behind PiWork's own engine interface; PiWork, not pi, is the product.
+CoDo is a local-first desktop assistant that takes on useful work across professions. A Work keeps its goal, local workspace, Runs, and event history in CoDo-owned SQLite storage so collaboration can continue across sessions. Execution engines remain hidden and replaceable behind CoDo's own engine interface.
 
 This repository is currently the foundation vertical slice. It uses a deterministic fake engine to exercise streaming, tool events, completion, multi-Run history, persistence, and interruption recovery. A real pi binary, model provider, credentials flow, and permission bridge are **not** integrated or bundled at this stage.
 

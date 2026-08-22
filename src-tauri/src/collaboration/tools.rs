@@ -56,8 +56,9 @@ pub const MEMBER_TOOLS: [&str; 7] = [
 
 /// The role-scoped tool allowlist carried by a Run's host tool lease. Lead gets
 /// the Lead collaboration tools, every other role gets the Member collaboration
-/// tools, and both sets include connector tools that are re-authorized against
-/// the current Work grant by `ConnectorService` on every call.
+/// tools, and both sets include connector tools. `ConnectorService` verifies
+/// that the referenced connector is still enabled on every call. Body reads and
+/// sends execute directly; destructive email actions require approval.
 pub fn role_tool_allowlist(role_kind: RoleKind) -> Vec<String> {
     let tools: &[&str] = if role_kind == RoleKind::Lead {
         &LEAD_TOOLS

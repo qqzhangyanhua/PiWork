@@ -15,6 +15,7 @@ pub mod engine;
 pub mod environment;
 pub mod error;
 pub mod extensions;
+pub mod memory;
 pub mod model;
 pub mod paths;
 pub mod resource;
@@ -41,8 +42,8 @@ struct StartupFailureNotice {
 fn startup_failure_notice() -> StartupFailureNotice {
     StartupFailureNotice {
         code: "PIWORK-STARTUP-001",
-        title: "PiWork could not start",
-        body: "PiWork could not prepare its local data. Select Retry to try again or Cancel to exit. Diagnostic logs and application data are stored in your operating system application data folders.",
+        title: "CoDo could not start",
+        body: "CoDo could not prepare its local data. Select Retry to try again or Cancel to exit. Diagnostic logs and application data are stored in your operating system application data folders.",
     }
 }
 
@@ -80,7 +81,7 @@ fn prompt_startup_failure(notice: &StartupFailureNotice) -> StartupResult<Startu
 
 #[cfg(not(windows))]
 fn prompt_startup_failure(notice: &StartupFailureNotice) -> StartupResult<StartupFailureDecision> {
-    eprintln!("PiWork startup failed ({}).", notice.code);
+    eprintln!("CoDo startup failed ({}).", notice.code);
     Err(std::io::Error::other("native startup failure dialog is unavailable").into())
 }
 
@@ -261,6 +262,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         pool.clone(),
                         Some(app.handle().clone()),
                     ));
+                    let memory_service =
+                        Arc::new(memory::WorkspaceMemoryService::production(pool.clone())?);
                     let host_tool_extension = bundled_host_tools.clone().ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -306,7 +309,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     .with_host_tools(engine::harness::HostToolBridgeConfig {
                         registry: Arc::clone(&host_tool_registry),
                         endpoint: Arc::clone(&host_tool_endpoint),
-                    });
+                    })
+                    .with_memory_service(Arc::clone(&memory_service));
                     let scheduler_handle = scheduler.spawn();
 
                     // Bind the loopback Host Tool Bridge and publish its endpoint
@@ -377,7 +381,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         )
                         .with_assignment_service(assignment_service)
                         .with_extension_service(extension_service)
-                        .with_connector_service(Arc::clone(&connector_service)),
+                        .with_connector_service(Arc::clone(&connector_service))
+                        .with_memory_service(Arc::clone(&memory_service)),
                     ) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
@@ -386,6 +391,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         .into());
                     }
                     connector_service.start_poller();
+                    memory_service.start_worker();
                     Ok(())
                 },
                 || -> StartupResult<()> {
@@ -405,6 +411,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             work::commands::list_project_files,
             work::commands::start_work,
             work::commands::stop_work,
+            work::commands::archive_work,
+            work::commands::restore_work,
             assignment::commands::drain_assignment_event_outbox,
             assignment::commands::list_work_assignments,
             assignment::commands::queue_work_input,
@@ -435,6 +443,12 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
             extensions::commands::set_extension_agent_enabled,
             extensions::commands::get_web_access_settings,
             extensions::commands::save_web_access_settings,
+            memory::commands::get_memory_settings,
+            memory::commands::save_memory_settings,
+            memory::commands::test_memory_connection,
+            memory::commands::list_workspace_memory_bindings,
+            memory::commands::save_workspace_memory_binding,
+            memory::commands::drain_memory_capture_outbox,
             connectors::commands::list_email_connectors,
             connectors::commands::save_email_connector,
             connectors::commands::test_email_connector,

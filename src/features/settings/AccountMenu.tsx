@@ -1,4 +1,4 @@
-import { Settings } from "lucide-react";
+import { Settings, UserRound } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -41,7 +41,7 @@ export function AccountMenu({ active, onSettingsRequest, triggerRef }: AccountMe
       {open && (
         <div aria-label={t("account.menu")} className="account-menu__popover" role="menu">
           <div className="account-menu__identity" aria-hidden="true">
-            <span className="account-avatar">P</span>
+            <span className="account-avatar"><UserRound aria-hidden="true" size={16} /></span>
             <span className="account-identity">
               <strong>{t("account.localUser")}</strong>
               <small>{t("account.deviceOnly")}</small>
@@ -76,7 +76,7 @@ export function AccountMenu({ active, onSettingsRequest, triggerRef }: AccountMe
         title={accessibleName}
         type="button"
       >
-        <span className="account-avatar" aria-hidden="true">P</span>
+        <span className="account-avatar" aria-hidden="true"><UserRound size={16} /></span>
         <span className="account-identity">
           <strong>{t("account.localUser")}</strong>
           <small>{t("account.deviceOnly")}</small>

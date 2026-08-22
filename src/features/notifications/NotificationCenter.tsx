@@ -27,12 +27,15 @@ export function NotificationCenter({
   const [toast, setToast] = useState<AppNotificationSummary | null>(null);
   const [resolving, setResolving] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const loadSequenceRef = useRef(0);
 
   const load = async () => {
+    const sequence = ++loadSequenceRef.current;
     const [nextNotifications, nextApprovals] = await Promise.all([
       client.listAppNotifications?.(50) ?? Promise.resolve([]),
       client.listPendingConnectorActions?.(null) ?? Promise.resolve([]),
     ]);
+    if (sequence !== loadSequenceRef.current) return;
     setNotifications(nextNotifications);
     setApprovals(nextApprovals);
   };
@@ -55,6 +58,7 @@ export function NotificationCenter({
   }, [toast]);
   useEffect(() => {
     if (!open) return;
+    void load();
     const close = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };

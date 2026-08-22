@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { isTauri } from "@tauri-apps/api/core";
 
-import { ContinuousLoopLogo } from "../components/brand/ContinuousLoopLogo";
+import { CoDoLogo } from "../components/brand/CoDoLogo";
 import { AnimatedSurfaceState } from "../components/motion/AnimatedSurfaceState";
 import { ModelSetup } from "../features/model-setup/ModelSetup";
 import { WorkSurface } from "../features/workspace/WorkSurface";
@@ -78,7 +78,7 @@ export function App({ client }: AppProps) {
         role="status"
         variant="loading"
       >
-        <ContinuousLoopLogo showWordmark />
+        <CoDoLogo showWordmark />
       </AnimatedSurfaceState>
     );
   }
@@ -92,7 +92,7 @@ export function App({ client }: AppProps) {
       client={resolvedClient}
       initialView="home"
       modelConfiguration={status.configuration}
-      modelLabel={status.configuration?.modelId ?? "Pi"}
+      modelLabel={status.configuration?.modelId ?? "CoDo"}
       onModelConfigured={(configuration) => setStatus({ configured: true, configuration })}
     />
   );

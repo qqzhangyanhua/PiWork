@@ -84,13 +84,29 @@ afterEach(() => {
 });
 
 describe("WorkSurface", () => {
+  it("archives the current conversation and restores it from the archived view", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail("idle"));
+    render(<WorkSurface client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "归档对话" }));
+
+    await waitFor(() => expect(client.archiveWork).toHaveBeenCalledWith("work-1"));
+    await user.click(screen.getByRole("tab", { name: "已归档" }));
+    await user.click(screen.getByRole("button", { name: "恢复对话“营收看板”" }));
+
+    await waitFor(() => expect(client.restoreWork).toHaveBeenCalledWith("work-1"));
+    expect(screen.queryByRole("button", { name: "恢复对话“营收看板”" })).not.toBeInTheDocument();
+  });
+
   it("按项目分组对话，并从项目下打开既有对话", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     client.seed(seededDetail());
     render(<WorkSurface client={client} initialView="new" />);
 
-    expect(await screen.findByRole("heading", { name: "今天想让 Pi 帮你完成什么？" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "有什么事，交给 CoDo。" })).toBeInTheDocument();
     expect(screen.queryByText("构建营收看板", { selector: ".work-header__goal" })).not.toBeInTheDocument();
 
     const sidebar = screen.getByRole("complementary", { name: "项目与对话" });
@@ -102,21 +118,15 @@ describe("WorkSurface", () => {
     expect(await screen.findByText("构建营收看板", { selector: ".work-header__goal" })).toBeInTheDocument();
   });
 
-  it("用真实任务建议丰富新会话并将所选建议写入首任务", async () => {
-    const user = userEvent.setup();
+  it("保持新会话首页聚焦首任务输入", async () => {
     const client = createMockTauriClient();
     render(<WorkSurface client={client} initialView="new" />);
 
-    expect(await screen.findByLabelText("任务起点")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "探索并理解项目" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "构建新功能" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "审查代码" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "修复问题" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "构建新功能" }));
-
-    const prompt = screen.getByRole("textbox", { name: "首个任务" });
-    expect(prompt).toHaveTextContent("在当前项目中构建一个新功能，先梳理实现方案再开始修改。");
+    const prompt = await screen.findByRole("textbox", { name: "首个任务" });
+    expect(screen.queryByLabelText("任务起点")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "探索并理解项目" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "构建新功能" })).not.toBeInTheDocument();
+    expect(prompt).toBeEmptyDOMElement();
     expect(prompt).toHaveFocus();
     expect(screen.getByText("默认空间")).toBeInTheDocument();
     expect(screen.getByText("本地运行")).toBeInTheDocument();
@@ -277,7 +287,7 @@ describe("WorkSurface", () => {
     await user.click(screen.getByRole("button", { name: "添加附件" }));
     await user.click(screen.getByRole("button", { name: "上传文件" }));
     await screen.findByText("chart.png");
-    await user.type(screen.getByLabelText("给 PiWork 指令"), "解释图表");
+    await user.type(screen.getByLabelText("给 CoDo 指令"), "解释图表");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(client.startWork).toHaveBeenLastCalledWith(
@@ -484,7 +494,7 @@ describe("WorkSurface", () => {
     });
     expect(client.startWork).toHaveBeenLastCalledWith("work-1", "构建营收看板", [], []);
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
 
     client.emit(runCompletedEvent({ runId: "run-1" }));
     expect(await screen.findByText("任务已完成")).toBeInTheDocument();
@@ -494,82 +504,50 @@ describe("WorkSurface", () => {
     expect(client.startWork).toHaveBeenLastCalledWith("work-1", "再优化一次", [], []);
   });
 
-  it("运行时保留额外输入并将发送操作原位切换为真实停止", async () => {
+  it("交付完成后立即清除侧栏运行指示", async () => {
+    const client = createMockTauriClient();
+    client.seed(seededDetail("running"));
+    const { container } = render(<WorkSurface client={client} />);
+
+    await screen.findByRole("button", { name: "营收看板, 运行中" });
+    expect(container.querySelector(".project-conversation__spinner")).toBeInTheDocument();
+
+    client.emit(event(1, {
+      type: "workDeliveryCompleted",
+      summary: "已完成并交付。",
+      artifacts: [],
+      validation: [],
+      limitations: [],
+    }));
+
+    expect(
+      await screen.findByRole("button", { name: "营收看板, 已完成" }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".project-conversation__spinner")).not.toBeInTheDocument();
+  });
+
+  it("运行时保留额外输入并只显示一个发送操作", async () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     client.seed(seededDetail("running"));
-    render(<WorkSurface client={client} />);
+    const { container } = render(<WorkSurface client={client} />);
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
     await user.type(composer, "完成后补充单元测试");
 
     expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
     const queue = screen.getByRole("button", { name: "排在下一步" });
-    const stop = screen.getByRole("button", { name: "停止处理" });
     expect(queue).toBeEnabled();
-    expect(stop).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "中断并替换" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "停止处理" })).not.toBeInTheDocument();
+    expect(container.querySelectorAll(".composer-submit")).toHaveLength(1);
     expect(composer).toHaveTextContent("完成后补充单元测试");
     expect(client.startWork).not.toHaveBeenCalled();
-    expect(screen.getByText("Pi 正在处理上一条指令，你可以排队下一条或停止")).toBeInTheDocument();
+    expect(screen.getByText("CoDo 正在处理上一条指令，你仍可发送下一条")).toBeInTheDocument();
     expect(screen.queryByText(/已排队/u)).not.toBeInTheDocument();
-
-    client.stopWork.mockResolvedValueOnce({
-      ...seededDetail("stopped"),
-      summary: { ...seededDetail("stopped").summary, status: "stopped" },
-    });
-    await user.click(stop);
-    expect(client.stopWork).toHaveBeenCalledWith("work-1");
-  });
-
-  it("运行时中断当前任务并用新指令替换", async () => {
-    const user = userEvent.setup();
-    const client = createMockTauriClient();
-    client.seed(seededDetail("running"));
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-    client.interruptAndReplace.mockResolvedValue({
-      assignment: assignmentSummary({ id: "assignment-2", workId: "work-1" }),
-      run: {
-        id: "run-2",
-        workId: "work-1",
-        assignmentId: "assignment-2",
-        agentInstanceId: "agent-1",
-        engineKind: "fake",
-        engineSessionId: "session-2",
-        modelLabel: "Fake model",
-        status: "running",
-        createdAt: "2026-07-28T08:05:00.000Z",
-        startedAt: "2026-07-28T08:05:00.000Z",
-        completedAt: null,
-      },
-      userMessage: {
-        id: "message-2",
-        workId: "work-1",
-        runId: "run-2",
-        assignmentId: "assignment-2",
-        role: "user",
-        content: "替换为这条指令",
-        resourceIds: [],
-        createdAt: "2026-07-28T08:05:00.000Z",
-      },
-    });
-    render(<WorkSurface client={client} />);
-
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
-    await user.type(composer, "替换为这条指令");
-
-    const interrupt = screen.getByRole("button", { name: "中断并替换" });
-    expect(interrupt).toBeEnabled();
-    await user.click(interrupt);
-
-    expect(window.confirm).toHaveBeenCalledTimes(1);
-    expect(client.interruptAndReplace).toHaveBeenCalledWith("work-1", {
-      assignmentId: "",
-      replacement: {
-        instruction: "替换为这条指令",
-        referencedFiles: [],
-        resourceIds: [],
-      },
-    });
+    expect(dashboardStyles).toMatch(
+      /\.workspace-main--dashboard \.composer-submit\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*50%;/su,
+    );
   });
 
   it("连续 Enter 只启动一个 Run", async () => {
@@ -580,7 +558,7 @@ describe("WorkSurface", () => {
     client.startWork.mockImplementation(() => pendingRun.promise);
     render(<WorkSurface client={client} />);
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
     await user.type(composer, "只执行一次");
     await user.keyboard("{Enter}{Enter}");
 
@@ -654,7 +632,7 @@ describe("WorkSurface", () => {
     });
     render(<WorkSurface client={client} />);
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
     await user.type(composer, instruction);
     await user.click(screen.getByRole("button", { name: "发送" }));
 
@@ -681,12 +659,12 @@ describe("WorkSurface", () => {
     });
     render(<WorkSurface client={client} />);
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
     await user.type(composer, "开始");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(await screen.findByText("Pi 正在处理上一条指令。")).toBeInTheDocument();
-    expect(screen.getByText("Pi 正在处理上一条指令。").closest(".agent-activity")).not.toBeNull();
+    expect(await screen.findByText("CoDo 正在处理上一条指令。")).toBeInTheDocument();
+    expect(screen.getByText("CoDo 正在处理上一条指令。").closest(".agent-activity")).not.toBeNull();
     expect(document.querySelector(".workspace-banner")).toBeNull();
     expect(screen.queryByText(/Raw Work already/)).not.toBeInTheDocument();
     expect(screen.queryByText(/work_already_running/)).not.toBeInTheDocument();
@@ -735,9 +713,9 @@ describe("WorkSurface", () => {
     }));
     client.emit(event(7, { type: "runFailed", message: "网络不可用" }));
 
-    await userEvent.setup().click(
-      await screen.findByRole("button", { name: "展开执行详情" }),
-    );
+    expect(
+      await screen.findByRole("button", { name: "收起执行详情" }),
+    ).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByText("开始处理")).not.toBeInTheDocument();
     expect(screen.getByText("正在分析收入数据")).toBeInTheDocument();
     expect(screen.getByText("读取 revenue.csv")).toBeInTheDocument();
@@ -1042,7 +1020,7 @@ describe("WorkSurface", () => {
     const user = userEvent.setup();
     const client = createMockTauriClient();
     render(<WorkSurface client={client} />);
-    expect(await screen.findByRole("heading", { name: "今天想让 Pi 帮你完成什么？" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "有什么事，交给 CoDo。" })).toBeInTheDocument();
     const prompt = screen.getByRole("textbox", { name: "首个任务" });
     await user.type(prompt, "分析当前项目");
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
@@ -1246,7 +1224,7 @@ describe("WorkSurface", () => {
     ]);
     render(<WorkSurface client={client} />);
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
     await user.click(composer);
     await user.type(composer, "参考 @composer");
     await user.keyboard("{Enter}");
@@ -1383,9 +1361,9 @@ describe("WorkSurface", () => {
     const trigger = within(sidebar).getByRole("button", { name: "新对话" });
 
     await user.click(trigger);
-    expect(await screen.findByRole("heading", { name: "今天想让 Pi 帮你完成什么？" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "有什么事，交给 CoDo。" })).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "首个任务" })).toHaveFocus();
-    expect(screen.queryByRole("dialog", { name: "要在 PiWork 中完成什么？" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "把什么交给 CoDo？" })).not.toBeInTheDocument();
     expect(trigger).toHaveAttribute("aria-current", "page");
     expect(client.createWork).not.toHaveBeenCalled();
     expect(client.startWork).not.toHaveBeenCalled();
@@ -1492,7 +1470,7 @@ describe("WorkSurface", () => {
     await user.type(prompt, "中央空态焦点测试");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    const composer = await screen.findByRole("textbox", { name: "给 PiWork 指令" });
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
     expect(composer).toHaveFocus();
   });
 

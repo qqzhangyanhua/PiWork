@@ -127,6 +127,69 @@ export type SaveWebAccessSettingsInput = {
   }>;
 };
 
+export type MemoryAuthMode = "gatewayBearer" | "basic";
+
+export type MemorySettingsSummary = {
+  enabled: boolean;
+  hubEndpoint: string;
+  endpoint: string;
+  authMode: MemoryAuthMode;
+  authUsername: string;
+  allowInsecureHttp: boolean;
+  serviceId: string;
+  teamId: string;
+  userId: string;
+  requestTimeoutMs: number;
+  recallTimeoutMs: number;
+  maxRecallItems: number;
+  maxRecallChars: number;
+  captureEnabled: boolean;
+  recallEnabled: boolean;
+  apiKeyConfigured: boolean;
+  userKeyConfigured: boolean;
+};
+
+export type SaveMemorySettingsInput = Omit<
+  MemorySettingsSummary,
+  "apiKeyConfigured" | "userKeyConfigured"
+> & {
+  apiKey?: string | null;
+  userKey?: string | null;
+  clearApiKey?: boolean;
+  clearUserKey?: boolean;
+};
+
+export type WorkspaceMemoryBindingSummary = {
+  rootPath: string;
+  taskId: string;
+  enabled: boolean;
+  captureEnabled: boolean;
+  recallEnabled: boolean;
+  pendingCaptureCount: number;
+};
+
+export type SaveWorkspaceMemoryBindingInput = Omit<
+  WorkspaceMemoryBindingSummary,
+  "taskId" | "pendingCaptureCount"
+>;
+
+export type MemoryConnectionTestResult = {
+  healthy: boolean;
+  authenticated: boolean;
+  latencyMs: number;
+  failureCode:
+    | "timeout"
+    | "network"
+    | "proxyAuthentication"
+    | "gatewayBearerRequired"
+    | "authentication"
+    | "rejected"
+    | "invalidResponse"
+    | "invalidUserId"
+    | null;
+  resolvedUserId: string | null;
+};
+
 export type ConnectorPermission = "metadata" | "read_body" | "send";
 
 export type ConnectorWorkGrantSummary = {
@@ -244,6 +307,14 @@ export type PiWorkClient = {
   ): Promise<ExtensionSummary>;
   getWebAccessSettings?(): Promise<WebAccessSettingsSummary>;
   saveWebAccessSettings?(input: SaveWebAccessSettingsInput): Promise<WebAccessSettingsSummary>;
+  getMemorySettings?(): Promise<MemorySettingsSummary>;
+  saveMemorySettings?(input: SaveMemorySettingsInput): Promise<MemorySettingsSummary>;
+  testMemoryConnection?(): Promise<MemoryConnectionTestResult>;
+  listWorkspaceMemoryBindings?(): Promise<WorkspaceMemoryBindingSummary[]>;
+  saveWorkspaceMemoryBinding?(
+    input: SaveWorkspaceMemoryBindingInput,
+  ): Promise<WorkspaceMemoryBindingSummary>;
+  drainMemoryCaptureOutbox?(): Promise<number>;
   listEmailConnectors?(): Promise<EmailConnectorSummary[]>;
   saveEmailConnector?(input: SaveEmailConnectorInput): Promise<EmailConnectorSummary>;
   testEmailConnector?(input: SaveEmailConnectorInput): Promise<ConnectorTestResult>;
@@ -276,6 +347,8 @@ export type PiWorkClient = {
     resourceIds?: string[],
   ): Promise<StartWorkOutput>;
   stopWork(workId: string): Promise<WorkDetail>;
+  archiveWork(workId: string): Promise<WorkDetail>;
+  restoreWork(workId: string): Promise<WorkDetail>;
   drainAssignmentEventOutbox(): Promise<void>;
   listWorkAssignments(workId: string): Promise<AssignmentSummary[]>;
   queueWorkInput(workId: string, input: QueueWorkInput): Promise<StartWorkOutput>;
@@ -339,6 +412,18 @@ export const tauriClient: PiWorkClient = {
     invoke<WebAccessSettingsSummary>("get_web_access_settings"),
   saveWebAccessSettings: (input) =>
     invoke<WebAccessSettingsSummary>("save_web_access_settings", { input }),
+  getMemorySettings: () =>
+    invoke<MemorySettingsSummary>("get_memory_settings"),
+  saveMemorySettings: (input) =>
+    invoke<MemorySettingsSummary>("save_memory_settings", { input }),
+  testMemoryConnection: () =>
+    invoke<MemoryConnectionTestResult>("test_memory_connection"),
+  listWorkspaceMemoryBindings: () =>
+    invoke<WorkspaceMemoryBindingSummary[]>("list_workspace_memory_bindings"),
+  saveWorkspaceMemoryBinding: (input) =>
+    invoke<WorkspaceMemoryBindingSummary>("save_workspace_memory_binding", { input }),
+  drainMemoryCaptureOutbox: () =>
+    invoke<number>("drain_memory_capture_outbox"),
   listEmailConnectors: () =>
     invoke<EmailConnectorSummary[]>("list_email_connectors"),
   saveEmailConnector: (input) =>
@@ -383,6 +468,8 @@ export const tauriClient: PiWorkClient = {
       input: { prompt, referencedFiles, resourceIds },
     }),
   stopWork: (workId) => invoke<WorkDetail>("stop_work", { workId }),
+  archiveWork: (workId) => invoke<WorkDetail>("archive_work", { workId }),
+  restoreWork: (workId) => invoke<WorkDetail>("restore_work", { workId }),
   drainAssignmentEventOutbox: () =>
     invoke<void>("drain_assignment_event_outbox"),
   listWorkAssignments: (workId) =>

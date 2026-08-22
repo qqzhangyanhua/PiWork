@@ -175,4 +175,18 @@ impl WorkService {
         }
         self.get_work(work_id).await
     }
+
+    pub async fn archive_work(&self, work_id: &str) -> Result<WorkDetail, AppError> {
+        self.repository
+            .set_work_status(work_id, crate::domain::work::WorkStatus::Archived)
+            .await?;
+        self.get_work(work_id).await
+    }
+
+    pub async fn restore_work(&self, work_id: &str) -> Result<WorkDetail, AppError> {
+        self.repository
+            .set_work_status(work_id, crate::domain::work::WorkStatus::Idle)
+            .await?;
+        self.get_work(work_id).await
+    }
 }

@@ -13,6 +13,7 @@ pub enum WorkAction {
     Stop,
     Interrupt,
     Archive,
+    Restore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -78,6 +79,7 @@ pub fn transition(
             | WorkStatus::Interrupted,
             WorkAction::Archive,
         ) => WorkStatus::Archived,
+        (WorkStatus::Archived, WorkAction::Restore) => WorkStatus::Idle,
         _ => {
             return Err(InvalidTransition {
                 from: current,
@@ -141,6 +143,14 @@ mod tests {
     #[test]
     fn archived_work_cannot_run() {
         assert!(transition(WorkStatus::Archived, WorkAction::Queue).is_err());
+    }
+
+    #[test]
+    fn archived_work_can_be_restored_to_idle() {
+        assert_eq!(
+            transition(WorkStatus::Archived, WorkAction::Restore).unwrap(),
+            WorkStatus::Idle
+        );
     }
 
     #[test]

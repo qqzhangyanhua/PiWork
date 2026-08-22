@@ -73,6 +73,177 @@ fn extensions_and_connectors_migration_uses_stable_lf_line_endings() {
     assert!(!migration.contains('\r'));
 }
 
+#[test]
+fn message_assignment_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0011_message_assignment_link.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[test]
+fn tencent_agent_memory_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0012_tencent_agent_memory.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[test]
+fn open_email_permissions_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0013_open_email_permissions.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[test]
+fn memory_scope_hierarchy_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0014_memory_scope_hierarchy.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[test]
+fn memory_connection_auth_migration_uses_stable_lf_line_endings() {
+    let migration = include_str!("../migrations/0015_memory_connection_auth.sql");
+    assert!(!migration.contains('\r'));
+}
+
+#[tokio::test]
+async fn workspace_memory_migration_creates_isolated_settings_bindings_and_outbox() {
+    let database = Database::open_in_memory().await.unwrap();
+    let names = database.table_names().await.unwrap();
+    for expected in [
+        "memory_connection_settings",
+        "memory_workspace_bindings",
+        "memory_capture_outbox",
+    ] {
+        assert!(names.contains(&expected.to_owned()), "missing {expected}");
+    }
+
+    let defaults = sqlx::query_as::<
+        _,
+        (
+            bool,
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            i64,
+            i64,
+        ),
+    >(
+        "SELECT enabled, hub_endpoint, endpoint, auth_mode, auth_username, team_id, \
+                allow_insecure_http, recall_timeout_ms, max_recall_items, max_recall_chars \
+         FROM memory_connection_settings WHERE singleton_id = 1",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        defaults,
+        (
+            false,
+            "http://124.221.254.61".into(),
+            "http://124.221.254.61/mem".into(),
+            "basic".into(),
+            "tdai".into(),
+            "team-eb16plgnne".into(),
+            false,
+            1500,
+            8,
+            6000,
+        )
+    );
+
+    let binding_columns = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_table_info('memory_workspace_bindings') ORDER BY cid",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert!(binding_columns.contains(&"task_id".to_owned()));
+
+    let outbox_sql: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'memory_capture_outbox'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert!(outbox_sql.contains("UNIQUE (run_id)"));
+    assert!(outbox_sql.contains("status IN ('pending', 'sent')"));
+}
+
+#[tokio::test]
+async fn memory_scope_migration_promotes_one_team_and_backfills_workspace_tasks() {
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true),
+    )
+    .await
+    .unwrap();
+    connection.ensure_migrations_table().await.unwrap();
+    apply_agent_domain_migration(
+        &mut connection,
+        12,
+        "tencent agent memory",
+        include_str!("../migrations/0012_tencent_agent_memory.sql"),
+    )
+    .await;
+    for root_path in ["D:/workspace/alpha", "D:/workspace/beta"] {
+        sqlx::query(
+            "INSERT INTO memory_workspace_bindings \
+             (root_path, team_id, enabled, capture_enabled, recall_enabled, updated_at) \
+             VALUES (?, 'team-codo', 1, 1, 1, CURRENT_TIMESTAMP)",
+        )
+        .bind(root_path)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    }
+
+    apply_agent_domain_migration(
+        &mut connection,
+        14,
+        "memory scope hierarchy",
+        include_str!("../migrations/0014_memory_scope_hierarchy.sql"),
+    )
+    .await;
+
+    let team_id: String =
+        sqlx::query_scalar("SELECT team_id FROM memory_connection_settings WHERE singleton_id = 1")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert_eq!(team_id, "team-codo");
+    let task_ids = sqlx::query_scalar::<_, String>(
+        "SELECT task_id FROM memory_workspace_bindings ORDER BY root_path",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(task_ids.len(), 2);
+    assert!(task_ids.iter().all(|task_id| task_id.len() == 32));
+    assert_ne!(task_ids[0], task_ids[1]);
+}
+
+#[tokio::test]
+async fn messages_preserve_the_assignment_identity_before_a_run_exists() {
+    let database = Database::open_in_memory().await.unwrap();
+    let columns = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM pragma_table_info('messages') ORDER BY cid",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert!(columns.contains(&"assignment_id".to_owned()));
+    let indexes = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'messages' ORDER BY name",
+    )
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert!(indexes.contains(&"idx_messages_assignment_id".to_owned()));
+}
+
 #[tokio::test]
 async fn assignment_outbox_has_explicit_global_ordinal_and_delivery_metadata() {
     let database = Database::open_in_memory().await.unwrap();

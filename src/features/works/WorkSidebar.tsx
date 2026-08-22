@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  Clock3,
   Folder,
   LoaderCircle,
   MessageSquare,
@@ -16,7 +17,7 @@ import { useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkSummary } from "../../bindings";
-import { OrbLogo } from "../../components/brand/OrbLogo";
+import { CoDoLogo } from "../../components/brand/CoDoLogo";
 import { AccountMenu } from "../settings/AccountMenu";
 import { projectGroups } from "../workspace/WorkList";
 import { useWorkStore } from "./WorkStoreProvider";
@@ -46,6 +47,9 @@ type WorkSidebarProps = {
 function ConversationIcon({ status }: { status: WorkSummary["status"] }) {
   if (status === "running" || status === "queued") {
     return <LoaderCircle aria-hidden="true" className="project-conversation__spinner" size={14} />;
+  }
+  if (status === "waiting") {
+    return <Clock3 aria-hidden="true" className="project-conversation__waiting" size={14} />;
   }
   if (status === "failed" || status === "interrupted" || status === "stopped") {
     return <CircleAlert aria-hidden="true" size={14} />;
@@ -86,8 +90,7 @@ export function WorkSidebar({
     <aside className="work-sidebar" aria-label={t("sidebar.label")}>
       <div className="work-sidebar__topbar">
         <div className="work-sidebar__brand">
-          <span className="work-sidebar__brand-mark"><OrbLogo size={32} /></span>
-          <strong>PiWork</strong>
+          <span className="work-sidebar__brand-mark"><CoDoLogo showWordmark size={28} /></span>
         </div>
       </div>
 

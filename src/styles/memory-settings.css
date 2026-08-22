@@ -1,0 +1,288 @@
+.memory-settings {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--pw-dashboard-panel-solid);
+}
+
+.memory-settings-state {
+  display: flex;
+  min-height: 240px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--pw-text-secondary);
+  font-size: 13px;
+}
+
+.memory-settings-state--error { color: var(--pw-failure-500); }
+
+.memory-settings__header {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 28px 30px 22px;
+  border-bottom: 1px solid var(--pw-dashboard-border);
+}
+
+.memory-settings__content {
+  min-height: 0;
+  padding: 22px 30px 30px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--pw-dashboard-panel-solid);
+}
+
+.memory-settings__section { padding-bottom: 24px; }
+
+.memory-settings__section--workspaces {
+  padding-top: 22px;
+  border-top: 1px solid var(--pw-dashboard-border);
+}
+
+.memory-connection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.memory-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.memory-field--wide { grid-column: 1 / -1; }
+.memory-auth-field {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.memory-auth-field legend {
+  margin-bottom: 6px;
+  color: var(--pw-text-secondary);
+  font-size: 11px;
+}
+
+.memory-auth-mode {
+  display: grid;
+  width: min(100%, 440px);
+  min-height: 36px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid var(--pw-dashboard-border);
+  border-radius: 7px;
+  background: var(--pw-dashboard-progress);
+}
+
+.memory-auth-mode button {
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--pw-text-secondary);
+  font-size: 11px;
+}
+
+.memory-auth-mode button:hover { color: var(--pw-text-primary); }
+.memory-auth-mode button.is-selected {
+  background: var(--pw-dashboard-panel-solid);
+  box-shadow: 0 1px 3px rgb(15 23 42 / 9%);
+  color: var(--pw-text-primary);
+}
+
+.memory-field > span:first-child {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--pw-text-secondary);
+  font-size: 11px;
+}
+
+.memory-field > input,
+.memory-secret-input,
+.memory-runtime-controls > label:not(.settings-switch) input {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--pw-dashboard-border);
+  border-radius: 7px;
+  outline: 0;
+  background: var(--pw-dashboard-panel-solid);
+  color: inherit;
+  font-size: 11px;
+}
+
+.memory-field > input,
+.memory-runtime-controls > label:not(.settings-switch) input { padding: 0 9px; }
+
+.memory-field > input:focus,
+.memory-secret-input:focus-within,
+.memory-runtime-controls > label:not(.settings-switch) input:focus {
+  border-color: var(--pw-brand-500);
+  box-shadow: 0 0 0 3px rgb(59 125 250 / 8%);
+}
+
+.memory-secret-input {
+  display: flex;
+  align-items: center;
+  padding: 0 5px 0 9px;
+}
+
+.memory-secret-input input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+}
+
+.memory-secret-input button {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  flex: 0 0 25px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--pw-text-tertiary);
+}
+
+.memory-secret-input button:hover { background: var(--pw-surface-subtle); color: var(--pw-text-primary); }
+.memory-secret-input button.is-pending { color: var(--pw-failure-500); }
+
+.memory-security-warning {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--pw-failure-500) 32%, var(--pw-dashboard-border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--pw-failure-500) 5%, var(--pw-dashboard-panel-solid));
+}
+
+.memory-security-warning > svg { color: var(--pw-failure-500); }
+.memory-security-warning > span { display: grid; gap: 2px; }
+.memory-security-warning strong { font-size: 11px; font-weight: 620; }
+.memory-security-warning small { color: var(--pw-text-secondary); font-size: 10px; line-height: 1.45; }
+
+.memory-runtime-controls {
+  display: grid;
+  grid-template-columns: auto auto repeat(4, minmax(0, 1fr));
+  align-items: end;
+  gap: 18px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--pw-dashboard-border);
+  border-radius: 7px;
+  background: var(--pw-dashboard-progress);
+}
+
+.memory-runtime-controls > label { min-width: 0; }
+.memory-runtime-controls > label:not(.settings-switch) { display: grid; gap: 5px; }
+.memory-runtime-controls > label:not(.settings-switch) > span { color: var(--pw-text-secondary); font-size: 10px; }
+
+.memory-workspace-list { display: grid; gap: 8px; }
+
+.memory-workspace-row {
+  display: grid;
+  min-height: 76px;
+  grid-template-columns: minmax(180px, .8fr) minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 1px solid var(--pw-dashboard-border);
+  border-radius: 7px;
+  background: var(--pw-dashboard-panel-solid);
+  opacity: .72;
+}
+
+.memory-workspace-row[data-enabled="true"] {
+  border-color: color-mix(in srgb, var(--pw-success-500) 30%, var(--pw-dashboard-border));
+  opacity: 1;
+}
+
+.memory-workspace-row__identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.memory-workspace-row__identity > svg { flex: 0 0 auto; color: var(--pw-brand-500); }
+.memory-workspace-row__identity > span { display: grid; min-width: 0; gap: 3px; }
+.memory-workspace-row__identity strong { overflow: hidden; font-size: 12px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.memory-workspace-row__identity small { overflow: hidden; color: var(--pw-text-tertiary); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+
+.memory-workspace-row__scope { display: grid; min-width: 0; gap: 6px; }
+.memory-workspace-row__scope > span { color: var(--pw-text-secondary); font-size: 11px; }
+.memory-workspace-row__scope code {
+  overflow: hidden;
+  color: var(--pw-text-tertiary);
+  font-family: inherit;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-workspace-row__toggles { display: flex; align-items: center; gap: 12px; }
+.memory-workspace-row__pending { color: var(--pw-text-tertiary); font-size: 10px; white-space: nowrap; }
+.memory-workspaces-empty { margin: 0; color: var(--pw-text-tertiary); font-size: 11px; }
+
+.memory-settings__footer {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 30px;
+  border-top: 1px solid var(--pw-dashboard-border);
+  background: var(--pw-dashboard-panel-solid);
+}
+
+.memory-settings__footer > span,
+.memory-settings__footer > span > span,
+.memory-settings__footer > div,
+.memory-settings__footer .button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-settings__footer > span { font-size: 11px; }
+.memory-settings__footer .is-error { color: var(--pw-failure-500); }
+.memory-settings__footer .is-saved { color: var(--pw-success-500); }
+
+@media (max-width: 1160px) {
+  .memory-workspace-row { grid-template-columns: minmax(180px, .8fr) minmax(180px, 1fr); }
+  .memory-workspace-row__pending { justify-self: end; }
+}
+
+@media (max-width: 950px) {
+  .memory-runtime-controls { grid-template-columns: 1fr 1fr; }
+  .memory-workspace-row { grid-template-columns: 1fr; }
+  .memory-workspace-row__pending { justify-self: start; }
+}
+
+@media (max-width: 720px) {
+  .memory-connection-grid { grid-template-columns: 1fr; }
+  .memory-field--wide { grid-column: auto; }
+  .memory-settings__header { grid-template-columns: 1fr; gap: 12px; }
+  .memory-settings__header .settings-switch { justify-self: start; }
+  .memory-settings__header,
+  .memory-settings__content,
+  .memory-settings__footer { padding-right: 18px; padding-left: 18px; }
+  .memory-security-warning { grid-template-columns: auto minmax(0, 1fr); }
+  .memory-security-warning .settings-switch { grid-column: 1 / -1; justify-self: start; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .memory-settings .settings-switch > span,
+  .memory-settings .settings-switch > span::after { transition: none; }
+}

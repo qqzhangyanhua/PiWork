@@ -1,9 +1,9 @@
-import { ChevronRight, CircleAlert, CircleCheck, CircleDashed, Folder, LoaderCircle, PanelRightOpen } from "lucide-react";
+import { Archive, ChevronRight, CircleAlert, CircleCheck, CircleDashed, Folder, LoaderCircle, PanelRightOpen } from "lucide-react";
 import { type Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkSummary } from "../../bindings";
-import { ContinuousLoopLogo } from "../../components/brand/ContinuousLoopLogo";
+import { CoDoLogo } from "../../components/brand/CoDoLogo";
 import type { DetailExperience } from "./detailExperience";
 
 type WorkHeaderProps = {
@@ -13,10 +13,11 @@ type WorkHeaderProps = {
   inspectorToggleRef: Ref<HTMLButtonElement>;
   experience: DetailExperience;
   onExperienceChange(experience: DetailExperience): void;
+  onArchive(): void;
   onInspectorToggle(): void;
 };
 
-export function WorkHeader({ work, modelLabel, inspectorOpen, inspectorToggleRef, experience, onExperienceChange, onInspectorToggle }: WorkHeaderProps) {
+export function WorkHeader({ work, modelLabel, inspectorOpen, inspectorToggleRef, experience, onExperienceChange, onArchive, onInspectorToggle }: WorkHeaderProps) {
   const { t } = useTranslation();
   const projectName = work.rootPath.split(/[\\/]/).filter(Boolean).at(-1) ?? work.rootPath;
   const StatusIcon = work.status === "running" || work.status === "queued"
@@ -32,8 +33,8 @@ export function WorkHeader({ work, modelLabel, inspectorOpen, inspectorToggleRef
       <header className="work-header">
         <div className="work-header__identity">
           <div className="work-header__title-row">
-            <span className="work-header__workspace-mark"><ContinuousLoopLogo size={13} /></span>
-            <span className="work-header__workspace-name">PiWork</span>
+            <span className="work-header__workspace-mark"><CoDoLogo size={16} /></span>
+            <span className="work-header__workspace-name">CoDo</span>
             <ChevronRight aria-hidden="true" className="work-header__breadcrumb-chevron" size={13} />
             <span className="work-header__breadcrumb-project" title={work.rootPath}>{projectName}</span>
             <ChevronRight aria-hidden="true" className="work-header__breadcrumb-chevron" size={13} />
@@ -66,6 +67,16 @@ export function WorkHeader({ work, modelLabel, inspectorOpen, inspectorToggleRef
               </button>
             ))}
           </fieldset>
+          <button
+            aria-label={t("conversation.archive")}
+            className="icon-button work-header__archive"
+            disabled={["queued", "running", "waiting"].includes(work.status)}
+            onClick={onArchive}
+            title={t("conversation.archive")}
+            type="button"
+          >
+            <Archive aria-hidden="true" size={17} />
+          </button>
           <button
             className="icon-button work-header__inspector-toggle"
             type="button"

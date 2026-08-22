@@ -14,17 +14,15 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
-  ConnectorPermission,
   EmailConnectorSummary,
   EmailMetadataSummary,
   PiWorkClient,
   SaveEmailConnectorInput,
 } from "../../app/tauriClient";
-import type { WorkSummary } from "../../bindings";
 
 type ConnectorDraft = SaveEmailConnectorInput & { password: string };
 
@@ -34,6 +32,22 @@ const ALIYUN_DEFAULTS = {
   smtpHost: "smtp.qiye.aliyun.com",
   smtpPort: 465,
 } as const;
+
+const TEST_ERROR_KEYS: Record<string, string> = {
+  imap_authentication: "connectors.testErrors.imapAuthentication",
+  imap_configuration: "connectors.testErrors.imapConfiguration",
+  imap_connection_failed: "connectors.testErrors.imapConnection",
+  imap_network: "connectors.testErrors.imapNetwork",
+  imap_protocol: "connectors.testErrors.imapProtocol",
+  imap_timeout: "connectors.testErrors.imapTimeout",
+  imap_tls: "connectors.testErrors.imapTls",
+  smtp_authentication: "connectors.testErrors.smtpAuthentication",
+  smtp_configuration: "connectors.testErrors.smtpConfiguration",
+  smtp_connection: "connectors.testErrors.smtpConnection",
+  smtp_connection_failed: "connectors.testErrors.smtpConnection",
+  smtp_timeout: "connectors.testErrors.smtpTimeout",
+  smtp_tls: "connectors.testErrors.smtpTls",
+};
 
 const emptyDraft = (): ConnectorDraft => ({
   id: null,
@@ -65,13 +79,7 @@ const connectionTone = (connection: EmailConnectorSummary) => {
   return connection.healthStatus;
 };
 
-export function ConnectorPage({
-  client,
-  works,
-}: {
-  client: PiWorkClient;
-  works: WorkSummary[];
-}) {
+export function ConnectorPage({ client }: { client: PiWorkClient }) {
   const { t } = useTranslation();
   const [connections, setConnections] = useState<EmailConnectorSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -148,7 +156,10 @@ export function ConnectorPage({
       const result = await client.testEmailConnector({ ...draft, password: draft.password || null });
       setMessage(result.imapOk && result.smtpOk
         ? { tone: "success", text: t("connectors.testSuccess") }
-        : { tone: "error", text: t("connectors.testError") });
+        : {
+            tone: "error",
+            text: t(TEST_ERROR_KEYS[result.errorCode ?? ""] ?? "connectors.testError"),
+          });
     } catch {
       setMessage({ tone: "error", text: t("connectors.testError") });
     } finally {
@@ -189,23 +200,6 @@ export function ConnectorPage({
       setBusy(null);
     }
   };
-
-  const updateWorkGrant = async (
-    workId: string,
-    enabled: boolean,
-    permissions: ConnectorPermission[],
-  ) => {
-    if (!selected || !client.setConnectorWorkGrant) return;
-    try {
-      replaceConnection(await client.setConnectorWorkGrant(selected.id, workId, enabled, permissions));
-    } catch {
-      setMessage({ tone: "error", text: t("connectors.grantError") });
-    }
-  };
-
-  const activeGrantMap = useMemo(() => new Map(
-    (selected?.workGrants ?? []).map((grant) => [grant.workId, grant.permissions]),
-  ), [selected]);
 
   return (
     <section aria-labelledby="connectors-title" className="connector-page product-page">
@@ -319,27 +313,15 @@ export function ConnectorPage({
                   <ShieldCheck aria-hidden="true" size={15} />
                   <div><h3 id="connector-work-heading">{t("connectors.workAccess")}</h3><p>{t("connectors.workAccessDescription")}</p></div>
                 </div>
-                {works.length === 0 ? <p className="connector-section__empty">{t("connectors.noWorks")}</p> : (
-                  <div className="connector-work-list">
-                    {works.map((work) => {
-                      const permissions = activeGrantMap.get(work.id) ?? [];
-                      const granted = activeGrantMap.has(work.id);
-                      return (
-                        <div className="connector-work-row" key={work.id}>
-                          <label className="connector-work-row__main"><input checked={granted} onChange={(event) => void updateWorkGrant(work.id, event.target.checked, event.target.checked ? ["metadata", "read_body", "send"] : [])} type="checkbox" /><span><strong>{work.title}</strong><small>{work.rootPath}</small></span></label>
-                          <div aria-label={t("connectors.permissions")} className="connector-work-row__permissions">
-                            {(["metadata", "read_body", "send"] as const).map((permission) => (
-                              <label key={permission}><input checked={permissions.includes(permission)} disabled={!granted} onChange={(event) => {
-                                const next = event.target.checked ? [...permissions, permission] : permissions.filter((item) => item !== permission);
-                                void updateWorkGrant(work.id, true, next);
-                              }} type="checkbox" /><span>{t(`connectors.permission.${permission}`)}</span></label>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
+                <div className="connector-global-access">
+                  <Check aria-hidden="true" size={14} />
+                  <span>{t("connectors.allAgentsAccess")}</span>
+                </div>
+                <div aria-label={t("connectors.permissions")} className="connector-global-permissions">
+                  {(["metadata", "read_body", "send"] as const).map((permission) => (
+                    <span key={permission}><Check aria-hidden="true" size={12} />{t(`connectors.permission.${permission}`)}</span>
+                  ))}
+                </div>
               </section>
             )}
 

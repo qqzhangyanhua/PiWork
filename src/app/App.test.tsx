@@ -224,7 +224,7 @@ describe("App", () => {
       "error",
     );
     expect(
-      screen.getByRole("heading", { name: "Open the PiWork desktop app" }),
+      screen.getByRole("heading", { name: "Open the CoDo desktop app" }),
     ).toBeInTheDocument();
     expect(screen.getByText(/pnpm tauri dev/)).toBeInTheDocument();
   });
@@ -333,16 +333,16 @@ describe("App", () => {
     expect(screen.queryByText(/could not be verified/u)).not.toBeInTheDocument();
   });
 
-  it("renders the PiWork product shell and bootstraps Work state", async () => {
+  it("renders the CoDo product shell and bootstraps Work state", async () => {
     const client = createMockTauriClient();
     render(<App client={client} />);
-    expect(screen.getByText("PiWork")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "CoDo" })).toBeInTheDocument();
     const newConversation = await screen.findByRole("button", { name: "New conversation" });
     expect(newConversation).toBeInTheDocument();
     expect(newConversation).toHaveTextContent("Ctrl N");
     expect(newConversation).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("button", { name: "Home" })).not.toBeInTheDocument();
-    expect(screen.getByTestId("orb-logo")).toBeInTheDocument();
+    expect(screen.getAllByTestId("codo-logo").length).toBeGreaterThan(0);
     await waitFor(() => expect(client.listWorks).toHaveBeenCalledTimes(1));
     expect(client.listenToWorkEvents).toHaveBeenCalledTimes(1);
   });
@@ -354,7 +354,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("button", { name: "新对话" }),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("orb-logo")).toBeInTheDocument();
+    expect(screen.getAllByTestId("codo-logo").length).toBeGreaterThan(0);
   });
 
   it("opens the local account menu and keeps model configuration inside the settings page", async () => {
@@ -417,7 +417,7 @@ describe("App", () => {
 
     await user.click(trigger);
     expect(screen.getByRole("menu", { name: "Account" })).toBeInTheDocument();
-    await user.click(screen.getByRole("heading", { name: "What should Pi help you get done today?" }));
+    await user.click(screen.getByRole("heading", { name: "Hand it to CoDo." }));
     expect(screen.queryByRole("menu", { name: "Account" })).not.toBeInTheDocument();
   });
 

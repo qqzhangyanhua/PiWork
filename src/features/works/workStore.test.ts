@@ -103,6 +103,12 @@ const unusedClient: PiWorkClient = {
   stopWork: async () => {
     throw new Error("unused");
   },
+  archiveWork: async () => {
+    throw new Error("unused");
+  },
+  restoreWork: async () => {
+    throw new Error("unused");
+  },
   drainAssignmentEventOutbox: async () => undefined,
   listWorkAssignments: async () => [],
   queueWorkInput: async () => {
@@ -172,6 +178,43 @@ const workDetail = (): WorkDetail => ({
 });
 
 describe("createWorkStore", () => {
+  it("clears the running sidebar state when Work delivery completes", () => {
+    const store = createWorkStore(createMockTauriClient());
+    store.getState().upsertWork({
+      ...work,
+      status: "running",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+    store.getState().applyEvent(event(1, { type: "runStarted", modelLabel: "gpt-5" }));
+
+    store.getState().applyEvent(event(2, {
+      type: "workDeliveryCompleted",
+      summary: "已完成并交付。",
+      artifacts: [],
+      validation: [],
+      limitations: [],
+    }));
+
+    expect(store.getState().works.w1?.status).toBe("completed");
+  });
+
+  it("projects a Run waiting signal into a stable Work status", () => {
+    const store = createWorkStore(createMockTauriClient());
+    store.getState().upsertWork({
+      ...work,
+      status: "running",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+    store.getState().applyEvent(event(1, { type: "runStarted", modelLabel: "gpt-5" }));
+
+    store.getState().applyEvent(event(2, {
+      type: "waiting",
+      reason: "waiting_on_assignments",
+    }));
+
+    expect(store.getState().works.w1?.status).toBe("waiting");
+  });
+
   it("keeps mock legacy start output non-durable and opaque", async () => {
     const client = createMockTauriClient();
     client.seed(workDetail());
@@ -901,7 +944,7 @@ describe("createWorkStore", () => {
     expect(store.getState().timelines.w1).toEqual([output.userMessage]);
   });
 
-  it("does not project a queued assignment as a legacy run", async () => {
+  it("shows a queued assignment message before the Scheduler creates its Run", async () => {
     const output: StartWorkOutput = {
       assignment: assignmentSummary({
         id: "assignment-queued",
@@ -931,7 +974,15 @@ describe("createWorkStore", () => {
 
     expect(store.getState().works.w1).toEqual(work);
     expect(store.getState().latestRuns.w1).toBeUndefined();
-    expect(store.getState().timelines.w1).toBeUndefined();
+    expect(store.getState().timelines.w1).toEqual([{
+      id: "message-queued",
+      workId: "w1",
+      runId: "assignment:assignment-queued",
+      role: "user",
+      content: "Queue it",
+      resourceIds: [],
+      createdAt: "2026-07-28T09:00:01.000Z",
+    }]);
   });
 
   it("deduplicates the same authoritative message across live start and hydration", async () => {

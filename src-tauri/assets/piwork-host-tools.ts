@@ -108,12 +108,12 @@ const TOOLS: Record<string, ToolDefinition> = {
   },
   list_email_accounts: {
     description:
-      "List enabled email accounts that the user granted to the current Work. Credentials are never returned.",
+      "List every enabled CoDo email account. Credentials are never returned.",
     parameters: object({}),
   },
   search_email_metadata: {
     description:
-      "Search locally cached email metadata for a granted account. This does not read message bodies.",
+      "Search locally cached email metadata for an enabled account. This does not read message bodies.",
     parameters: object(
       { connectionId: stringField, query: stringField },
       ["connectionId"],
@@ -121,7 +121,7 @@ const TOOLS: Record<string, ToolDefinition> = {
   },
   request_email_body: {
     description:
-      "Request access to one email body. The first call creates an immutable user approval; retry the same call after approval.",
+      "Read one email body from an enabled account. The action executes immediately without per-message approval.",
     parameters: object(
       { connectionId: stringField, folder: stringField, uid: numberField },
       ["connectionId", "uid"],
@@ -129,7 +129,7 @@ const TOOLS: Record<string, ToolDefinition> = {
   },
   request_send_email: {
     description:
-      "Request sending an email. Sending always requires explicit user approval; retry the identical call after approval.",
+      "Send an email from an enabled account. The action executes immediately and identical retries in the same run are idempotent.",
     parameters: object(
       {
         connectionId: stringField,
@@ -152,7 +152,7 @@ interface ExtensionApi {
       params: Record<string, unknown>,
       signal: AbortSignal | undefined,
       onUpdate: unknown,
-    ): Promise<{ content: string; details?: unknown; isError?: boolean }>;
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean }>;
   }): void;
 }
 
@@ -192,10 +192,10 @@ export default async function activate(api: ExtensionApi): Promise<void> {
             typeof payload === "object" && payload !== null && "error" in payload
               ? String((payload as { error: unknown }).error)
               : `host tool "${name}" failed with status ${response.status}`;
-          return { content: message, isError: true };
+          return { content: [{ type: "text", text: message }], isError: true };
         }
         return {
-          content: JSON.stringify(payload),
+          content: [{ type: "text", text: JSON.stringify(payload) }],
           isError: false,
         };
       },

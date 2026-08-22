@@ -103,6 +103,7 @@ pub struct SaveWebAccessSettingsInput {
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionRuntimeSnapshot {
     pub extension_paths: Vec<PathBuf>,
+    pub tool_ids: Vec<String>,
     pub runtime_files: Vec<(PathBuf, String)>,
     pub sensitive_values: Vec<String>,
 }
@@ -162,9 +163,8 @@ impl ExtensionService {
         )
         .fetch_all(&self.pool)
         .await?;
-        let grants = sqlx::query_as::<_, (String, String)>(
-            "SELECT package_id, agent_instance_id FROM extension_agent_grants \
-             WHERE enabled = 1 ORDER BY agent_instance_id",
+        let active_agent_ids = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agent_instances WHERE status = 'active' ORDER BY id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -172,11 +172,11 @@ impl ExtensionService {
         Ok(rows
             .into_iter()
             .map(|row| ExtensionSummary {
-                enabled_agent_ids: grants
-                    .iter()
-                    .filter(|(package_id, _)| package_id == &row.package_id)
-                    .map(|(_, agent_id)| agent_id.clone())
-                    .collect(),
+                enabled_agent_ids: if matches!(row.lifecycle_status.as_str(), "installed") {
+                    active_agent_ids.clone()
+                } else {
+                    Vec::new()
+                },
                 package_id: row.package_id,
                 display_name: row.display_name,
                 description: row.description,
@@ -401,25 +401,16 @@ impl ExtensionService {
 
     pub async fn runtime_snapshot(
         &self,
-        agent_instance_id: &str,
-        work_id: &str,
+        _agent_instance_id: &str,
+        _work_id: &str,
     ) -> Result<ExtensionRuntimeSnapshot, AppError> {
-        let grant = sqlx::query_as::<_, (bool, String, Option<bool>, Option<String>)>(
-            "SELECT agent.enabled, agent.tool_allowlist_json, work.enabled, work.tool_allowlist_json \
-             FROM extension_agent_grants agent \
-             LEFT JOIN extension_work_policies work \
-               ON work.package_id = agent.package_id AND work.work_id = ? \
-             WHERE agent.package_id = ? AND agent.agent_instance_id = ?",
+        let lifecycle_status = sqlx::query_scalar::<_, String>(
+            "SELECT lifecycle_status FROM extension_packages WHERE package_id = ?",
         )
-        .bind(work_id)
         .bind(WEB_ACCESS_PACKAGE_ID)
-        .bind(agent_instance_id)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((true, agent_tools, work_enabled, work_tools)) = grant else {
-            return Ok(ExtensionRuntimeSnapshot::default());
-        };
-        if work_enabled == Some(false) {
+        if lifecycle_status.as_deref() != Some("installed") {
             return Ok(ExtensionRuntimeSnapshot::default());
         }
         let settings = self.web_access_settings().await?;
@@ -433,10 +424,8 @@ impl ExtensionService {
             .cloned()
             .ok_or_else(|| AppError::engine("bundled Pi Web Access extension is unavailable"))?;
 
-        let allowed = effective_tool_allowlist(&agent_tools, work_tools.as_deref());
-        let search_enabled = settings.providers.iter().any(|provider| provider.enabled)
-            && tool_allowed(&allowed, "web_search");
-        let fetch_enabled = settings.url_fetch_enabled && tool_allowed(&allowed, "fetch_content");
+        let search_enabled = settings.providers.iter().any(|provider| provider.enabled);
+        let fetch_enabled = settings.url_fetch_enabled;
         if !search_enabled && !fetch_enabled {
             return Ok(ExtensionRuntimeSnapshot::default());
         }
@@ -450,9 +439,9 @@ impl ExtensionService {
             "tools".into(),
             json!({
                 "webSearch": { "enabled": search_enabled },
-                "sourceCheck": { "enabled": search_enabled && tool_allowed(&allowed, "source_check") },
+                "sourceCheck": { "enabled": search_enabled },
                 "fetchContent": { "enabled": fetch_enabled },
-                "getSearchContent": { "enabled": fetch_enabled && tool_allowed(&allowed, "get_search_content") }
+                "getSearchContent": { "enabled": fetch_enabled }
             }),
         );
         let mut sensitive_values = Vec::new();
@@ -502,8 +491,16 @@ impl ExtensionService {
         }
         let config = serde_json::to_string_pretty(&config)
             .map_err(|_| AppError::engine("web access runtime configuration is invalid"))?;
+        let mut tool_ids = Vec::new();
+        if search_enabled {
+            tool_ids.extend(["web_search".to_owned(), "source_check".to_owned()]);
+        }
+        if fetch_enabled {
+            tool_ids.extend(["fetch_content".to_owned(), "get_search_content".to_owned()]);
+        }
         Ok(ExtensionRuntimeSnapshot {
             extension_paths: vec![entry],
+            tool_ids,
             runtime_files: vec![(PathBuf::from("web-search.json"), config)],
             sensitive_values,
         })
@@ -605,30 +602,6 @@ fn normalize_tool_allowlist(values: Vec<String>) -> Result<Vec<String>, AppError
     Ok(std::mem::take(&mut normalized).into_iter().collect())
 }
 
-fn effective_tool_allowlist(agent: &str, work: Option<&str>) -> BTreeSet<String> {
-    let agent = serde_json::from_str::<Vec<String>>(agent).unwrap_or_default();
-    let work = work
-        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-        .unwrap_or_default();
-    let agent = if agent.is_empty() {
-        WEB_ACCESS_TOOL_IDS
-            .iter()
-            .map(|tool| (*tool).to_owned())
-            .collect::<BTreeSet<_>>()
-    } else {
-        agent.into_iter().collect()
-    };
-    if work.is_empty() {
-        return agent;
-    }
-    let work = work.into_iter().collect::<BTreeSet<_>>();
-    agent.intersection(&work).cloned().collect()
-}
-
-fn tool_allowed(allowed: &BTreeSet<String>, tool: &str) -> bool {
-    allowed.contains(tool)
-}
-
 fn configured_route(
     settings: &WebAccessSettingsSummary,
     providers: &[&WebSearchProviderSummary],
@@ -714,6 +687,7 @@ struct NpmSearchScore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::sqlite::Database;
 
     #[test]
     fn tool_allowlists_are_normalized_and_reject_unknown_tools() {
@@ -724,12 +698,39 @@ mod tests {
         assert!(normalize_tool_allowlist(vec!["bash".into()]).is_err());
     }
 
-    #[test]
-    fn work_tool_policy_can_only_reduce_agent_tools() {
-        let allowed = effective_tool_allowlist(
-            r#"["web_search","fetch_content"]"#,
-            Some(r#"["fetch_content","source_check"]"#),
+    #[tokio::test]
+    async fn enabled_builtin_extension_is_available_without_agent_or_work_grants() {
+        let database = Database::open_in_memory().await.unwrap();
+        sqlx::query(
+            "UPDATE web_access_settings SET enabled = 1, url_fetch_enabled = 1, \
+             default_provider = 'searxng' WHERE singleton_id = 1",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE web_search_providers SET enabled = 1 WHERE provider_id = 'searxng'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let entry = temporary.path().join("index.ts");
+        std::fs::write(&entry, "export default () => {};").unwrap();
+        let service = ExtensionService::new(database.pool().clone(), Some(entry)).unwrap();
+
+        let snapshot = service
+            .runtime_snapshot("agent-instance:future", "work-future")
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.extension_paths.len(), 1);
+        assert_eq!(
+            snapshot.tool_ids,
+            [
+                "web_search",
+                "source_check",
+                "fetch_content",
+                "get_search_content"
+            ]
         );
-        assert_eq!(allowed, BTreeSet::from(["fetch_content".to_owned()]));
     }
 }

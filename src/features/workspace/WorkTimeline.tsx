@@ -30,6 +30,13 @@ type ConversationTurnGroup = {
 const itemTimestamp = (item: TimelineItem) =>
   isWorkEventTimelineItem(item) ? item.occurredAt : item.createdAt;
 
+const pendingAssignmentId = (runId: string) => {
+  const prefix = "assignment:";
+  return runId.startsWith(prefix) && runId.length > prefix.length
+    ? runId.slice(prefix.length)
+    : null;
+};
+
 const formatTurnTimestamp = (value: string, locale: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -59,7 +66,10 @@ const groupByRun = (timeline: TimelineItem[]) => {
     const item = timeline[index];
     if (!item) continue;
     if (!isWorkEventTimelineItem(item)) {
-      identityByIndex[index] = item.runId;
+      const assignmentId = pendingAssignmentId(item.runId);
+      identityByIndex[index] = assignmentId
+        ? nextRunByAssignment.get(assignmentId) ?? item.runId
+        : item.runId;
       continue;
     }
 
@@ -102,9 +112,39 @@ const isUrgentPermission = (
 ): item is Extract<ActivityItem, { type: "permission" }> =>
   item.type === "permission" && item.status === "requested";
 
-function AssistantMessage({ text }: { text: string }) {
+const isInternalCompletionActivity = (
+  item: ActivityItem,
+): item is Extract<ActivityItem, { type: "assignment" }> =>
+  item.type === "assignment" && (
+    item.activityKind === "completed" ||
+    item.activityKind === "decision" ||
+    item.activityKind === "deliveryCompleted"
+  );
+
+const normalizedAnswer = (value: string) => value.trim().replace(/\s+/gu, " ");
+
+type AssistantMessageKind = "response" | "delivery-summary";
+
+function AssistantMessage({
+  kind = "response",
+  text,
+}: {
+  kind?: AssistantMessageKind;
+  text: string;
+}) {
+  const { t } = useTranslation();
   return (
-    <article className="timeline-event--assistant">
+    <article
+      aria-label={kind === "delivery-summary" ? t("timeline.deliverySummary") : undefined}
+      className="timeline-event--assistant"
+      data-kind={kind}
+    >
+      {kind === "delivery-summary" ? (
+        <header className="timeline-assistant__label">
+          <CircleCheck aria-hidden="true" />
+          <span>{t("timeline.deliverySummary")}</span>
+        </header>
+      ) : null}
       <div className="timeline-markdown">
         <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
       </div>
@@ -127,16 +167,48 @@ function ConversationSegment({
   );
   const events = group.items.filter(isWorkEventTimelineItem);
   const projected = projectActivity(events);
-  const assistantText = projected
+  const streamedAssistantText = projected
     .filter(
       (item): item is Extract<ActivityItem, { type: "message" }> =>
         item.type === "message",
     )
     .map((item) => item.text)
-    .join("");
+    .join("")
+    .trim();
+  const workDelivery = events.find(
+    (event): event is WorkEventEnvelope & { payload: Extract<WorkEventEnvelope["payload"], { type: "workDeliveryCompleted" }> } =>
+      event.payload.type === "workDeliveryCompleted",
+  );
+  const deliveryAnswer = workDelivery?.payload.summary.trim() ?? "";
+  const persistedAssistantAnswers = new Set(
+    messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => normalizedAnswer(message.content)),
+  );
+  // assistantDelta is already visible conversation output. Completion
+  // channels can add a concise delivery summary, but they are not allowed to
+  // replace text the user has already read. Keep distinct outputs in arrival
+  // order and deduplicate only exact repeats.
+  const projectedAssistantTexts = [
+    { kind: "response" as const, text: streamedAssistantText },
+    { kind: "delivery-summary" as const, text: deliveryAnswer },
+  ].reduce<Array<{ kind: AssistantMessageKind; text: string }>>((answers, candidate) => {
+      const normalized = normalizedAnswer(candidate.text);
+      if (
+        !normalized ||
+        persistedAssistantAnswers.has(normalized) ||
+        answers.some((answer) => normalizedAnswer(answer.text) === normalized)
+      ) {
+        return answers;
+      }
+      return [...answers, candidate];
+    }, []);
   const hasTerminalEvent = events.some(
     (event) =>
-      event.payload.type === "runCompleted" || event.payload.type === "runFailed",
+      event.payload.type === "runCompleted" ||
+      event.payload.type === "runFailed" ||
+      event.payload.type === "assignmentCompleted" ||
+      event.payload.type === "workDeliveryCompleted",
   );
   const urgentPermissionItems = hasTerminalEvent
     ? []
@@ -144,9 +216,16 @@ function ConversationSegment({
   const activityItems = projected.filter(
     (item) =>
       item.type !== "message" &&
+      !isInternalCompletionActivity(item) &&
       (hasTerminalEvent || !isUrgentPermission(item)),
   );
-  const hasProgressActivity = activityItems.some(isActivityFeedItem);
+  const hasProgressDetails = activityItems.some(isActivityFeedItem);
+  const hasProgressSignal = events.some(({ payload }) =>
+    payload.type !== "assistantDelta" &&
+    payload.type !== "rawEngineEvent" &&
+    payload.type !== "usageUpdated",
+  );
+  const hasProgressActivity = hasProgressDetails || hasProgressSignal;
   const completion = events.find(
     (event): event is WorkEventEnvelope & { payload: Extract<WorkEventEnvelope["payload"], { type: "runCompleted" }> } =>
       event.payload.type === "runCompleted",
@@ -158,8 +237,16 @@ function ConversationSegment({
   const completionSummary = completion
     ? presentableCompletionSummary(completion.payload.summary)
     : "";
+  const secondaryCompletionSummary = completionSummary && (
+    projectedAssistantTexts.length === 0 ||
+    !projectedAssistantTexts.some(
+      (answer) => normalizedAnswer(completionSummary) === normalizedAnswer(answer.text),
+    )
+  )
+    ? completionSummary
+    : "";
   const hasDelivery = Boolean(completion && (
-    completionSummary
+    secondaryCompletionSummary
     || completion.payload.artifacts.length
     || completion.payload.validation.length
     || completion.payload.limitations.length
@@ -191,17 +278,25 @@ function ConversationSegment({
       ) : null}
       {hasProgressActivity && (
         <ExecutionProgressCard events={events}>
-          <ActivityFeed
-            items={activityItems}
-            permissionRequestRole="status"
-          />
+          {hasProgressDetails ? (
+            <ActivityFeed
+              items={activityItems}
+              permissionRequestRole="status"
+            />
+          ) : undefined}
         </ExecutionProgressCard>
       )}
-      {assistantText && <AssistantMessage text={assistantText} />}
+      {projectedAssistantTexts.map((answer, index) => (
+        <AssistantMessage
+          key={`projected-answer:${index}`}
+          kind={answer.kind}
+          text={answer.text}
+        />
+      ))}
       {completion && hasDelivery && (
         <article className="timeline-delivery">
           <header><CircleCheck aria-hidden="true" /><strong>{t("timeline.delivery")}</strong></header>
-          {completionSummary && <p>{completionSummary}</p>}
+          {secondaryCompletionSummary && <p>{secondaryCompletionSummary}</p>}
           <DetailList label={t("inspector.artifacts")} values={completion.payload.artifacts} />
           <DetailList label={t("timeline.validation")} values={completion.payload.validation} />
           <DetailList label={t("timeline.limitations")} values={completion.payload.limitations} />

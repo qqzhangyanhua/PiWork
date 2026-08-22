@@ -1,5 +1,5 @@
-/* Screenshot-faithful PiWork homepage. Imported last so this file owns the
-   dashboard shell without disturbing conversation, settings, or inspector views. */
+/* CoDo product shell. Imported last so it can refine the workspace without
+   disturbing conversation, settings, or inspector layouts. */
 
 .work-surface {
   grid-template-columns: clamp(188px, 16vw, 245px) minmax(0, 1fr);
@@ -272,6 +272,10 @@
 .project-conversation[aria-current="page"] {
   background: #eaf2fd;
   color: #2f6fda;
+}
+
+.project-conversation .project-conversation__waiting {
+  color: var(--pw-waiting-500);
 }
 
 .account-menu {
@@ -1130,12 +1134,32 @@
   box-shadow: 0 6px 20px rgb(54 99 154 / 6%);
 }
 
+.workspace-main--dashboard .timeline-event--assistant[data-kind="delivery-summary"] {
+  border-color: color-mix(in srgb, var(--pw-success-500) 28%, var(--pw-dashboard-border));
+  background: color-mix(in srgb, var(--pw-success-50) 66%, var(--pw-dashboard-panel-solid));
+  box-shadow: 0 7px 22px color-mix(in srgb, var(--pw-success-500) 8%, transparent);
+}
+
 .workspace-main--dashboard .execution-progress {
   margin-block: 10px 18px;
   border-color: var(--pw-dashboard-border);
   border-radius: 11px;
-  background: var(--pw-dashboard-progress);
-  box-shadow: 0 5px 16px rgb(54 99 154 / 5%);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--pw-brand-50) 44%, transparent), transparent 48%),
+    var(--pw-dashboard-progress);
+  box-shadow: 0 9px 28px rgb(54 99 154 / 8%);
+}
+
+.workspace-main--dashboard .execution-progress[data-status="waiting"] {
+  border-color: color-mix(in srgb, var(--pw-waiting-500) 30%, var(--pw-dashboard-border));
+}
+
+.workspace-main--dashboard .execution-progress[data-status="completed"] {
+  border-color: color-mix(in srgb, var(--pw-success-500) 28%, var(--pw-dashboard-border));
+}
+
+.workspace-main--dashboard .execution-progress[data-status="failed"] {
+  border-color: color-mix(in srgb, var(--pw-failure-500) 36%, var(--pw-dashboard-border));
 }
 
 .workspace-main--dashboard .execution-progress__summary:hover {
@@ -1183,7 +1207,8 @@
 }
 
 .workspace-main--dashboard .composer-submit {
-  border-radius: 9px;
+  border: 0;
+  border-radius: 50%;
   background: linear-gradient(135deg, #2f76f3, #4f87ff);
   color: #fff;
   box-shadow: 0 6px 15px rgb(47 118 243 / 22%);
@@ -1258,7 +1283,7 @@
   .work-home__activity-rail { display: none; }
 }
 
-@media (max-width: 860px) {
+@media (max-width: 960px) {
   .work-surface { grid-template-columns: 72px minmax(0, 1fr); }
   .work-sidebar { padding-inline: 10px; }
   .work-sidebar__brand { justify-content: center; padding: 0; }
@@ -1317,5 +1342,290 @@
   .orb-logo::before,
   .orb-logo__image {
     animation: none;
+  }
+}
+
+/* CoDo brand and focused home overrides */
+
+.work-surface {
+  grid-template-columns: clamp(204px, 16vw, 252px) minmax(0, 1fr);
+  background: var(--pw-dashboard-canvas);
+}
+
+.work-sidebar {
+  border-right: 1px solid var(--pw-dashboard-border);
+  background: color-mix(in srgb, var(--pw-dashboard-panel-solid) 78%, var(--pw-dashboard-canvas));
+}
+
+.work-sidebar__brand {
+  min-height: 36px;
+  padding: 0 5px;
+  letter-spacing: 0;
+}
+
+.work-sidebar__brand-mark {
+  width: auto;
+  height: auto;
+  flex: 0 0 auto;
+  border-radius: 0;
+  color: var(--pw-brand-text-on);
+}
+
+.work-sidebar__new-conversation {
+  min-height: 38px;
+  border-radius: 8px;
+  background: var(--pw-brand-500);
+  color: #ffffff;
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.work-sidebar__new-conversation:hover,
+.work-sidebar__new-conversation[aria-current="page"] {
+  background: var(--pw-brand-600);
+  color: #ffffff;
+}
+
+.work-sidebar__new-conversation > span,
+.work-sidebar__new-conversation > svg {
+  color: #ffffff;
+}
+
+.work-sidebar__shortcut {
+  display: none;
+}
+
+.work-sidebar__nav-item[aria-current="page"],
+.project-conversation[aria-current="page"] {
+  background: var(--pw-brand-50);
+  color: var(--pw-brand-700);
+}
+
+.work-sidebar__nav-item:hover:not(:disabled),
+.project-conversation:hover,
+.project-group__new:hover {
+  background: var(--pw-brand-50);
+  color: var(--pw-brand-700);
+}
+
+.account-avatar {
+  background: var(--pw-surface-subtle);
+  color: var(--pw-text-secondary);
+}
+
+.work-home {
+  display: grid;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  place-items: center;
+  padding: clamp(28px, 7vh, 72px) clamp(24px, 6vw, 80px);
+  overflow: auto;
+  background: var(--pw-dashboard-canvas);
+}
+
+.work-home > .new-work-start--dashboard {
+  display: grid;
+  width: min(760px, 100%);
+  height: auto;
+  min-height: 0;
+  grid-template-rows: auto auto;
+  gap: 28px;
+  margin: auto;
+  padding: 0;
+}
+
+.new-work-start__home-intro {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.new-work-start__home-intro h1 {
+  margin: 2px 0 0;
+  color: var(--pw-text-primary);
+  font-family: var(--pw-font-display);
+  font-size: clamp(25px, 3vw, 32px);
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.25;
+}
+
+.new-work-start__home-intro p {
+  margin: 0;
+  color: var(--pw-text-tertiary);
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.new-work-start--dashboard .new-work-start__composer {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 184px;
+  grid-template-rows: auto minmax(82px, 1fr) auto;
+  gap: 8px;
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--pw-dashboard-border);
+  border-radius: 14px;
+  background: var(--pw-dashboard-panel-solid);
+  box-shadow: 0 18px 52px rgb(30 34 38 / 8%), 0 2px 8px rgb(30 34 38 / 4%);
+}
+
+.new-work-start--dashboard .new-work-start__composer:focus-within {
+  border-color: color-mix(in srgb, var(--pw-brand-500) 58%, var(--pw-dashboard-border));
+  box-shadow: 0 18px 52px rgb(30 34 38 / 8%), 0 0 0 3px color-mix(in srgb, var(--pw-brand-100) 62%, transparent);
+}
+
+.new-work-start--dashboard .new-work-start__contextbar {
+  min-height: 30px;
+  gap: 10px;
+}
+
+.new-work-start--dashboard .project-chip {
+  height: 28px;
+  min-height: 28px;
+  border-color: var(--pw-dashboard-border);
+  border-radius: 8px;
+  background: var(--pw-dashboard-panel-solid);
+  color: var(--pw-text-secondary);
+  font-size: 12px;
+}
+
+.new-work-start--dashboard .new-work-start__local-context {
+  color: var(--pw-text-tertiary);
+  font-size: 12px;
+}
+
+.new-work-start--dashboard .project-prompt-editor__surface {
+  min-height: 82px;
+  max-height: 180px;
+  padding: 8px 2px;
+  color: var(--pw-text-primary);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.new-work-start--dashboard .project-prompt-editor__surface[data-placeholder]:empty::before {
+  color: var(--pw-text-tertiary);
+}
+
+.new-work-start--dashboard .new-work-start__actions {
+  min-height: 36px;
+}
+
+.new-work-start--dashboard .new-work-start__tool-group,
+.new-work-start--dashboard .new-work-start__submit-group {
+  gap: 8px;
+}
+
+.new-work-start--dashboard .attachment-button__trigger,
+.new-work-start--dashboard .new-work-start__send {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  border-radius: 9px;
+}
+
+.new-work-start--dashboard .attachment-button__trigger {
+  border-color: transparent;
+  background: transparent;
+  color: var(--pw-text-secondary);
+}
+
+.new-work-start--dashboard .attachment-button__trigger:hover:not(:disabled) {
+  background: var(--pw-surface-hover);
+  color: var(--pw-text-primary);
+}
+
+.new-work-start--dashboard .composer-model-indicator {
+  min-height: 34px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--pw-text-secondary);
+  font-size: 12px;
+}
+
+.new-work-start--dashboard .new-work-start__send {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: var(--pw-brand-500);
+  color: var(--pw-brand-text-on);
+  box-shadow: none;
+}
+
+.new-work-start--dashboard .new-work-start__send:hover:not(:disabled) {
+  background: var(--pw-brand-600);
+  transform: translateY(-1px);
+}
+
+.new-work-start--dashboard .new-work-start__send:active:not(:disabled) {
+  transform: translateY(0) scale(0.98);
+}
+
+.new-work-start--dashboard .new-work-start__send:disabled {
+  background: var(--pw-surface-subtle);
+  color: var(--pw-text-disabled);
+  box-shadow: none;
+  opacity: 1;
+}
+
+@media (max-width: 960px) {
+  .work-surface {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .work-sidebar__brand-mark .codo-logo__wordmark {
+    display: none;
+  }
+
+  .work-home {
+    padding-inline: clamp(18px, 5vw, 44px);
+  }
+}
+
+@media (max-width: 600px), (max-height: 680px) {
+  .work-home {
+    align-items: center;
+    padding: 24px 16px;
+  }
+
+  .work-home > .new-work-start--dashboard {
+    gap: 20px;
+  }
+
+  .new-work-start__home-intro {
+    gap: 8px;
+  }
+
+  .new-work-start__home-intro h1 {
+    font-size: 24px;
+  }
+
+  .new-work-start--dashboard .new-work-start__composer {
+    min-height: 172px;
+    padding: 12px;
+  }
+
+  .new-work-start--dashboard .new-work-start__local-context {
+    display: none;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .work-sidebar {
+    background: color-mix(in srgb, var(--pw-dashboard-panel-solid) 82%, var(--pw-dashboard-canvas));
+  }
+
+  .new-work-start--dashboard .new-work-start__composer {
+    border-color: var(--pw-dashboard-border);
+    background: var(--pw-dashboard-panel-solid);
+    box-shadow: 0 18px 52px rgb(0 0 0 / 24%);
   }
 }

@@ -1,16 +1,16 @@
 {
-  "app": { "name": "PiWork" },
+  "app": { "name": "CoDo", "slogan": "Ask less. Get more done." },
   "account": { "menu": "Account", "localUser": "Local user", "deviceOnly": "This device only" },
   "settings": {
     "title": "Settings",
-    "description": "Configure how PiWork runs on this device.",
+    "description": "Configure how CoDo runs on this device.",
     "model": "Models",
-    "modelDescription": "Manage model connections on this device and choose the model PiWork currently uses.",
+    "modelDescription": "Manage model connections on this device and choose the model CoDo currently uses.",
     "saved": "Model saved",
     "shortcut": "Ctrl+,",
     "activeModel": "Currently using {{model}}",
     "savedModels": "Configured models",
-    "savedModelsDescription": "Configuration metadata stays in PiWork app data; credentials remain in Windows secure storage.",
+    "savedModelsDescription": "Configuration metadata stays in CoDo app data; credentials remain in Windows secure storage.",
     "addModel": "Add model",
     "addModelDescription": "Connect a provider, verify its credential, then choose an available model.",
     "cancelAdd": "Cancel adding",
@@ -30,7 +30,7 @@
     "switchingModel": "Switching…",
     "switchModelError": "Unable to switch models. Test the connection and try again.",
     "modelRuntimeTitle": "Model and local runtime settings",
-    "modelRuntimeDescription": "Configure model providers and local runtime preferences. PiWork prioritizes local and private connections.",
+    "modelRuntimeDescription": "Configure model providers and local runtime preferences. CoDo prioritizes local and private connections.",
     "providerCardTitle": "Model provider",
     "providerCardDescription": "Choose and configure the model service used for task reasoning and generation.",
     "providerHelp": "How to choose a provider",
@@ -43,7 +43,7 @@
     "storedCredential": "••••••••••••••••••••••••",
     "resetApiKey": "Reset API key",
     "localPriorityTitle": "Local first, safely controlled",
-    "localPriorityBody": "PiWork keeps task data, context, and files local, connecting to the selected provider only when you send a request.",
+    "localPriorityBody": "CoDo keeps task data, context, and files local, connecting to the selected provider only when you send a request.",
     "localPriorityEnabled": "Local-first enabled",
     "connectionTestTitle": "Connection test",
     "connectionTestDescription": "Verify the connection and permissions for the selected provider.",
@@ -69,15 +69,16 @@
     "privacySecurity": "Privacy and security",
     "exportBackup": "Export and backup",
     "aboutGroup": "About",
-    "aboutPiWork": "About PiWork",
+    "aboutPiWork": "About CoDo",
     "checkUpdates": "Check for updates",
     "advancedOptions": "Advanced options",
     "advancedOptionsDescription": "Base URL and custom connection settings",
-    "webAccessNav": "Web access"
+    "webAccessNav": "Web access",
+    "memoryNav": "Workspace memory"
   },
   "runtime": {
-    "desktopRequiredTitle": "Open the PiWork desktop app",
-    "desktopRequiredBody": "localhost only serves the frontend and cannot access model configuration or local conversations. Run pnpm tauri dev and use the PiWork window that opens automatically."
+    "desktopRequiredTitle": "Open the CoDo desktop app",
+    "desktopRequiredBody": "localhost only serves the frontend and cannot access model configuration or local conversations. Run pnpm tauri dev and use the CoDo window that opens automatically."
   },
   "model": {
     "loading": "Loading model configuration",
@@ -107,7 +108,7 @@
   },
   "common": { "cancel": "Cancel", "close": "Close", "create": "Create", "creating": "Creating", "retry": "Retry", "save": "Save", "enabled": "Enabled", "disabled": "Disabled", "enable": "Enable", "disable": "Disable" },
   "work": { "new": "New conversation", "empty": "Create your first conversation" },
-  "conversation": { "new": "New conversation", "newInProject": "New conversation in {{project}}" },
+  "conversation": { "new": "New conversation", "newInProject": "New conversation in {{project}}", "archive": "Archive conversation", "restore": "Restore conversation “{{title}}”", "restoreAction": "Restore conversation" },
   "project": { "section": "Projects", "groupLabel": "Project {{name}}" },
   "sidebar": {
     "label": "Projects and conversations", "primary": "Primary navigation", "home": "Conversation home", "works": "All conversations", "recent": "Recent", "recentWorks": "Recent conversations", "projects": "Projects",
@@ -171,22 +172,80 @@
     }
   },
   "extensions": {
-    "title": "Plugin Marketplace", "subtitle": "Manage built-in and verified plugins, and discover Pi community packages", "viewsLabel": "Marketplace views",
+    "title": "Plugin Marketplace", "subtitle": "Manage built-in and verified plugins, and discover CoDo-compatible packages", "viewsLabel": "Marketplace views",
     "views": { "catalog": "Catalog", "installed": "Installed", "community": "Community search" },
-    "tiers": { "builtin": "Built into PiWork", "verified": "PiWork verified", "community": "Community" },
+    "tiers": { "builtin": "Built into CoDo", "verified": "CoDo verified", "community": "Community" },
     "status": { "available": "Available", "installed": "Installed", "disabled": "Disabled", "revoked": "Revoked", "pending_removal": "Pending removal" },
     "loading": "Loading plugins…", "loadError": "Unable to load the plugin catalog", "empty": "No plugins in this view.",
     "tools": "Tools", "permissions": "Runtime permissions", "permissionNetwork": "Network", "permissionFiles": "Runtime cache", "permissionProcess": "Subprocess",
-    "trustedExecutionNotice": "Plugins are enabled per member. Changes apply to the next Run.", "agentAccess": "Member access", "grantError": "Unable to update member access.",
+    "trustedExecutionNotice": "Enabled plugins are automatically available to every Agent from its next Run.", "agentAccess": "Agent availability", "allAgents": "Automatically available to all current and future Agents", "grantError": "Unable to update member access.",
     "noDescription": "No description was provided.", "unknownPublisher": "Unknown publisher",
     "community": {
-      "title": "Search Pi community plugins", "description": "Results come from npm packages tagged pi-package.", "readOnly": "Discovery only in phase one",
+      "title": "Search CoDo-compatible plugins", "description": "Results come from compatible npm packages tagged pi-package.", "readOnly": "Discovery only in phase one",
       "search": "Search", "searching": "Searching…", "placeholder": "Plugin name or keyword", "error": "Unable to reach the npm plugin catalog.",
       "empty": "Enter a keyword to search community plugins.", "reviewRequired": "Awaiting security review"
     }
   },
+  "memory": {
+    "title": "Workspace memory",
+    "description": "Connect TencentDB Agent Memory so Agents retain context across sessions in the same workspace.",
+    "loading": "Loading memory settings…",
+    "loadError": "Unable to load memory settings.",
+    "connectionTitle": "TencentDB Agent Memory",
+    "connectionDescription": "One CoDo configuration connects to one Team; each workspace gets an isolated Task within it. Passwords and keys remain in Windows Credential Manager.",
+    "hubEndpoint": "Memory Hub URL",
+    "endpoint": "Memory API URL",
+    "authMode": "Public authentication",
+    "authModes": { "basic": "Reverse proxy Basic Auth", "gatewayBearer": "Gateway Bearer" },
+    "basicUsername": "Basic username",
+    "basicPassword": "Reverse proxy password",
+    "gatewayApiKey": "Gateway service key",
+    "serviceId": "Service ID",
+    "userId": "User ID",
+    "userKey": "User key (optional)",
+    "credentialStored": "Stored securely; enter a new value to replace it",
+    "authSecretRequired": "Enter the authentication password or key",
+    "credentialOptional": "Required only by some management deployments",
+    "showKey": "Show key",
+    "hideKey": "Hide key",
+    "clearAuthSecret": "Remove stored authentication credential",
+    "clearUserKey": "Remove stored user key",
+    "insecureHttpTitle": "This connection uses plaintext HTTP over the public network",
+    "insecureHttpDescription": "Passwords, keys, and memory content are not protected by TLS. Configure HTTPS before long-term use.",
+    "allowInsecureHttp": "Allow this HTTP address",
+    "recall": "Recall",
+    "capture": "Capture",
+    "recallTimeout": "Recall timeout (ms)",
+    "requestTimeout": "Capture timeout (ms)",
+    "recallItems": "Maximum recalled items",
+    "recallChars": "Maximum recalled characters",
+    "workspacesTitle": "Workspace bindings",
+    "workspacesDescription": "All workspaces share the Team above, and each project root maps automatically to an isolated Task.",
+    "teamId": "Team ID",
+    "taskId": "Automatic Task ID",
+    "taskIdPending": "Generated when saved",
+    "pending": "{{count}} pending",
+    "noWorkspaces": "Create a Work before binding a workspace.",
+    "saved": "Memory settings saved",
+    "saving": "Saving…",
+    "saveError": "Unable to save memory settings.",
+    "test": "Test connection",
+    "testing": "Testing…",
+    "testSuccess": "Connection and isolation verified · {{latency}} ms",
+    "testError": "Connection verification failed. Check the endpoint and authentication settings.",
+    "testErrors": {
+      "timeout": "The connection timed out. Check that the service is running or increase the request timeout.",
+      "network": "Memory API is unreachable. Check the address, port, and network.",
+      "proxyAuthentication": "The reverse proxy rejected Basic Auth. Check the username and reverse proxy password.",
+      "gatewayBearerRequired": "The reverse proxy is reachable, but the Memory Core data API requires Gateway Bearer. Configure the proxy to inject Gateway Bearer, or use a directly reachable Gateway URL and service key.",
+      "authentication": "Memory Core rejected authentication. Check the authentication mode, Gateway service key, and Service ID.",
+      "rejected": "Memory Core is reachable but rejected the isolation fields. Check the Team ID, User ID, and server version.",
+      "invalidResponse": "Memory API returned an unrecognized response. Check that the URL points to Memory Core v3.",
+      "invalidUserId": "User ID contains a User Key record ID. User ID should start with usr-*; provide the User Key to resolve it automatically."
+    }
+  },
   "webAccess": {
-    "title": "Web access", "description": "Configure search providers, routing, and URL retrieval for Pi Web Access.",
+    "title": "Web access", "description": "Configure search providers, routing, and URL retrieval for CoDo.",
     "loading": "Loading web settings…", "loadError": "Unable to load web settings.", "saved": "Web settings saved", "saving": "Saving…", "saveError": "Unable to save web settings.",
     "routingTitle": "Search routing", "routingDescription": "Fallback is used only for timeouts, quotas, network failures, or invalid responses.",
     "defaultProvider": "Default provider", "fallbackProvider": "Fallback provider", "noProvider": "Enable a provider first", "noFallback": "No fallback",
@@ -200,16 +259,17 @@
     }
   },
   "connectors": {
-    "title": "Connectors", "subtitle": "Connect external services securely and scope access per Work", "accounts": "Email accounts", "add": "Add email connector",
+    "title": "Connectors", "subtitle": "Connect external services securely to CoDo and make them available to every Agent", "accounts": "Email accounts", "add": "Add email connector",
     "loading": "Loading connectors…", "loadError": "Unable to load connectors", "empty": "No email connectors yet.", "newAccount": "New connection", "accountSettings": "Email connector", "addTitle": "Connect enterprise email",
     "identity": "Account and credential", "identityDescription": "Passwords stay in Windows Credential Manager and are never written to projects or plugins.", "displayName": "Display name", "displayNamePlaceholder": "For example: Company email",
     "emailAddress": "Email address", "username": "Login username", "password": "App password", "passwordStored": "Credential is stored; leave blank to keep it", "passwordPlaceholder": "Enter password or app password",
     "servers": "Mail servers", "serversDescription": "Phase one supports TLS-encrypted IMAP and SMTP only.", "preset": "Service preset", "presets": { "aliyun": "Alibaba enterprise email", "custom": "Custom IMAP / SMTP" },
     "pollInterval": "Poll interval", "minutes": "{{count}} min", "port": "Port", "tlsOnly": "TLS encrypted connections only",
     "test": "Test connection", "testSuccess": "IMAP and SMTP connection tests passed", "testError": "Connection test failed. Check the servers, account, and app password.",
+    "testErrors": { "imapAuthentication": "IMAP sign-in failed. Check the email account and app password, and ask an administrator to confirm that IMAP is enabled.", "imapConfiguration": "The IMAP server configuration is invalid. Check the host and port.", "imapConnection": "Unable to connect to the IMAP server. Check the network, host, and port.", "imapNetwork": "Unable to connect to the IMAP server. Check the network, host, and port.", "imapProtocol": "The IMAP server returned an unrecognized response.", "imapTimeout": "The IMAP connection timed out. Check the network, host, and port.", "imapTls": "The IMAP TLS handshake failed. Check the host, port, and system certificates.", "smtpAuthentication": "IMAP sign-in passed, but SMTP sign-in failed. Check the app password and ask an administrator to confirm that SMTP is enabled.", "smtpConfiguration": "The SMTP server configuration is invalid. Check the host and port.", "smtpConnection": "IMAP sign-in passed, but CoDo could not connect or sign in to the SMTP server. Check SMTP access and the app password.", "smtpTimeout": "IMAP sign-in passed, but the SMTP connection timed out.", "smtpTls": "IMAP sign-in passed, but the SMTP TLS handshake failed. Check the host, port, and system certificates." },
     "saved": "Connector settings saved", "saveError": "Unable to save connector settings.", "enabledMessage": "Connector enabled with the current inbox UID as its baseline.", "disabledMessage": "Connector disabled.", "enableError": "Unable to enable the connector; pass the connection test first.",
-    "delete": "Delete connector", "deleteConfirm": "Delete “{{name}}” with its local mail metadata and grants?", "workAccess": "Work access", "workAccessDescription": "Connectors are hidden from Works by default. Sensitive actions still require per-action approval.",
-    "noWorks": "Create a Work before granting access.", "permissions": "Email permissions", "permission": { "metadata": "Search metadata", "read_body": "Read body · approval", "send": "Send email · approval" }, "grantError": "Unable to update the Work grant.",
+    "delete": "Delete connector", "deleteConfirm": "Delete “{{name}}” with its local mail metadata?", "workAccess": "Agent availability", "workAccessDescription": "Once enabled, every current and future Work and Agent can search, read, and send email directly. Delete actions still require confirmation.", "allAgentsAccess": "Automatically available to all Works and Agents",
+    "noWorks": "Create a Work before granting access.", "permissions": "Email permissions", "permission": { "metadata": "Search metadata", "read_body": "Read body", "send": "Send email" }, "grantError": "Unable to update the Work grant.",
     "recentMail": "Recent mail", "metadataOnly": "Only sender, subject, time, and similar metadata are stored here. Bodies are not stored.",
     "health": { "healthy": "Connected", "degraded": "Degraded", "error": "Connection error", "untested": "Not tested", "disabled": "Disabled" }
   },
@@ -224,18 +284,18 @@
     "allWorks": "All conversations",
     "allWorksBody": "{{count}} conversations organized by status and recent activity",
     "workCount": "{{count}} conversations",
-    "views": { "label": "Conversation views", "all": "All", "active": "Active", "completed": "Completed" },
+    "views": { "label": "Conversation views", "all": "All", "active": "Active", "completed": "Completed", "archived": "Archived" },
     "recentWorks": "Recent conversations",
     "recentWorksBody": "Continue a recent goal or start a new conversation above.",
     "viewAll": "View all",
     "noWorks": "Your first conversation will appear here after you create it.",
-    "groups": { "active": "In progress", "open": "Ready to continue", "attention": "Needs attention", "completed": "Completed" }
+    "groups": { "active": "In progress", "open": "Ready to continue", "attention": "Needs attention", "completed": "Completed", "archived": "Archived" }
   },
   "newWork": {
-    "heading": "What will you accomplish in PiWork?",
+    "heading": "What can CoDo take on?",
     "body": "Describe the task directly. Use the current project or switch folders at any time.",
     "promptLabel": "First task",
-    "promptPlaceholder": "Ask Pi to complete a task…",
+    "promptPlaceholder": "Tell CoDo what needs doing…",
     "selectProject": "Select project",
     "changeProject": "Current project: {{project}}. Click to switch",
     "clearProject": "Use no project",
@@ -258,15 +318,15 @@
     "browse": "Choose another folder…",
     "agentMode": "Agent · Auto",
     "start": "Send",
-    "hint": "PiWork creates the conversation when you send the first message; without a project, it uses the default space"
+    "hint": "CoDo creates the conversation when you send the first message; without a project, it uses the default space"
   },
   "dashboard": {
     "comingSoon": "{{feature}} (coming soon)",
     "header": { "importProject": "Import project", "exploreAgents": "Explore agents", "notifications": "Notifications" },
     "greeting": {
-      "hello": "Hi, <pi>Pi</pi>",
-      "title": "What should <pi>Pi</pi> help you get done today?",
-      "body": "Your AI development and collaboration partner — it understands code, reasons, and executes."
+      "hello": "Hi, I'm <pi>CoDo</pi>",
+      "title": "Hand it to CoDo.",
+      "body": "Share the goal. CoDo takes on whatever it can."
     },
     "recentProjects": {
       "title": "Recent projects",
@@ -296,7 +356,7 @@
       "gitLabel": "Git"
     },
     "composer": {
-      "placeholder": "Describe what you need, Pi will break it down and get to work…",
+      "placeholder": "Tell CoDo what needs doing…",
       "localRuntimeChip": "Local runtime",
       "agentButton": "Agent",
       "knowledgeButton": "Knowledge base",
@@ -320,7 +380,7 @@
       "tasksCompleted": "Tasks completed",
       "timeSaved": "Time saved",
       "codeChanges": "Code changes",
-      "body": "You collaborated with Pi 12 times today, making progress mainly on code review and feature development."
+      "body": "You worked with CoDo 12 times today and moved several things forward."
     }
   },
   "create": {
@@ -333,14 +393,14 @@
   "state": {
     "loading": "Loading conversations",
     "errorTitle": "Unable to load conversations",
-    "emptyBody": "Start with a lasting goal. PiWork keeps the complete collaboration context."
+    "emptyBody": "Start with a lasting goal. CoDo keeps the complete collaboration context."
   },
   "diagnostics": { "open": "Open diagnostics", "unavailable": "Diagnostic details cannot be displayed safely" },
   "errors": {
     "generic": "The operation failed. Try again.",
     "database": "The local database is temporarily unavailable. Try again.",
     "workspacePath": "The selected working directory does not exist or cannot be accessed.",
-    "pathResolution": "PiWork cannot access its local data directory.",
+    "pathResolution": "CoDo cannot access its local data directory.",
     "referencedFile": "The referenced file {{path}} is unavailable, unreadable, or over the limit. Select it again.",
     "resourceImport": "Some attachments could not be imported. Remove them and try again.",
     "resourceStorage": "Local attachment storage is temporarily unavailable. Try again.",
@@ -352,7 +412,7 @@
       "prompt": "Enter a valid instruction."
     },
     "invalidWorkState": "This operation is not available in the current conversation state.",
-    "workAlreadyRunning": "Pi is still working on the previous instruction.",
+    "workAlreadyRunning": "CoDo is still working on the previous instruction.",
     "notFound": "The requested conversation or execution record was not found.",
     "concurrentModification": "The conversation changed during another operation. Try again.",
     "engine": "The execution engine is temporarily unavailable.",
@@ -419,28 +479,46 @@
     "runHeading": "Collaboration step {{number}}",
     "instructionSummary": "{{instruction}}",
     "delivery": "Delivery",
+    "deliverySummary": "Delivery summary",
     "newOutput": "View new output",
-    "activityRunning": "Pi is working",
-    "activityCompleted": "Pi completed {{count}} actions",
-    "activityFailed": "Pi hit a problem · {{count}} actions",
+    "activityRunning": "CoDo is working",
+    "activityCompleted": "CoDo completed {{count}} actions",
+    "activityFailed": "CoDo hit a problem · {{count}} actions",
     "activityToggle": "Show details",
     "validation": "Validation",
     "limitations": "Limitations"
   },
   "progress": {
     "label": "Execution progress",
-    "preparing": "Pi is preparing",
-    "running": "Pi is working",
-    "waiting": "Pi is waiting to continue",
-    "waitingOnAssignments": "Pi is waiting for member results",
-    "completedWithoutTools": "Pi finished",
-    "completed_one": "Pi completed {{count}} action",
-    "completed_other": "Pi completed {{count}} actions",
+    "preparing": "CoDo is preparing",
+    "running": "CoDo is working",
+    "waiting": "CoDo is waiting to continue",
+    "waitingOnAssignments": "CoDo is waiting for member results",
+    "completedWithoutTools": "CoDo finished",
+    "completed_one": "CoDo completed {{count}} action",
+    "completed_other": "CoDo completed {{count}} actions",
     "failed": "The task did not finish",
     "recovered_one": "{{count}} action encountered a problem",
     "recovered_other": "{{count}} actions encountered problems",
     "expand": "Expand execution details",
     "collapse": "Collapse execution details",
+    "phases": "Execution flow",
+    "operationCount_one": "{{count}} action",
+    "operationCount_other": "{{count}} actions",
+    "current": {
+      "preparing": "Understanding your request and preparing to start",
+      "thinking": "Analyzing the request and its context",
+      "planning": "Updating the execution approach",
+      "action": "Current: {{action}} {{object}}",
+      "continuing": "That action finished, continuing with the task",
+      "composing": "Organizing and streaming the result",
+      "permission": "Waiting for your permission to continue",
+      "coordinating": "Coordinating members and collecting results",
+      "waiting": "Waiting on an external condition while preserving progress",
+      "waitingOnAssignments": "Members are still working; execution will resume automatically",
+      "completed": "The result is ready and the execution record remains available",
+      "failed": "Execution stopped and the detailed record remains available"
+    },
     "phase": {
       "prepare": "Prepare",
       "analyze": "Analyze project",
@@ -457,7 +535,7 @@
     }
   },
   "composer": {
-    "label": "Instructions for PiWork",
+    "label": "Instructions for CoDo",
     "placeholder": "Describe the next step, or add another requirement…",
     "send": "Send",
     "continue": "Send",
@@ -465,7 +543,7 @@
     "queueNext": "Queue next",
     "interrupt": "Interrupt & replace",
     "interruptConfirm": "Cancel the current task and start this instruction instead?",
-    "runActive": "Pi is working on the previous instruction. You can queue the next one or stop"
+    "runActive": "CoDo is working on the previous instruction. You can still send the next one"
   },
   "mentions": {
     "files": "Project files",

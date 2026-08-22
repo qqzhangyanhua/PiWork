@@ -42,6 +42,8 @@ export type WorkState = {
     resourceIds?: string[],
   ): Promise<StartWorkOutput>;
   stopWork(workId: string): Promise<WorkDetail>;
+  archiveWork(workId: string): Promise<WorkDetail>;
+  restoreWork(workId: string): Promise<WorkDetail>;
   interruptWork(
     workId: string,
     prompt: string,
@@ -91,11 +93,31 @@ const statusForEvent = (
   if (event.payload.type === "runStarted") {
     return "running";
   }
-  if (event.payload.type === "runCompleted") {
+  if (event.payload.type === "waiting") {
+    return "waiting";
+  }
+  if (
+    event.payload.type === "runCompleted" ||
+    event.payload.type === "workDeliveryCompleted"
+  ) {
     return "completed";
   }
   if (event.payload.type === "runFailed") {
     return "failed";
+  }
+  if (
+    currentStatus === "waiting" &&
+    (
+      event.payload.type === "assistantDelta" ||
+      event.payload.type === "thoughtDelta" ||
+      event.payload.type === "planChanged" ||
+      event.payload.type === "toolPending" ||
+      event.payload.type === "toolStarted" ||
+      event.payload.type === "toolProgress" ||
+      event.payload.type === "toolFinished"
+    )
+  ) {
+    return "running";
   }
   return currentStatus;
 };
@@ -193,20 +215,20 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
     }
 
     if (mutation.type === "startResponse") {
-      const { run, userMessage } = mutation.output;
-      if (!run || !userMessage.runId) {
+      const { assignment, run, userMessage } = mutation.output;
+      const timelineRunId = userMessage.runId ?? `assignment:${userMessage.assignmentId ?? assignment.id}`;
+      if (!timelineRunId) {
         return state;
       }
       const timelineMessage: MessageSummary = {
         id: userMessage.id,
         workId: userMessage.workId,
-        runId: userMessage.runId,
+        runId: timelineRunId,
         role: userMessage.role,
         content: userMessage.content,
         resourceIds: userMessage.resourceIds,
         createdAt: userMessage.createdAt,
       };
-      registerRun(run.workId, run.id, run.createdAt);
       registerRun(
         timelineMessage.workId,
         timelineMessage.runId,
@@ -214,11 +236,15 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       );
       const timelines = {
         ...state.timelines,
-        [run.workId]: mergeTimeline(
-          state.timelines[run.workId] ?? [],
+        [timelineMessage.workId]: mergeTimeline(
+          state.timelines[timelineMessage.workId] ?? [],
           [timelineMessage],
         ),
       };
+      if (!run) {
+        return { timelines };
+      }
+      registerRun(run.workId, run.id, run.createdAt);
       const previousLatestRun = state.latestRuns[run.workId];
       const latestRun =
         !previousLatestRun ||
@@ -647,6 +673,34 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         const operation = beginOperation();
         try {
           const detail = await client.stopWork(workId);
+          set((state) => reduceWork(state, { type: "detail", detail }));
+          succeedOperation(operation);
+          return detail;
+        } catch (error) {
+          failOperation(operation, error);
+          throw error;
+        } finally {
+          endOperation();
+        }
+      },
+      archiveWork: async (workId) => {
+        const operation = beginOperation();
+        try {
+          const detail = await client.archiveWork(workId);
+          set((state) => reduceWork(state, { type: "detail", detail }));
+          succeedOperation(operation);
+          return detail;
+        } catch (error) {
+          failOperation(operation, error);
+          throw error;
+        } finally {
+          endOperation();
+        }
+      },
+      restoreWork: async (workId) => {
+        const operation = beginOperation();
+        try {
+          const detail = await client.restoreWork(workId);
           set((state) => reduceWork(state, { type: "detail", detail }));
           succeedOperation(operation);
           return detail;

@@ -41,6 +41,7 @@ export const projectGroups = (works: WorkSummary[]): ProjectGroup[] => {
 };
 
 export const workGroup = (status: WorkSummary["status"]) => {
+  if (status === "archived") return "archived";
   if (status === "running" || status === "queued" || status === "waiting") return "active";
   if (status === "failed" || status === "interrupted" || status === "stopped") return "attention";
   if (status === "completed") return "completed";

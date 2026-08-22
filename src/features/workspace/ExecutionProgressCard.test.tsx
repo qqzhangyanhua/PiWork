@@ -48,7 +48,7 @@ describe("ExecutionProgressCard", () => {
     );
   });
 
-  it("keeps live execution details collapsed and never invents workflow phases", async () => {
+  it("keeps live execution details open and exposes the event-derived workflow", async () => {
     render(
       <ExecutionProgressCard events={runningEvents()}>
         <div>工具活动详情</div>
@@ -59,15 +59,23 @@ describe("ExecutionProgressCard", () => {
       await screen.findByRole("status", { name: "执行进度" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "展开执行详情" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("工具活动详情")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "展开执行详情" }));
-
+      screen.getByRole("button", { name: "收起执行详情" }),
+    ).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("工具活动详情")).toBeVisible();
-    expect(screen.queryByTestId("execution-phase:analyze")).not.toBeInTheDocument();
-    expect(screen.queryByText("未经过")).not.toBeInTheDocument();
+    expect(screen.getByText("当前：读取 src/app.tsx")).toBeVisible();
+    expect(screen.getByTestId("execution-phase:prepare")).toHaveAttribute(
+      "data-status",
+      "completed",
+    );
+    expect(screen.getByTestId("execution-phase:analyze")).toHaveAttribute(
+      "data-status",
+      "active",
+    );
+    expect(screen.getAllByTestId(/execution-phase:/u)).toHaveLength(5);
+
+    fireEvent.click(screen.getByRole("button", { name: "收起执行详情" }));
+    expect(screen.queryByText("工具活动详情")).not.toBeInTheDocument();
+    expect(screen.getByTestId("execution-phase:analyze")).toBeVisible();
   });
 
   it("starts a hydrated successful execution collapsed and remains inspectable", () => {
@@ -96,7 +104,7 @@ describe("ExecutionProgressCard", () => {
 
     const toggle = screen.getByRole("button", { name: "展开执行详情" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("Pi 已完成 1 个操作")).toBeInTheDocument();
+    expect(screen.getByText("CoDo 已完成 1 个操作")).toBeInTheDocument();
     expect(screen.queryByText("读取 src/app.tsx")).not.toBeInTheDocument();
 
     fireEvent.click(toggle);
@@ -116,11 +124,12 @@ describe("ExecutionProgressCard", () => {
       ]} />,
     );
 
-    expect(screen.getByText("Pi 已完成")).toBeInTheDocument();
+    expect(screen.getByText("CoDo 已完成")).toBeInTheDocument();
     expect(screen.queryByText(/0 个操作/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "展开执行详情" })).not.toBeInTheDocument();
   });
 
-  it("keeps terminal failure activity collapsed without exposing raw engine text", async () => {
+  it("keeps terminal failure activity visible without exposing raw engine text", async () => {
     render(
       <ExecutionProgressCard
         events={[
@@ -138,9 +147,9 @@ describe("ExecutionProgressCard", () => {
     expect(screen.getByText("执行未完成")).toBeInTheDocument();
     expect(screen.queryByText("private engine failure")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "展开执行详情" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("最后一个安全活动")).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "收起执行详情" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("最后一个安全活动")).toBeVisible();
   });
 
   it("renders a delegated Lead turn as stable waiting instead of endless loading", () => {
@@ -155,7 +164,7 @@ describe("ExecutionProgressCard", () => {
       </ExecutionProgressCard>,
     );
 
-    expect(screen.getByText("Pi 正在等待成员结果")).toBeInTheDocument();
+    expect(screen.getByText("CoDo 正在等待成员结果")).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "执行进度" })).toHaveAttribute(
       "data-status",
       "waiting",
@@ -198,7 +207,7 @@ describe("ExecutionProgressCard", () => {
       </ExecutionProgressCard>,
     );
 
-    expect(screen.getByText("Pi 已完成 1 个操作")).toBeInTheDocument();
+    expect(screen.getByText("CoDo 已完成 1 个操作")).toBeInTheDocument();
     expect(screen.getByText("其中 1 个操作曾遇到问题")).toBeInTheDocument();
     expect(screen.queryByText("失败工具仍可查看")).not.toBeInTheDocument();
   });

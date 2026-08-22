@@ -64,6 +64,12 @@ const makeClient = (
   stopWork: async () => {
     throw new Error("unused");
   },
+  archiveWork: async () => {
+    throw new Error("unused");
+  },
+  restoreWork: async () => {
+    throw new Error("unused");
+  },
   drainAssignmentEventOutbox: async () => undefined,
   listWorkAssignments: async () => [],
   queueWorkInput: async () => {

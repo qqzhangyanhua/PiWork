@@ -1,16 +1,16 @@
 {
-  "app": { "name": "PiWork" },
+  "app": { "name": "CoDo", "slogan": "Ask less. Get more done." },
   "account": { "menu": "账户", "localUser": "本地用户", "deviceOnly": "仅此设备" },
   "settings": {
     "title": "设置",
-    "description": "配置 PiWork 在此设备上的运行方式。",
+    "description": "配置 CoDo 在此设备上的运行方式。",
     "model": "模型",
-    "modelDescription": "管理本机可用的模型连接，并选择 PiWork 当前使用的模型。",
+    "modelDescription": "管理本机可用的模型连接，并选择 CoDo 当前使用的模型。",
     "saved": "模型已保存",
     "shortcut": "Ctrl+,",
     "activeModel": "当前使用 {{model}}",
     "savedModels": "已配置模型",
-    "savedModelsDescription": "配置元数据保存在 PiWork 应用数据中，凭据由 Windows 安全存储保护。",
+    "savedModelsDescription": "配置元数据保存在 CoDo 应用数据中，凭据由 Windows 安全存储保护。",
     "addModel": "新增模型",
     "addModelDescription": "连接 Provider、验证凭据，然后选择一个可用模型。",
     "cancelAdd": "取消新增",
@@ -30,7 +30,7 @@
     "switchingModel": "正在切换…",
     "switchModelError": "无法切换模型，请重新测试连接后再试。",
     "modelRuntimeTitle": "模型与本地运行设置",
-    "modelRuntimeDescription": "配置模型 Provider 与本地运行偏好，PiWork 将优先使用本地与私有连接。",
+    "modelRuntimeDescription": "配置模型 Provider 与本地运行偏好，CoDo 将优先使用本地与私有连接。",
     "providerCardTitle": "模型提供商",
     "providerCardDescription": "选择并配置用于任务推理与生成的模型服务。",
     "providerHelp": "如何选择 Provider",
@@ -43,7 +43,7 @@
     "storedCredential": "••••••••••••••••••••••••",
     "resetApiKey": "重置 API Key",
     "localPriorityTitle": "本地优先，安全可控",
-    "localPriorityBody": "PiWork 保持任务数据、上下文与文件在本地处理，仅在你主动发起请求时连接所选 Provider。",
+    "localPriorityBody": "CoDo 保持任务数据、上下文与文件在本地处理，仅在你主动发起请求时连接所选 Provider。",
     "localPriorityEnabled": "本地优先已启用",
     "connectionTestTitle": "连接测试",
     "connectionTestDescription": "验证与所选 Provider 的连接与权限。",
@@ -69,15 +69,16 @@
     "privacySecurity": "隐私与安全",
     "exportBackup": "导出与备份",
     "aboutGroup": "关于",
-    "aboutPiWork": "关于 PiWork",
+    "aboutPiWork": "关于 CoDo",
     "checkUpdates": "检查更新",
     "advancedOptions": "高级选项",
     "advancedOptionsDescription": "Base URL 与自定义连接设置",
-    "webAccessNav": "联网搜索"
+    "webAccessNav": "联网搜索",
+    "memoryNav": "工作区记忆"
   },
   "runtime": {
-    "desktopRequiredTitle": "请在 PiWork 桌面应用中打开",
-    "desktopRequiredBody": "localhost 只提供前端页面，无法访问模型配置和本地对话。请运行 pnpm tauri dev，并使用自动打开的 PiWork 窗口。"
+    "desktopRequiredTitle": "请在 CoDo 桌面应用中打开",
+    "desktopRequiredBody": "localhost 只提供前端页面，无法访问模型配置和本地对话。请运行 pnpm tauri dev，并使用自动打开的 CoDo 窗口。"
   },
   "model": {
     "loading": "正在加载模型配置",
@@ -107,7 +108,7 @@
   },
   "common": { "cancel": "取消", "close": "关闭", "create": "创建", "creating": "正在创建", "retry": "重试", "save": "保存", "enabled": "已开启", "disabled": "已关闭", "enable": "开启", "disable": "关闭" },
   "work": { "new": "新对话", "empty": "创建第一个对话" },
-  "conversation": { "new": "新对话", "newInProject": "在 {{project}} 中新建对话" },
+  "conversation": { "new": "新对话", "newInProject": "在 {{project}} 中新建对话", "archive": "归档对话", "restore": "恢复对话“{{title}}”", "restoreAction": "恢复对话" },
   "project": { "section": "项目", "groupLabel": "项目 {{name}}" },
   "sidebar": {
     "label": "项目与对话", "primary": "主要导航", "home": "对话主页", "works": "全部对话", "recent": "最近", "recentWorks": "最近对话", "projects": "项目",
@@ -171,22 +172,80 @@
     }
   },
   "extensions": {
-    "title": "插件市场", "subtitle": "管理内置与已验证插件，并发现 Pi 社区资源", "viewsLabel": "插件市场视图",
+    "title": "插件市场", "subtitle": "管理内置与已验证插件，并发现 CoDo 兼容资源", "viewsLabel": "插件市场视图",
     "views": { "catalog": "插件目录", "installed": "已安装", "community": "社区搜索" },
-    "tiers": { "builtin": "PiWork 内置", "verified": "PiWork 已验证", "community": "社区" },
+    "tiers": { "builtin": "CoDo 内置", "verified": "CoDo 已验证", "community": "社区" },
     "status": { "available": "可安装", "installed": "已安装", "disabled": "已停用", "revoked": "已撤销", "pending_removal": "待移除" },
     "loading": "正在读取插件…", "loadError": "无法读取插件目录", "empty": "当前视图没有插件。",
     "tools": "工具", "permissions": "运行权限", "permissionNetwork": "网络访问", "permissionFiles": "运行时缓存", "permissionProcess": "子进程",
-    "trustedExecutionNotice": "插件按成员授权；新的授权会从下一次 Run 开始生效。", "agentAccess": "成员授权", "grantError": "无法更新成员授权。",
+    "trustedExecutionNotice": "已启用插件会从下一次 Run 开始自动提供给所有智能体。", "agentAccess": "智能体可用范围", "allAgents": "自动提供给当前及未来的所有智能体", "grantError": "无法更新成员授权。",
     "noDescription": "此插件没有提供说明。", "unknownPublisher": "未知发布者",
     "community": {
-      "title": "搜索 Pi 社区插件", "description": "结果来自 npm 中标记 pi-package 的软件包。", "readOnly": "一期仅供发现，不直接执行",
+      "title": "搜索 CoDo 兼容插件", "description": "结果来自 npm 中标记 pi-package 的兼容软件包。", "readOnly": "一期仅供发现，不直接执行",
       "search": "搜索", "searching": "正在搜索…", "placeholder": "插件名称或关键词", "error": "无法连接 npm 插件目录。",
       "empty": "输入关键词搜索社区插件。", "reviewRequired": "等待安全审核"
     }
   },
+  "memory": {
+    "title": "工作区记忆",
+    "description": "连接腾讯 Agent Memory，让同一工作区的智能体在不同会话间延续上下文。",
+    "loading": "正在读取记忆设置…",
+    "loadError": "无法读取记忆设置。",
+    "connectionTitle": "腾讯 Agent Memory",
+    "connectionDescription": "一个 CoDo 配置连接一个 Team；其下的每个工作区自动使用独立 Task 隔离记忆。密码和密钥保存在 Windows 凭据管理器。",
+    "hubEndpoint": "Memory Hub 地址",
+    "endpoint": "Memory API 地址",
+    "authMode": "公网认证方式",
+    "authModes": { "basic": "反向代理 Basic Auth", "gatewayBearer": "Gateway Bearer" },
+    "basicUsername": "Basic 用户名",
+    "basicPassword": "反向代理密码",
+    "gatewayApiKey": "Gateway 服务密钥",
+    "serviceId": "Service ID",
+    "userId": "User ID",
+    "userKey": "User Key（可选）",
+    "credentialStored": "已安全保存；输入新值可替换",
+    "authSecretRequired": "输入认证密码或密钥",
+    "credentialOptional": "管理面需要时填写",
+    "showKey": "显示密钥",
+    "hideKey": "隐藏密钥",
+    "clearAuthSecret": "删除已保存的认证凭据",
+    "clearUserKey": "删除已保存的 User Key",
+    "insecureHttpTitle": "当前连接使用公网 HTTP 明文传输",
+    "insecureHttpDescription": "密码、密钥和记忆内容不会被 TLS 加密。建议部署 HTTPS 后再长期启用。",
+    "allowInsecureHttp": "允许此 HTTP 地址",
+    "recall": "召回",
+    "capture": "写回",
+    "recallTimeout": "召回超时（毫秒）",
+    "requestTimeout": "写回超时（毫秒）",
+    "recallItems": "最多召回条数",
+    "recallChars": "最多召回字符",
+    "workspacesTitle": "工作区绑定",
+    "workspacesDescription": "所有工作区共享上方 Team，每个项目根目录自动映射到一个独立 Task。",
+    "teamId": "Team ID",
+    "taskId": "自动 Task ID",
+    "taskIdPending": "保存后自动生成",
+    "pending": "待同步 {{count}} 条",
+    "noWorkspaces": "创建 Work 后可在这里绑定工作区。",
+    "saved": "记忆设置已保存",
+    "saving": "正在保存…",
+    "saveError": "无法保存记忆设置。",
+    "test": "测试连接",
+    "testing": "正在测试…",
+    "testSuccess": "连接与隔离验证通过 · {{latency}} ms",
+    "testError": "连接验证失败，请检查地址和认证配置。",
+    "testErrors": {
+      "timeout": "连接超时，请检查服务是否运行或增大请求超时。",
+      "network": "无法访问 Memory API，请检查地址、端口和网络。",
+      "proxyAuthentication": "反向代理拒绝了 Basic Auth，请检查用户名和反向代理密码。",
+      "gatewayBearerRequired": "反向代理已连通，但 Memory Core 数据接口要求 Gateway Bearer。请让反向代理注入 Gateway Bearer，或改用可直连的 Gateway 地址和服务密钥。",
+      "authentication": "Memory Core 拒绝认证，请检查认证方式、Gateway 服务密钥和 Service ID。",
+      "rejected": "Memory Core 已连接，但拒绝了隔离参数；请检查 Team ID、User ID 和服务版本。",
+      "invalidResponse": "Memory API 返回了无法识别的响应，请检查地址是否指向 Memory Core v3。",
+      "invalidUserId": "User ID 填成了 User Key 记录 ID；User ID 应为 usr-*，填写 User Key 后可自动解析。"
+    }
+  },
   "webAccess": {
-    "title": "联网搜索", "description": "配置 Pi Web Access 使用的搜索服务、路由与 URL 抓取能力。",
+    "title": "联网搜索", "description": "配置 CoDo 使用的搜索服务、路由与 URL 抓取能力。",
     "loading": "正在读取联网设置…", "loadError": "无法读取联网设置。", "saved": "联网设置已保存", "saving": "正在保存…", "saveError": "无法保存联网设置。",
     "routingTitle": "搜索路由", "routingDescription": "默认服务失败时，仅在超时、限流、网络或无效响应场景使用备用服务。",
     "defaultProvider": "默认服务", "fallbackProvider": "备用服务", "noProvider": "先开启搜索服务", "noFallback": "不使用备用服务",
@@ -200,16 +259,17 @@
     }
   },
   "connectors": {
-    "title": "连接器", "subtitle": "将外部服务安全接入 PiWork，并按 Work 控制访问范围", "accounts": "邮箱账户", "add": "添加邮箱连接器",
+    "title": "连接器", "subtitle": "将外部服务安全接入 CoDo，并自动提供给所有智能体", "accounts": "邮箱账户", "add": "添加邮箱连接器",
     "loading": "正在读取连接器…", "loadError": "无法读取连接器", "empty": "还没有邮箱连接器。", "newAccount": "新连接", "accountSettings": "邮箱连接器", "addTitle": "接入企业邮箱",
     "identity": "账户与凭据", "identityDescription": "密码只保存在 Windows 凭据管理器，不会写入项目或插件。", "displayName": "显示名称", "displayNamePlaceholder": "例如：公司邮箱",
     "emailAddress": "邮箱地址", "username": "登录用户名", "password": "客户端专用密码", "passwordStored": "凭据已保存，留空则保持不变", "passwordPlaceholder": "输入邮箱密码或客户端专用密码",
     "servers": "邮件服务器", "serversDescription": "一期仅支持 TLS 加密的 IMAP 与 SMTP。", "preset": "服务预设", "presets": { "aliyun": "阿里企业邮箱", "custom": "自定义 IMAP / SMTP" },
     "pollInterval": "轮询频率", "minutes": "{{count}} 分钟", "port": "端口", "tlsOnly": "仅使用 TLS 加密连接",
     "test": "测试连接", "testSuccess": "IMAP 与 SMTP 连接测试通过", "testError": "连接测试失败，请检查服务器、账户和客户端专用密码。",
+    "testErrors": { "imapAuthentication": "IMAP 登录失败，请确认邮箱账号和客户端专用密码，并检查管理员是否已开启 IMAP 服务。", "imapConfiguration": "IMAP 服务器配置无效，请检查地址和端口。", "imapConnection": "无法连接 IMAP 服务器，请检查网络、服务器地址和端口。", "imapNetwork": "无法连接 IMAP 服务器，请检查网络、服务器地址和端口。", "imapProtocol": "IMAP 服务器返回了无法识别的响应。", "imapTimeout": "连接 IMAP 服务器超时，请检查网络、服务器地址和端口。", "imapTls": "IMAP TLS 握手失败，请检查服务器地址、端口和系统证书。", "smtpAuthentication": "IMAP 登录已通过，但 SMTP 登录失败，请确认客户端专用密码并检查管理员是否已开启 SMTP 服务。", "smtpConfiguration": "SMTP 服务器配置无效，请检查地址和端口。", "smtpConnection": "IMAP 登录已通过，但无法连接或登录 SMTP 服务器，请检查 SMTP 服务和客户端专用密码。", "smtpTimeout": "IMAP 登录已通过，但连接 SMTP 服务器超时。", "smtpTls": "IMAP 登录已通过，但 SMTP TLS 握手失败，请检查服务器地址、端口和系统证书。" },
     "saved": "连接器配置已保存", "saveError": "无法保存连接器配置。", "enabledMessage": "连接器已开启，并以当前收件箱 UID 建立基线。", "disabledMessage": "连接器已关闭。", "enableError": "无法开启连接器；请先通过连接测试。",
-    "delete": "删除连接器", "deleteConfirm": "删除“{{name}}”及其本地邮件元数据和授权？", "workAccess": "Work 访问权限", "workAccessDescription": "连接器默认不向 Work 暴露；敏感操作即使已授权也必须逐次确认。",
-    "noWorks": "创建 Work 后可在这里授权。", "permissions": "邮箱权限", "permission": { "metadata": "搜索元数据", "read_body": "读取正文 · 需确认", "send": "发送邮件 · 需确认" }, "grantError": "无法更新 Work 授权。",
+    "delete": "删除连接器", "deleteConfirm": "删除“{{name}}”及其本地邮件元数据？", "workAccess": "智能体可用范围", "workAccessDescription": "开启后，当前及未来的所有 Work 和智能体都可直接搜索、读取和发送邮件；删除类操作仍需确认。", "allAgentsAccess": "已自动提供给所有 Work 和智能体",
+    "noWorks": "创建 Work 后可在这里授权。", "permissions": "邮箱权限", "permission": { "metadata": "搜索元数据", "read_body": "读取正文", "send": "发送邮件" }, "grantError": "无法更新 Work 授权。",
     "recentMail": "最近邮件", "metadataOnly": "这里只保存发件人、主题、时间等元数据，不保存正文。",
     "health": { "healthy": "连接正常", "degraded": "连接不稳定", "error": "连接异常", "untested": "尚未测试", "disabled": "已关闭" }
   },
@@ -224,18 +284,18 @@
     "allWorks": "全部对话",
     "allWorksBody": "{{count}} 个对话，按状态和最近活动整理",
     "workCount": "{{count}} 个对话",
-    "views": { "label": "对话视图", "all": "全部", "active": "进行中", "completed": "已完成" },
+    "views": { "label": "对话视图", "all": "全部", "active": "进行中", "completed": "已完成", "archived": "已归档" },
     "recentWorks": "最近对话",
     "recentWorksBody": "继续最近的目标，或从上方开始新对话。",
     "viewAll": "查看全部",
     "noWorks": "创建第一个对话后，它会显示在这里。",
-    "groups": { "active": "正在进行", "open": "可继续", "attention": "需要关注", "completed": "已完成" }
+    "groups": { "active": "正在进行", "open": "可继续", "attention": "需要关注", "completed": "已完成", "archived": "已归档" }
   },
   "newWork": {
-    "heading": "要在 PiWork 中完成什么？",
+    "heading": "把什么交给 CoDo？",
     "body": "直接描述任务；可使用当前项目，也可以随时切换目录。",
     "promptLabel": "首个任务",
-    "promptPlaceholder": "让 Pi 帮你完成一个任务…",
+    "promptPlaceholder": "告诉 CoDo 要处理什么…",
     "selectProject": "选择项目",
     "changeProject": "当前项目：{{project}}，点击切换",
     "clearProject": "不指定项目",
@@ -264,9 +324,9 @@
     "comingSoon": "{{feature}}（即将推出）",
     "header": { "importProject": "导入项目", "exploreAgents": "探索智能体", "notifications": "通知" },
     "greeting": {
-      "hello": "你好，<pi>Pi</pi>",
-      "title": "今天想让 <pi>Pi</pi> 帮你完成什么？",
-      "body": "你的 AI 开发与协作伙伴，懂码、能思考、会执行。"
+      "hello": "你好，我是 <pi>CoDo</pi>",
+      "title": "有什么事，交给 CoDo。",
+      "body": "理解你的目标，接手力所能及的事情。"
     },
     "recentProjects": {
       "title": "最近项目",
@@ -296,7 +356,7 @@
       "gitLabel": "Git"
     },
     "composer": {
-      "placeholder": "描述你的需求，Pi 将帮你拆解并执行…",
+      "placeholder": "说说要处理什么，CoDo 会接着做…",
       "localRuntimeChip": "本地运行环境",
       "agentButton": "智能体",
       "knowledgeButton": "知识库",
@@ -320,7 +380,7 @@
       "tasksCompleted": "完成任务",
       "timeSaved": "节省时间",
       "codeChanges": "代码变更",
-      "body": "你今天与 Pi 协作了 12 次，主要在代码审查与功能开发方面取得了进展。"
+      "body": "你今天与 CoDo 协作了 12 次，推进了多项工作。"
     }
   },
   "create": {
@@ -333,14 +393,14 @@
   "state": {
     "loading": "正在加载对话",
     "errorTitle": "无法加载对话",
-    "emptyBody": "从一个持续目标开始，PiWork 会保留完整的协作脉络。"
+    "emptyBody": "从一个持续目标开始，CoDo 会保留完整的协作脉络。"
   },
   "diagnostics": { "open": "打开诊断", "unavailable": "诊断详情无法安全显示" },
   "errors": {
     "generic": "操作失败，请重试。",
     "database": "本地数据库暂时不可用，请重试。",
     "workspacePath": "所选工作目录不存在或无法访问。",
-    "pathResolution": "无法访问 PiWork 的本地数据目录。",
+    "pathResolution": "无法访问 CoDo 的本地数据目录。",
     "referencedFile": "引用的文件 {{path}} 已失效、不可读或超出限制，请重新选择。",
     "resourceImport": "部分附件无法导入，请移除后重试。",
     "resourceStorage": "本地附件存储暂时不可用，请重试。",
@@ -352,7 +412,7 @@
       "prompt": "请输入有效指令。"
     },
     "invalidWorkState": "当前对话状态不允许此操作。",
-    "workAlreadyRunning": "Pi 正在处理上一条指令。",
+    "workAlreadyRunning": "CoDo 正在处理上一条指令。",
     "notFound": "请求的对话或执行记录不存在。",
     "concurrentModification": "对话已在其他操作中更新，请重试。",
     "engine": "执行引擎暂时不可用。",
@@ -419,28 +479,46 @@
     "runHeading": "协作阶段 {{number}}",
     "instructionSummary": "{{instruction}}",
     "delivery": "交付",
+    "deliverySummary": "交付摘要",
     "newOutput": "查看新输出",
-    "activityRunning": "Pi 正在执行",
-    "activityCompleted": "Pi 已完成 {{count}} 个操作",
-    "activityFailed": "Pi 执行遇到问题 · {{count}} 个操作",
+    "activityRunning": "CoDo 正在执行",
+    "activityCompleted": "CoDo 已完成 {{count}} 个操作",
+    "activityFailed": "CoDo 执行遇到问题 · {{count}} 个操作",
     "activityToggle": "展开详情",
     "validation": "验证",
     "limitations": "限制"
   },
   "progress": {
     "label": "执行进度",
-    "preparing": "Pi 正在准备执行",
-    "running": "Pi 正在执行",
-    "waiting": "Pi 正在等待继续",
-    "waitingOnAssignments": "Pi 正在等待成员结果",
-    "completedWithoutTools": "Pi 已完成",
-    "completed_one": "Pi 已完成 {{count}} 个操作",
-    "completed_other": "Pi 已完成 {{count}} 个操作",
+    "preparing": "CoDo 正在准备执行",
+    "running": "CoDo 正在执行",
+    "waiting": "CoDo 正在等待继续",
+    "waitingOnAssignments": "CoDo 正在等待成员结果",
+    "completedWithoutTools": "CoDo 已完成",
+    "completed_one": "CoDo 已完成 {{count}} 个操作",
+    "completed_other": "CoDo 已完成 {{count}} 个操作",
     "failed": "执行未完成",
     "recovered_one": "其中 {{count}} 个操作曾遇到问题",
     "recovered_other": "其中 {{count}} 个操作曾遇到问题",
     "expand": "展开执行详情",
     "collapse": "收起执行详情",
+    "phases": "执行流程",
+    "operationCount_one": "{{count}} 个操作",
+    "operationCount_other": "{{count}} 个操作",
+    "current": {
+      "preparing": "正在理解你的要求并准备执行",
+      "thinking": "正在分析问题和上下文",
+      "planning": "正在调整执行方案",
+      "action": "当前：{{action}} {{object}}",
+      "continuing": "这个操作已结束，正在继续处理",
+      "composing": "正在整理并输出结果",
+      "permission": "需要你的授权后继续",
+      "coordinating": "正在协调成员并汇总结果",
+      "waiting": "暂时等待外部条件，执行记录仍会保留",
+      "waitingOnAssignments": "成员仍在执行，结果返回后会自动继续",
+      "completed": "结果已整理，可以继续查看执行记录",
+      "failed": "执行已停止，详细记录仍然保留"
+    },
     "phase": {
       "prepare": "准备执行",
       "analyze": "分析项目",
@@ -457,7 +535,7 @@
     }
   },
   "composer": {
-    "label": "给 PiWork 指令",
+    "label": "给 CoDo 指令",
     "placeholder": "继续描述下一步，或补充新的要求…",
     "send": "发送",
     "continue": "发送",
@@ -465,7 +543,7 @@
     "queueNext": "排在下一步",
     "interrupt": "中断并替换",
     "interruptConfirm": "取消当前任务并改为执行这条指令？",
-    "runActive": "Pi 正在处理上一条指令，你可以排队下一条或停止"
+    "runActive": "CoDo 正在处理上一条指令，你仍可发送下一条"
   },
   "mentions": {
     "files": "项目文件",

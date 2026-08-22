@@ -20,6 +20,50 @@ pub mod supervisor;
 
 pub const WAITING_ON_ASSIGNMENTS_REASON: &str = "waiting_on_assignments";
 
+/// Immutable capability decision carried by one Run. Expert packs shape the
+/// prompt, host tools are leased through PiWork, and extension tools are loaded
+/// by the engine adapter. Keeping the three sources distinct prevents one
+/// adapter from accidentally widening another source's authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunCapabilityManifest {
+    expert_pack_ids: Vec<String>,
+    host_tool_ids: Vec<String>,
+    extension_tool_ids: Vec<String>,
+}
+
+impl RunCapabilityManifest {
+    pub fn new(expert_pack_ids: Vec<String>, host_tool_ids: Vec<String>) -> Self {
+        Self {
+            expert_pack_ids,
+            host_tool_ids,
+            extension_tool_ids: Vec::new(),
+        }
+    }
+
+    pub fn with_extension_tool_ids(mut self, tool_ids: Vec<String>) -> Self {
+        self.extension_tool_ids = tool_ids;
+        self
+    }
+
+    pub fn expert_pack_ids(&self) -> &[String] {
+        &self.expert_pack_ids
+    }
+
+    pub fn host_tool_ids(&self) -> &[String] {
+        &self.host_tool_ids
+    }
+
+    pub fn executable_tool_ids(&self) -> Vec<String> {
+        let mut tools = self.host_tool_ids.clone();
+        for tool in &self.extension_tool_ids {
+            if !tools.contains(tool) {
+                tools.push(tool.clone());
+            }
+        }
+        tools
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineImage {
     pub media_type: String,
@@ -207,6 +251,7 @@ pub struct EngineRunContext {
     session_generation: u32,
     resolved_model_configuration_id: Option<String>,
     effective_permission: PermissionMode,
+    capability_manifest: RunCapabilityManifest,
     host_tool_lease: Option<HostToolLease>,
 }
 
@@ -248,6 +293,7 @@ impl EngineRunContext {
             session_generation,
             resolved_model_configuration_id,
             effective_permission,
+            capability_manifest: RunCapabilityManifest::default(),
             host_tool_lease: None,
         })
     }
@@ -257,6 +303,11 @@ impl EngineRunContext {
     /// ever stores its digest.
     pub fn with_host_tool_lease(mut self, lease: HostToolLease) -> Self {
         self.host_tool_lease = Some(lease);
+        self
+    }
+
+    pub fn with_capability_manifest(mut self, manifest: RunCapabilityManifest) -> Self {
+        self.capability_manifest = manifest;
         self
     }
 
@@ -298,6 +349,10 @@ impl EngineRunContext {
 
     pub fn effective_permission(&self) -> PermissionMode {
         self.effective_permission
+    }
+
+    pub fn capability_manifest(&self) -> &RunCapabilityManifest {
+        &self.capability_manifest
     }
 
     pub fn host_tool_lease(&self) -> Option<&HostToolLease> {
@@ -450,7 +505,7 @@ mod tests {
         work::PermissionMode,
     };
 
-    use super::{EngineEvent, EngineRunContext, EngineRunIdentity};
+    use super::{EngineEvent, EngineRunContext, EngineRunIdentity, RunCapabilityManifest};
 
     fn identity(run_id: &str) -> EngineRunIdentity {
         EngineRunIdentity::new(
@@ -483,6 +538,24 @@ mod tests {
                 message: "failed".into(),
             }
             .is_terminal()
+        );
+    }
+
+    #[test]
+    fn run_capability_manifest_keeps_sources_distinct_and_deduplicates_tools() {
+        let manifest = RunCapabilityManifest::new(
+            vec!["capability-pack:source-research:v1".into()],
+            vec!["list_email_accounts".into(), "search_email_metadata".into()],
+        )
+        .with_extension_tool_ids(vec!["web_search".into(), "list_email_accounts".into()]);
+
+        assert_eq!(
+            manifest.expert_pack_ids(),
+            ["capability-pack:source-research:v1"]
+        );
+        assert_eq!(
+            manifest.executable_tool_ids(),
+            ["list_email_accounts", "search_email_metadata", "web_search"]
         );
     }
 

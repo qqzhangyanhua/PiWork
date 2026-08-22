@@ -38,6 +38,7 @@ import "../../styles/dashboard.css";
 import "../../styles/agent-center.css";
 import "../../styles/extensions.css";
 import "../../styles/web-access-settings.css";
+import "../../styles/memory-settings.css";
 import "../../styles/connectors.css";
 import "../../styles/notifications.css";
 
@@ -49,6 +50,8 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
   const selectWork = useWorkStore((state) => state.selectWork);
   const timelines = useWorkStore((state) => state.timelines);
   const latestRuns = useWorkStore((state) => state.latestRuns);
+  const archiveWork = useWorkStore((state) => state.archiveWork);
+  const restoreWork = useWorkStore((state) => state.restoreWork);
   const resources = useWorkStore((state) => state.resources);
   const loading = useWorkStore((state) => state.loading);
   const error = useWorkStore((state) => state.error);
@@ -205,9 +208,13 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
       ) : activeView === "plugins" ? (
         <ExtensionMarketplacePage client={client} />
       ) : activeView === "connectors" ? (
-        <ConnectorPage client={client} works={Object.values(works)} />
+        <ConnectorPage client={client} />
       ) : activeView === "all" ? (
-        <AllWorks works={Object.values(works)} onWorkSelected={(work) => openWork(work.id)} />
+        <AllWorks
+          works={Object.values(works)}
+          onWorkRestore={(work) => { void restoreWork(work.id); }}
+          onWorkSelected={(work) => openWork(work.id)}
+        />
       ) : activeView === "home" || !selectedWork ? (
         <WorkHome
           draftRevision={homeDraft.revision}
@@ -237,6 +244,9 @@ function SurfaceContent({ client, initialView, modelConfiguration, modelLabel, o
           timeline={timeline}
           work={selectedWork}
           workspaceRef={workspaceRef}
+          onArchive={() => {
+            void archiveWork(selectedWork.id).then(() => setActiveView("all"));
+          }}
           onExperienceChange={changeDetailExperience}
           onInspectorClose={closeInspector}
           onInspectorOpenDiagnostics={openDiagnostics}

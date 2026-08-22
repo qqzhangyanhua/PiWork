@@ -359,4 +359,32 @@ describe("buildExecutionProgress", () => {
     expect(phase(model, "execute")?.status).toBe("failed");
     expect(phase(model, "deliver")?.status).toBe("failed");
   });
+
+  it("treats host-tool assignment completion as a terminal Run signal", () => {
+    const model = buildExecutionProgress([
+      event(1, { type: "runStarted", modelLabel: "GPT-5.6" }),
+      event(2, {
+        type: "toolStarted",
+        toolCallId: "delivery-1",
+        toolName: "complete_work_delivery",
+        inputSummary: "final delivery",
+      }),
+      event(3, {
+        type: "assignmentCompleted",
+        assignmentId: "assignment-1",
+        agentInstanceId: "agent-1",
+        agentSessionId: "session-1",
+        resultSummary: "done",
+      }),
+    ]);
+
+    expect(model).toMatchObject({
+      status: "completed",
+      currentPhase: "deliver",
+      toolCount: 1,
+      failureMessage: null,
+    });
+    expect(phase(model, "execute")?.status).toBe("completed");
+    expect(phase(model, "deliver")?.status).toBe("completed");
+  });
 });

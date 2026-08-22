@@ -64,6 +64,22 @@ pub async fn stop_work(
     state.work_service().stop_work(&work_id).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub async fn archive_work(
+    state: State<'_, AppState>,
+    work_id: String,
+) -> Result<WorkDetail, AppError> {
+    state.work_service().archive_work(&work_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restore_work(
+    state: State<'_, AppState>,
+    work_id: String,
+) -> Result<WorkDetail, AppError> {
+    state.work_service().restore_work(&work_id).await
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -75,5 +91,7 @@ mod tests {
         let _ = super::list_project_files;
         let _ = super::start_work;
         let _ = super::stop_work;
+        let _ = super::archive_work;
+        let _ = super::restore_work;
     }
 }

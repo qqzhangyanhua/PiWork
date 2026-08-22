@@ -349,7 +349,7 @@ impl PiRunArguments {
     /// Loads the role-scoped host extension and admits its leased tools through
     /// Pi's global `--tools` filter. `--no-extensions` only disables discovery;
     /// explicit extension paths that follow it are still loaded.
-    pub fn with_host_tool_extension(mut self, path: &Path, host_tools: &[String]) -> Self {
+    fn with_tools(mut self, tools: &[String]) -> Self {
         let tool_index = self
             .values
             .iter()
@@ -360,13 +360,22 @@ impl PiRunArguments {
             .split(',')
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        for tool in host_tools {
+        for tool in tools {
             if !enabled_tools.contains(tool) {
                 enabled_tools.push(tool.clone());
             }
         }
         self.values[tool_index] = enabled_tools.join(",");
-        self.with_extension(path)
+        self
+    }
+
+    pub fn with_host_tool_extension(self, path: &Path, host_tools: &[String]) -> Self {
+        let this = self.with_tools(host_tools);
+        this.with_extension(path)
+    }
+
+    pub fn with_extension_tools(self, tools: &[String]) -> Self {
+        self.with_tools(tools)
     }
 
     /// Appends an explicitly resolved extension after `--no-extensions`, which
@@ -582,6 +591,18 @@ impl RpcEventTranslator {
                 validation: self.validation.clone(),
                 limitations: Vec::new(),
             }),
+            "message_end"
+                if message.pointer("/message/role").and_then(Value::as_str)
+                    == Some("assistant")
+                    && message
+                        .pointer("/message/stopReason")
+                        .and_then(Value::as_str)
+                        == Some("error") =>
+            {
+                Some(EngineEvent::RunFailed {
+                    message: "Pi could not complete this Run".into(),
+                })
+            }
             "message_end"
                 if message.pointer("/message/role").and_then(Value::as_str)
                     == Some("assistant") =>
@@ -1286,8 +1307,13 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             &configuration.model_id,
             context.effective_permission(),
         );
-        if let Some((path, lease)) = &host_tools {
-            arguments = arguments.with_host_tool_extension(path, &lease.allowed_tools);
+        let capability_manifest = context
+            .capability_manifest()
+            .clone()
+            .with_extension_tool_ids(extension_snapshot.tool_ids.clone());
+        arguments = arguments.with_extension_tools(&capability_manifest.executable_tool_ids());
+        if let Some((path, _lease)) = &host_tools {
+            arguments = arguments.with_extension(path);
         }
         for path in &extension_snapshot.extension_paths {
             arguments = arguments.with_extension(path);
@@ -2029,6 +2055,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assistant_error_message_fails_the_run_before_agent_end() {
+        let mut translator = super::RpcEventTranslator::default();
+
+        assert_eq!(
+            translator.translate(serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "stopReason": "error",
+                    "errorMessage": "internal adapter detail"
+                }
+            })),
+            Some(super::EngineEvent::RunFailed {
+                message: "Pi could not complete this Run".into(),
+            })
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn node_entrypoint_removes_the_windows_verbatim_disk_prefix() {
@@ -2051,7 +2097,8 @@ mod tests {
         .with_host_tool_extension(
             std::path::Path::new(r"D:\runtime\run-1\agent\extensions\piwork-host-tools.ts"),
             &["delegate_assignment".to_owned()],
-        );
+        )
+        .with_extension_tools(&["web_search".to_owned(), "fetch_content".to_owned()]);
 
         let values = arguments.values();
         let no_extensions = values
@@ -2080,6 +2127,8 @@ mod tests {
             tools.contains("delegate_assignment"),
             "the explicit host extension tool must survive Pi's --tools allowlist"
         );
+        assert!(tools.contains("web_search"));
+        assert!(tools.contains("fetch_content"));
     }
 
     #[test]

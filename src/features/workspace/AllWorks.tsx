@@ -1,26 +1,31 @@
-import { Layers3 } from "lucide-react";
+import { Layers3, RotateCcw } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { WorkSummary } from "../../bindings";
 import { visibleWorks, workGroup, WorkListRow } from "./WorkList";
 
-const groups = ["active", "open", "attention", "completed"] as const;
-const views = ["all", "active", "completed"] as const;
+const groups = ["active", "open", "attention", "completed", "archived"] as const;
+const views = ["all", "active", "completed", "archived"] as const;
 type WorkView = (typeof views)[number];
 
 export function AllWorks({
   works,
   onWorkSelected,
+  onWorkRestore,
 }: {
   works: WorkSummary[];
   onWorkSelected(work: WorkSummary): void;
+  onWorkRestore(work: WorkSummary): void;
 }) {
   const { t } = useTranslation();
-  const sorted = visibleWorks(works);
   const [view, setView] = useState<WorkView>("all");
+  const sorted = view === "archived"
+    ? [...works].filter((work) => work.status === "archived").sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    : visibleWorks(works);
   const visible = sorted.filter((work) => {
     if (view === "all") return true;
+    if (view === "archived") return work.status === "archived";
     if (view === "completed") return workGroup(work.status) === "completed";
     return workGroup(work.status) === "active";
   });
@@ -58,7 +63,18 @@ export function AllWorks({
               </header>
               <div className="work-list">
                 {groupWorks.map((work) => (
-                  <WorkListRow key={work.id} onSelect={onWorkSelected} work={work} />
+                  <div className="work-list-item" key={work.id}>
+                    <WorkListRow onSelect={onWorkSelected} work={work} />
+                    {work.status === "archived" && (
+                      <button
+                        aria-label={t("conversation.restore", { title: work.title })}
+                        className="icon-button work-list-item__restore"
+                        onClick={() => onWorkRestore(work)}
+                        title={t("conversation.restoreAction")}
+                        type="button"
+                      ><RotateCcw aria-hidden="true" size={15} /></button>
+                    )}
+                  </div>
                 ))}
               </div>
             </section>

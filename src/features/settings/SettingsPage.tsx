@@ -1,25 +1,19 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  Archive,
-  Boxes,
-  Command,
   Cpu,
-  Database,
-  Info,
   Globe2,
+  MemoryStick,
   Plus,
-  RefreshCw,
-  Settings,
-  ShieldCheck,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { ModelConfigurationSummary, ModelProvider, PiWorkClient } from "../../app/tauriClient";
 import { ModelConnectionEditor } from "../model-setup/ModelConnectionEditor";
 import { ProviderLogo } from "../model-setup/ProviderLogo";
+import { MemorySettingsPanel } from "./MemorySettingsPanel";
 import { WebAccessSettingsPanel } from "./WebAccessSettingsPanel";
 
-type SettingsSection = "models" | "web-access";
+type SettingsSection = "models" | "web-access" | "memory";
 
 const providerLabels: Record<ModelProvider, string> = {
   openai: "OpenAI",
@@ -43,26 +37,10 @@ function SettingsNavigation({ section, onSectionChange }: { section: SettingsSec
   return (
     <nav aria-label={t("settings.settingsNavigation")} className="settings-navigation">
       <section>
-        <h2>{t("settings.generalGroup")}</h2>
-        <NavigationItem icon={<Settings aria-hidden="true" size={16} />} label={t("settings.generalSettings")} />
-        <NavigationItem icon={<Command aria-hidden="true" size={16} />} label={t("settings.shortcuts")} />
-      </section>
-      <section>
         <h2>{t("settings.modelRuntimeGroup")}</h2>
         <NavigationItem current={section === "models"} icon={<Cpu aria-hidden="true" size={16} />} label={t("settings.modelRuntimeNav")} onClick={() => onSectionChange("models")} />
         <NavigationItem current={section === "web-access"} icon={<Globe2 aria-hidden="true" size={16} />} label={t("settings.webAccessNav")} onClick={() => onSectionChange("web-access")} />
-        <NavigationItem icon={<Boxes aria-hidden="true" size={16} />} label={t("settings.localResources")} />
-      </section>
-      <section>
-        <h2>{t("settings.dataSecurityGroup")}</h2>
-        <NavigationItem icon={<Database aria-hidden="true" size={16} />} label={t("settings.dataStorage")} />
-        <NavigationItem icon={<ShieldCheck aria-hidden="true" size={16} />} label={t("settings.privacySecurity")} />
-        <NavigationItem icon={<Archive aria-hidden="true" size={16} />} label={t("settings.exportBackup")} />
-      </section>
-      <section>
-        <h2>{t("settings.aboutGroup")}</h2>
-        <NavigationItem icon={<Info aria-hidden="true" size={16} />} label={t("settings.aboutPiWork")} />
-        <NavigationItem icon={<RefreshCw aria-hidden="true" size={16} />} label={t("settings.checkUpdates")} />
+        <NavigationItem current={section === "memory"} icon={<MemoryStick aria-hidden="true" size={16} />} label={t("settings.memoryNav")} onClick={() => onSectionChange("memory")} />
       </section>
     </nav>
   );
@@ -183,6 +161,8 @@ export function SettingsPage({
         <SettingsNavigation onSectionChange={setSection} section={section} />
         {section === "web-access" ? (
           <WebAccessSettingsPanel client={client} />
+        ) : section === "memory" ? (
+          <MemorySettingsPanel client={client} />
         ) : (
         <section aria-labelledby="settings-model-runtime-title" className="model-settings-panel">
           <header className="model-settings-panel__header">

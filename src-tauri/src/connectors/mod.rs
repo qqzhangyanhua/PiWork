@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
 use lettre::{
     AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    transport::smtp::authentication::Credentials,
+    transport::smtp::{Error as SmtpError, authentication::Credentials},
 };
 use mail_parser::MessageParser;
 use serde::{Deserialize, Serialize};
@@ -344,24 +344,19 @@ impl ConnectorService {
         validate_input(&input)?;
         let password = resolve_input_password(&input)?;
         let row = input_row(&input);
-        let imap = connect_imap(&row, &password).await;
-        let imap_ok = imap.is_ok();
-        if let Ok(mut session) = imap {
-            let _ = session.logout().await;
+        let mut session = match connect_imap(&row, &password).await {
+            Ok(session) => session,
+            Err(error_code) => return Ok(connection_test_failure(false, error_code)),
+        };
+        let _ = session.logout().await;
+        match test_smtp(&row, &password).await {
+            Ok(()) => Ok(ConnectorTestResult {
+                imap_ok: true,
+                smtp_ok: true,
+                error_code: None,
+            }),
+            Err(error_code) => Ok(connection_test_failure(true, error_code)),
         }
-        if !imap_ok {
-            return Ok(ConnectorTestResult {
-                imap_ok: false,
-                smtp_ok: false,
-                error_code: Some("imap_connection_failed".into()),
-            });
-        }
-        let smtp_ok = test_smtp(&row, &password).await.is_ok();
-        Ok(ConnectorTestResult {
-            imap_ok,
-            smtp_ok,
-            error_code: (!smtp_ok).then(|| "smtp_connection_failed".into()),
-        })
     }
 
     pub async fn set_enabled(
@@ -609,7 +604,7 @@ impl ConnectorService {
     ) -> Result<Value, AppError> {
         match tool {
             TOOL_LIST_EMAIL_ACCOUNTS => {
-                let accounts = self.granted_accounts(&context.work_id).await?;
+                let accounts = self.enabled_accounts().await?;
                 Ok(json!(accounts))
             }
             TOOL_SEARCH_EMAIL_METADATA => {
@@ -651,8 +646,16 @@ impl ConnectorService {
             .get_or_create_action(context, connection_id, "read_email_body", payload, preview)
             .await?;
         match action.status.as_str() {
-            "approved" => {
+            "approved" | "executed" => {
                 let body = self.fetch_body(connection_id, uid).await?;
+                sqlx::query(
+                    "UPDATE connector_pending_actions SET status = 'executed', updated_at = ?
+                     WHERE id = ? AND status = 'approved'",
+                )
+                .bind(Utc::now())
+                .bind(&action.id)
+                .execute(&self.pool)
+                .await?;
                 self.audit(
                     Some(connection_id),
                     Some(&context.work_id),
@@ -662,7 +665,7 @@ impl ConnectorService {
                     json!({ "uid": uid, "folder": INBOX }),
                 )
                 .await?;
-                Ok(json!({ "status": "approved", "body": body }))
+                Ok(json!({ "status": "executed", "body": body }))
             }
             "pending" => Ok(
                 json!({ "status": "pending", "approvalId": action.id, "expiresAt": action.expires_at }),
@@ -717,7 +720,7 @@ impl ConnectorService {
                     json!({ "to": to, "subject": subject }),
                 )
                 .await?;
-                Ok(json!({ "status": "executed", "approvalId": action.id }))
+                Ok(json!({ "status": "executed", "actionId": action.id }))
             }
             "pending" => Ok(
                 json!({ "status": "pending", "approvalId": action.id, "expiresAt": action.expires_at }),
@@ -970,44 +973,43 @@ impl ConnectorService {
 
     async fn authorize(
         &self,
-        work_id: &str,
+        _work_id: &str,
         connection_id: &str,
         permission: &str,
     ) -> Result<(), AppError> {
-        let permissions = sqlx::query_scalar::<_, String>(
-            "SELECT grants.permissions_json FROM connector_work_grants grants
-             JOIN connector_connections connections ON connections.id = grants.connection_id
-             WHERE grants.connection_id = ? AND grants.work_id = ? AND connections.enabled = 1",
-        )
-        .bind(connection_id)
-        .bind(work_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| {
-            AppError::invalid_input("connectionId", "connector is not granted to this Work")
-        })?;
-        let allowed = serde_json::from_str::<Vec<String>>(&permissions).unwrap_or_default();
-        if allowed.iter().any(|item| item == permission) {
+        if !matches!(
+            permission,
+            EMAIL_PERMISSION_METADATA | EMAIL_PERMISSION_READ_BODY | EMAIL_PERMISSION_SEND
+        ) {
+            return Err(AppError::invalid_input(
+                "permission",
+                "unknown connector permission",
+            ));
+        }
+        let enabled =
+            sqlx::query_scalar::<_, bool>("SELECT enabled FROM connector_connections WHERE id = ?")
+                .bind(connection_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| {
+                    AppError::invalid_input("connectionId", "connector was not found")
+                })?;
+        if enabled {
             Ok(())
         } else {
             Err(AppError::invalid_input(
-                "permission",
-                "connector permission is not granted to this Work",
+                "connectionId",
+                "connector is disabled",
             ))
         }
     }
 
-    async fn granted_accounts(
-        &self,
-        work_id: &str,
-    ) -> Result<Vec<EmailConnectorSummary>, AppError> {
+    async fn enabled_accounts(&self) -> Result<Vec<EmailConnectorSummary>, AppError> {
         Ok(self
             .list_connections()
             .await?
             .into_iter()
-            .filter(|connection| {
-                connection.enabled && connection.granted_work_ids.iter().any(|id| id == work_id)
-            })
+            .filter(|connection| connection.enabled)
             .collect())
     }
 
@@ -1019,6 +1021,7 @@ impl ConnectorService {
         payload: Value,
         preview: Value,
     ) -> Result<PendingActionRow, AppError> {
+        let approval_required = email_action_requires_approval(action_type);
         self.expire_actions().await?;
         let payload_json = serde_json::to_string(&payload)
             .map_err(|_| AppError::invalid_input("payload", "action payload is invalid"))?;
@@ -1039,17 +1042,35 @@ impl ConnectorService {
         .fetch_optional(&self.pool)
         .await?
         {
-            return Ok(row);
+            if approval_required || matches!(row.status.as_str(), "approved" | "executed") {
+                return Ok(row);
+            }
+            sqlx::query(
+                "UPDATE connector_pending_actions SET status = 'approved', resolved_at = ?,
+                 updated_at = ? WHERE id = ?",
+            )
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .bind(&row.id)
+            .execute(&self.pool)
+            .await?;
+            return self.pending_action(&row.id).await;
         }
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let expires_at = now + chrono::Duration::hours(24);
+        let status = if approval_required {
+            "pending"
+        } else {
+            "approved"
+        };
+        let resolved_at = (!approval_required).then_some(now);
         sqlx::query(
             "INSERT INTO connector_pending_actions (
                 id, connection_id, work_id, run_id, action_type, payload_json,
                 payload_hash, preview_json, idempotency_key, status, expires_at,
-                created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
+                resolved_at, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(connection_id)
@@ -1060,36 +1081,36 @@ impl ConnectorService {
         .bind(&payload_hash)
         .bind(serde_json::to_string(&preview).unwrap_or_else(|_| "{}".into()))
         .bind(&idempotency_key)
+        .bind(status)
         .bind(expires_at)
+        .bind(resolved_at)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
         .await?;
-        let notification = self
-            .insert_notification(
-                "approval",
+        if approval_required {
+            let notification = self
+                .insert_notification(
+                    "approval",
+                    Some(connection_id),
+                    Some(&context.work_id),
+                    "需要确认邮箱操作",
+                    "智能体请求执行删除类邮箱操作。",
+                    json!({ "approvalId": id, "view": "connectors" }),
+                    Some(expires_at),
+                )
+                .await?;
+            self.emit_notification(&notification);
+            self.audit(
                 Some(connection_id),
                 Some(&context.work_id),
-                "需要确认邮箱操作",
-                if action_type == "send_email" {
-                    "智能体请求发送一封邮件。"
-                } else {
-                    "智能体请求读取一封邮件的正文。"
-                },
-                json!({ "approvalId": id, "view": "connectors" }),
-                Some(expires_at),
+                Some(&context.run_id),
+                "approval_requested",
+                "pending",
+                json!({ "actionId": id, "actionType": action_type }),
             )
             .await?;
-        self.emit_notification(&notification);
-        self.audit(
-            Some(connection_id),
-            Some(&context.work_id),
-            Some(&context.run_id),
-            "approval_requested",
-            "pending",
-            json!({ "actionId": id, "actionType": action_type }),
-        )
-        .await?;
+        }
         self.pending_action(&id).await
     }
 
@@ -1393,11 +1414,31 @@ async fn test_smtp(row: &EmailConnectionRow, password: &str) -> Result<(), Strin
     let connected = timeout(CONNECT_TIMEOUT, transport.test_connection())
         .await
         .map_err(|_| "smtp_timeout".to_owned())?
-        .map_err(|_| "smtp_connection".to_owned())?;
+        .map_err(|error| smtp_error_code(&error).to_owned())?;
     if connected {
         Ok(())
     } else {
         Err("smtp_connection".into())
+    }
+}
+
+fn smtp_error_code(error: &SmtpError) -> &'static str {
+    if error.is_timeout() {
+        "smtp_timeout"
+    } else if error.is_tls() {
+        "smtp_tls"
+    } else if error.is_permanent() {
+        "smtp_authentication"
+    } else {
+        "smtp_connection"
+    }
+}
+
+fn connection_test_failure(imap_ok: bool, error_code: String) -> ConnectorTestResult {
+    ConnectorTestResult {
+        imap_ok,
+        smtp_ok: false,
+        error_code: Some(error_code),
     }
 }
 
@@ -1574,6 +1615,10 @@ fn truncate(value: &str, limit: usize) -> String {
     format!("{}...", &value[..end])
 }
 
+fn email_action_requires_approval(action_type: &str) -> bool {
+    action_type.starts_with("delete_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1647,68 +1692,101 @@ mod tests {
         assert_eq!(truncate("企业邮箱", 4), "企...");
     }
 
+    #[test]
+    fn only_destructive_email_actions_require_approval() {
+        assert!(!email_action_requires_approval("read_email_body"));
+        assert!(!email_action_requires_approval("send_email"));
+        assert!(email_action_requires_approval("delete_email"));
+    }
+
+    #[test]
+    fn connection_test_failure_preserves_the_transport_error_code() {
+        let imap = connection_test_failure(false, "imap_authentication".into());
+        assert!(!imap.imap_ok);
+        assert_eq!(imap.error_code.as_deref(), Some("imap_authentication"));
+
+        let smtp = connection_test_failure(true, "smtp_tls".into());
+        assert!(smtp.imap_ok);
+        assert_eq!(smtp.error_code.as_deref(), Some("smtp_tls"));
+    }
+
     #[tokio::test]
-    async fn work_grants_are_enabled_and_permission_scoped() {
-        let (_database, service) = test_service().await;
+    async fn enabled_connectors_are_available_to_every_work() {
+        let (database, service) = test_service().await;
+        for work_id in ["work-1", "future-work"] {
+            for permission in [
+                EMAIL_PERMISSION_METADATA,
+                EMAIL_PERMISSION_READ_BODY,
+                EMAIL_PERMISSION_SEND,
+            ] {
+                service
+                    .authorize(work_id, "connector-1", permission)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        sqlx::query("UPDATE connector_connections SET enabled = 0 WHERE id = 'connector-1'")
+            .execute(database.pool())
+            .await
+            .unwrap();
         assert!(
             service
                 .authorize("work-1", "connector-1", EMAIL_PERMISSION_METADATA)
                 .await
                 .is_err()
         );
-
-        let summary = service
-            .set_work_grant(SetConnectorWorkGrantInput {
-                connection_id: "connector-1".into(),
-                work_id: "work-1".into(),
-                enabled: true,
-                permissions: vec![EMAIL_PERMISSION_METADATA.into()],
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(summary.granted_work_ids, vec!["work-1"]);
-        service
-            .authorize("work-1", "connector-1", EMAIL_PERMISSION_METADATA)
-            .await
-            .unwrap();
-        assert!(
-            service
-                .authorize("work-1", "connector-1", EMAIL_PERMISSION_SEND)
-                .await
-                .is_err()
-        );
     }
 
     #[tokio::test]
-    async fn sensitive_actions_are_idempotent_and_approved_actions_expire() {
+    async fn non_destructive_actions_are_auto_authorized_and_delete_actions_require_approval() {
         let (database, service) = test_service().await;
-        service
-            .set_work_grant(SetConnectorWorkGrantInput {
-                connection_id: "connector-1".into(),
-                work_id: "work-1".into(),
-                enabled: true,
-                permissions: vec![EMAIL_PERMISSION_SEND.into()],
-            })
-            .await
-            .unwrap();
-        let arguments = json!({
+        let payload = json!({
             "connectionId": "connector-1",
             "to": "customer@example.com",
             "subject": "Contract",
             "body": "Please review the contract"
         });
+        let preview = json!({
+            "to": "customer@example.com",
+            "subject": "Contract",
+            "bodyPreview": "Please review the contract"
+        });
 
         let first = service
-            .request_send_email(&run_context(), arguments.clone())
+            .get_or_create_action(
+                &run_context(),
+                "connector-1",
+                "send_email",
+                payload.clone(),
+                preview.clone(),
+            )
             .await
             .unwrap();
         let second = service
-            .request_send_email(&run_context(), arguments)
+            .get_or_create_action(
+                &run_context(),
+                "connector-1",
+                "send_email",
+                payload,
+                preview,
+            )
             .await
             .unwrap();
-        assert_eq!(first["status"], "pending");
-        assert_eq!(first["approvalId"], second["approvalId"]);
+        assert_eq!(first.status, "approved");
+        assert_eq!(first.id, second.id);
+
+        let delete_action = service
+            .get_or_create_action(
+                &run_context(),
+                "connector-1",
+                "delete_email",
+                json!({ "connectionId": "connector-1", "uid": 42 }),
+                json!({ "subject": "Old message" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(delete_action.status, "pending");
         let notification_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM app_notifications WHERE category = 'approval'",
         )
@@ -1717,20 +1795,19 @@ mod tests {
         .unwrap();
         assert_eq!(notification_count, 1);
 
-        let action_id = first["approvalId"].as_str().unwrap();
         service
-            .resolve_pending_action(action_id, true)
+            .resolve_pending_action(&delete_action.id, true)
             .await
             .unwrap();
         assert!(
             service
-                .resolve_pending_action(action_id, false)
+                .resolve_pending_action(&delete_action.id, false)
                 .await
                 .is_err()
         );
         sqlx::query("UPDATE connector_pending_actions SET expires_at = ? WHERE id = ?")
             .bind(Utc::now() - chrono::Duration::seconds(1))
-            .bind(action_id)
+            .bind(&delete_action.id)
             .execute(database.pool())
             .await
             .unwrap();
@@ -1738,7 +1815,7 @@ mod tests {
         service.list_pending_actions(None).await.unwrap();
         let status: String =
             sqlx::query_scalar("SELECT status FROM connector_pending_actions WHERE id = ?")
-                .bind(action_id)
+                .bind(&delete_action.id)
                 .fetch_one(database.pool())
                 .await
                 .unwrap();

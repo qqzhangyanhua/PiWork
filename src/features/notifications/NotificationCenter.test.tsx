@@ -69,4 +69,21 @@ describe("NotificationCenter", () => {
     expect(resolvePendingConnectorAction).toHaveBeenCalledWith("approval-1", approved);
     expect(client.markAppNotificationRead).toHaveBeenCalledWith("notification-1");
   });
+
+  it("refreshes pending actions when the notification center opens", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.listAppNotifications = vi.fn(async () => [notification]);
+    client.listPendingConnectorActions = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([approval]);
+
+    render(<NotificationCenter client={client} onOpenConnectors={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: "通知" }));
+
+    expect(await screen.findByRole("button", { name: "允许" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeInTheDocument();
+    expect(client.listPendingConnectorActions).toHaveBeenCalledTimes(2);
+  });
 });

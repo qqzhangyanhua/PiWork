@@ -22,7 +22,6 @@ import type {
   ExtensionSummary,
   PiWorkClient,
 } from "../../app/tauriClient";
-import type { AgentInstanceSummary } from "../../bindings";
 
 type MarketplaceView = "catalog" | "installed" | "community";
 
@@ -36,12 +35,9 @@ export function ExtensionMarketplacePage({ client }: { client: PiWorkClient }) {
   const { t } = useTranslation();
   const [view, setView] = useState<MarketplaceView>("catalog");
   const [extensions, setExtensions] = useState<ExtensionSummary[]>([]);
-  const [agents, setAgents] = useState<AgentInstanceSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [expandedPackage, setExpandedPackage] = useState<string | null>(null);
-  const [savingGrant, setSavingGrant] = useState<string | null>(null);
-  const [grantError, setGrantError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [community, setCommunity] = useState<CommunityExtensionSummary[]>([]);
   const [searching, setSearching] = useState(false);
@@ -50,12 +46,8 @@ export function ExtensionMarketplacePage({ client }: { client: PiWorkClient }) {
     setLoading(true);
     setLoadError(false);
     try {
-      const [nextExtensions, nextAgents] = await Promise.all([
-        client.listExtensions?.() ?? Promise.resolve([]),
-        client.listAgentInstances(),
-      ]);
+      const nextExtensions = await (client.listExtensions?.() ?? Promise.resolve([]));
       setExtensions(nextExtensions);
-      setAgents(nextAgents);
       setExpandedPackage((current) => current ?? nextExtensions[0]?.packageId ?? null);
     } catch {
       setLoadError(true);
@@ -82,30 +74,6 @@ export function ExtensionMarketplacePage({ client }: { client: PiWorkClient }) {
       setSearching(false);
     }
   };
-  const toggleAgent = async (
-    extension: ExtensionSummary,
-    agent: AgentInstanceSummary,
-    enabled: boolean,
-  ) => {
-    if (!client.setExtensionAgentEnabled) return;
-    const key = `${extension.packageId}:${agent.id}`;
-    setSavingGrant(key);
-    setGrantError(null);
-    try {
-      const updated = await client.setExtensionAgentEnabled(
-        extension.packageId,
-        agent.id,
-        enabled,
-      );
-      setExtensions((current) => current.map((item) =>
-        item.packageId === updated.packageId ? updated : item));
-    } catch {
-      setGrantError(key);
-    } finally {
-      setSavingGrant(null);
-    }
-  };
-
   return (
     <section aria-labelledby="extension-marketplace-title" className="extension-marketplace product-page">
       <header className="product-page__header">
@@ -255,27 +223,7 @@ export function ExtensionMarketplacePage({ client }: { client: PiWorkClient }) {
                       </section>
                       <section className="extension-agent-access">
                         <h3><UsersRound aria-hidden="true" size={14} />{t("extensions.agentAccess")}</h3>
-                        <div>
-                          {agents.map((agent) => {
-                            const key = `${extension.packageId}:${agent.id}`;
-                            const checked = extension.enabledAgentIds.includes(agent.id);
-                            return (
-                              <label key={agent.id}>
-                                <input
-                                  checked={checked}
-                                  disabled={savingGrant === key || extension.lifecycleStatus === "revoked"}
-                                  onChange={(event) => void toggleAgent(extension, agent, event.target.checked)}
-                                  type="checkbox"
-                                />
-                                <span><strong>{agent.displayName}</strong><small>{t(`agentCenter.member.roles.${agent.definition.roleKind}`)}</small></span>
-                                {checked && <Check aria-hidden="true" size={13} />}
-                              </label>
-                            );
-                          })}
-                        </div>
-                        {grantError?.startsWith(`${extension.packageId}:`) && (
-                          <p className="extension-agent-access__error" role="alert">{t("extensions.grantError")}</p>
-                        )}
+                        <p className="extension-agent-access__global"><Check aria-hidden="true" size={13} />{t("extensions.allAgents")}</p>
                       </section>
                     </div>
                   )}

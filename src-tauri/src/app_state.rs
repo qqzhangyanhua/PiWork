@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     agent::service::AgentService, assignment::service::AssignmentService,
-    connectors::ConnectorService, extensions::ExtensionService, model::ModelService,
-    resource::service::ResourceService, work::service::WorkService,
+    connectors::ConnectorService, extensions::ExtensionService, memory::WorkspaceMemoryService,
+    model::ModelService, resource::service::ResourceService, work::service::WorkService,
 };
 
 pub struct AppState {
@@ -14,6 +14,7 @@ pub struct AppState {
     assignment_service: Option<Arc<AssignmentService>>,
     extension_service: Option<Arc<ExtensionService>>,
     connector_service: Option<Arc<ConnectorService>>,
+    memory_service: Option<Arc<WorkspaceMemoryService>>,
 }
 
 impl AppState {
@@ -26,6 +27,7 @@ impl AppState {
             assignment_service: None,
             extension_service: None,
             connector_service: None,
+            memory_service: None,
         }
     }
 
@@ -42,6 +44,7 @@ impl AppState {
             assignment_service: None,
             extension_service: None,
             connector_service: None,
+            memory_service: None,
         }
     }
 
@@ -59,6 +62,7 @@ impl AppState {
             assignment_service: None,
             extension_service: None,
             connector_service: None,
+            memory_service: None,
         }
     }
 
@@ -74,6 +78,11 @@ impl AppState {
 
     pub fn with_connector_service(mut self, connector_service: Arc<ConnectorService>) -> Self {
         self.connector_service = Some(connector_service);
+        self
+    }
+
+    pub fn with_memory_service(mut self, memory_service: Arc<WorkspaceMemoryService>) -> Self {
+        self.memory_service = Some(memory_service);
         self
     }
 
@@ -113,5 +122,11 @@ impl AppState {
         self.connector_service
             .as_ref()
             .expect("production AppState must include ConnectorService")
+    }
+
+    pub fn memory_service(&self) -> &Arc<WorkspaceMemoryService> {
+        self.memory_service
+            .as_ref()
+            .expect("production AppState must include WorkspaceMemoryService")
     }
 }

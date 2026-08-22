@@ -295,6 +295,47 @@ button {
   letter-spacing: -0.02em;
 }
 
+.codo-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--codo-logo-size) * 0.22);
+}
+
+.codo-logo__mark {
+  display: block;
+  width: auto;
+  height: var(--codo-logo-size);
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.codo-logo__wordmark {
+  display: block;
+  width: auto;
+  height: calc(var(--codo-logo-size) * 0.68);
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+
+.codo-logo--signature {
+  display: block;
+  line-height: 0;
+}
+
+.codo-logo__signature {
+  display: block;
+  width: auto;
+  height: var(--codo-logo-size);
+}
+
+.codo-logo__wordmark img,
+.codo-logo__signature img {
+  display: block;
+  width: auto;
+  height: 100%;
+  object-fit: contain;
+}
+
 .field-error {
   margin: 6px 0 0;
   color: var(--pw-failure-500);

@@ -32,7 +32,8 @@ use crate::{
     },
     engine::{
         EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineRunIdentity,
-        EngineSessionRef, WAITING_ON_ASSIGNMENTS_REASON, publisher::EventPublisher,
+        EngineSessionRef, RunCapabilityManifest, WAITING_ON_ASSIGNMENTS_REASON,
+        publisher::EventPublisher,
     },
     error::AppError,
     work::repository::WorkRepository,
@@ -169,6 +170,12 @@ impl EngineHarness {
             session.generation,
         )
         .map_err(|error| AppError::engine(error.to_string()))?;
+        let host_tool_ids = role_tool_allowlist(agent.definition.role_kind);
+        let expert_pack_ids = assignment
+            .capability_pack_id
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let context = EngineRunContext::new(
             identity,
             PathBuf::from(&work.root_path),
@@ -176,7 +183,8 @@ impl EngineHarness {
             agent.model_configuration_override.clone(),
             effective_permission,
         )
-        .map_err(|error| AppError::engine(error.to_string()))?;
+        .map_err(|error| AppError::engine(error.to_string()))?
+        .with_capability_manifest(RunCapabilityManifest::new(expert_pack_ids, host_tool_ids));
 
         // Issue a role-scoped host tool lease before starting the engine. The
         // guard revokes it on every exit path (including startup failure and
@@ -196,7 +204,7 @@ impl EngineHarness {
                         assignment_id: assignment.id.clone(),
                         agent_instance_id: agent.id.clone(),
                         runtime_owner: runtime_owner.clone(),
-                        allowed_tools: role_tool_allowlist(agent.definition.role_kind),
+                        allowed_tools: context.capability_manifest().host_tool_ids().to_vec(),
                     },
                     endpoint,
                 );

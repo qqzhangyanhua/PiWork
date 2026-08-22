@@ -72,10 +72,8 @@ export function buildExecutionProgress(
     (left, right) => left.sequence - right.sequence,
   );
   const tools = new Map<string, ToolRecord>();
-  let terminal: Extract<
-    WorkEventEnvelope["payload"],
-    { type: "runCompleted" | "runFailed" }
-  > | null = null;
+  let terminalStatus: "completed" | "failed" | null = null;
+  let failureMessage: string | null = null;
   let waitingReason: string | null = null;
 
   for (const { payload } of sortedEvents) {
@@ -106,11 +104,16 @@ export function buildExecutionProgress(
         phaseSource: hasAuthoritativePhase ? "input" : "output",
         failed: (previous?.failed ?? false) || !payload.success,
       });
+    } else if (payload.type === "runFailed") {
+      terminalStatus = "failed";
+      failureMessage = payload.message;
     } else if (
       payload.type === "runCompleted" ||
-      payload.type === "runFailed"
+      payload.type === "assignmentCompleted" ||
+      payload.type === "workDeliveryCompleted"
     ) {
-      terminal = payload;
+      terminalStatus = "completed";
+      failureMessage = null;
     } else if (payload.type === "waiting") {
       waitingReason = payload.reason;
     }
@@ -132,17 +135,15 @@ export function buildExecutionProgress(
       ? id
       : highest;
   }, null);
-  const terminalFailed = terminal?.type === "runFailed";
-  const status: ExecutionProgressModel["status"] = terminal
-    ? terminalFailed
-      ? "failed"
-      : "completed"
+  const terminalFailed = terminalStatus === "failed";
+  const status: ExecutionProgressModel["status"] = terminalStatus
+    ? terminalStatus
     : waitingReason
       ? "waiting"
     : tools.size === 0
       ? "preparing"
       : "running";
-  const currentPhase: ExecutionPhaseId = terminal
+  const currentPhase: ExecutionPhaseId = terminalStatus
     ? "deliver"
     : highestVisited ?? "prepare";
 
@@ -151,7 +152,7 @@ export function buildExecutionProgress(
       return {
         id,
         status:
-          tools.size === 0 && !terminal && !waitingReason
+          tools.size === 0 && !terminalStatus && !waitingReason
             ? "active"
             : "completed",
         toolCount: 0,
@@ -161,7 +162,7 @@ export function buildExecutionProgress(
     if (id === "deliver") {
       return {
         id,
-        status: terminal ? (terminalFailed ? "failed" : "completed") : "pending",
+        status: terminalStatus ? (terminalFailed ? "failed" : "completed") : "pending",
         toolCount: 0,
         failedToolCount: 0,
       };
@@ -170,7 +171,7 @@ export function buildExecutionProgress(
     const records = phaseTools.get(id) ?? [];
     const failedToolCount = records.filter(({ failed }) => failed).length;
     let phaseStatus: ExecutionPhaseStatus;
-    if (terminal || waitingReason) {
+    if (terminalStatus || waitingReason) {
       if (records.length === 0) {
         phaseStatus = "skipped";
       } else if (terminalFailed && id === highestVisited) {
@@ -210,7 +211,7 @@ export function buildExecutionProgress(
     phases,
     toolCount: tools.size,
     failedToolCount,
-    failureMessage: terminal?.type === "runFailed" ? terminal.message : null,
+    failureMessage,
     waitingReason,
   };
 }
