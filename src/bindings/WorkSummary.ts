@@ -2,4 +2,4 @@
 import type { PermissionMode } from "./PermissionMode";
 import type { WorkStatus } from "./WorkStatus";
 
-export type WorkSummary = { id: string, title: string, goal: string, rootPath: string, permissionMode: PermissionMode, status: WorkStatus, createdAt: string, updatedAt: string, };
+export type WorkSummary = { id: string, workspaceId: string, title: string, goal: string, rootPath: string, permissionMode: PermissionMode, status: WorkStatus, createdAt: string, updatedAt: string, };

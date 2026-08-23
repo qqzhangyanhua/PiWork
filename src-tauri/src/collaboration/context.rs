@@ -130,6 +130,7 @@ impl Default for ContextBuildInput {
             agent_memory: Vec::new(),
             work: WorkSummary {
                 id: String::new(),
+                workspace_id: String::new(),
                 title: String::new(),
                 goal: String::new(),
                 root_path: String::new(),

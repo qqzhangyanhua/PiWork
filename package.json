@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:document-runtime:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-document-runtime.ps1 -Profile debug",
+    "build:document-runtime:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-document-runtime.ps1 -Profile release",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",

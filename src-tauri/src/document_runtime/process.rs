@@ -7,8 +7,7 @@ use tokio::{
 };
 
 use super::{
-    DocumentFailureCode, DocumentRequest, DocumentResult, DocumentRuntime, DocumentRuntimeError,
-    DocumentRuntimeResponse,
+    DocumentRequest, DocumentResult, DocumentRuntime, DocumentRuntimeError, DocumentRuntimeResponse,
 };
 
 const DOCUMENT_RUNTIME_TIMEOUT: Duration = Duration::from_secs(120);
@@ -18,12 +17,22 @@ const MAX_STDERR_BYTES: usize = 8 * 1024;
 #[derive(Clone)]
 pub struct ProcessDocumentRuntime {
     derivative_root: Arc<PathBuf>,
+    executable: Arc<PathBuf>,
 }
 
 impl ProcessDocumentRuntime {
     pub fn new(derivative_root: PathBuf) -> Self {
+        let executable = document_runtime_executable();
         Self {
             derivative_root: Arc::new(derivative_root),
+            executable: Arc::new(executable),
+        }
+    }
+
+    pub fn with_executable(derivative_root: PathBuf, executable: PathBuf) -> Self {
+        Self {
+            derivative_root: Arc::new(derivative_root),
+            executable: Arc::new(executable),
         }
     }
 }
@@ -34,10 +43,8 @@ impl DocumentRuntime for ProcessDocumentRuntime {
         &self,
         request: DocumentRequest,
     ) -> Result<DocumentResult, DocumentRuntimeError> {
-        let executable = std::env::current_exe().map_err(|_| DocumentRuntimeError::Unavailable)?;
-        let mut command = Command::new(executable);
+        let mut command = Command::new(self.executable.as_ref());
         command
-            .arg("--document-runtime")
             .arg(self.derivative_root.as_ref())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -94,6 +101,21 @@ impl DocumentRuntime for ProcessDocumentRuntime {
     }
 }
 
+fn document_runtime_executable() -> PathBuf {
+    let name = if cfg!(windows) {
+        "piwork-document-runtime.exe"
+    } else {
+        "piwork-document-runtime"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(PathBuf::from))
+        .map_or_else(
+            || PathBuf::from(name),
+            |parent| parent.join("document-runtime").join(name),
+        )
+}
+
 async fn read_bounded(
     stream: impl AsyncRead + Unpin,
     limit: usize,
@@ -108,28 +130,4 @@ async fn read_bounded(
         return Err(DocumentRuntimeError::Unavailable);
     }
     Ok(bytes)
-}
-
-impl From<DocumentFailureCode> for DocumentRuntimeError {
-    fn from(code: DocumentFailureCode) -> Self {
-        match code {
-            DocumentFailureCode::InvalidRequest => Self::InvalidRequest,
-            DocumentFailureCode::ParseFailed => Self::ParseFailed,
-            DocumentFailureCode::OcrFailed => Self::OcrFailed,
-            DocumentFailureCode::OutputTooLarge => Self::OutputTooLarge,
-            DocumentFailureCode::Unavailable => Self::Unavailable,
-        }
-    }
-}
-
-impl From<&DocumentRuntimeError> for DocumentFailureCode {
-    fn from(error: &DocumentRuntimeError) -> Self {
-        match error {
-            DocumentRuntimeError::InvalidRequest => Self::InvalidRequest,
-            DocumentRuntimeError::ParseFailed => Self::ParseFailed,
-            DocumentRuntimeError::OcrFailed => Self::OcrFailed,
-            DocumentRuntimeError::OutputTooLarge => Self::OutputTooLarge,
-            DocumentRuntimeError::Unavailable | DocumentRuntimeError::Timeout => Self::Unavailable,
-        }
-    }
 }

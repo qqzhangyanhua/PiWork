@@ -7,6 +7,7 @@ use crate::{
         WorkSummary,
     },
     error::AppError,
+    execution::{ExecutionCommand, WorkInput},
     paths::AppPaths,
 };
 
@@ -53,7 +54,18 @@ pub async fn start_work(
     input: StartWorkInput,
 ) -> Result<StartWorkOutput, AppError> {
     state.model_service().require_configured().await?;
-    state.work_service().start_work(&work_id, input).await
+    state
+        .execution_coordinator()
+        .submit(
+            &work_id,
+            WorkInput {
+                instruction: input.prompt,
+                referenced_files: input.referenced_files,
+                resource_ids: input.resource_ids,
+            },
+        )
+        .await
+        .map(|receipt| receipt.output)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -61,7 +73,11 @@ pub async fn stop_work(
     state: State<'_, AppState>,
     work_id: String,
 ) -> Result<WorkDetail, AppError> {
-    state.work_service().stop_work(&work_id).await
+    state
+        .execution_coordinator()
+        .control(&work_id, ExecutionCommand::Stop)
+        .await
+        .map(|receipt| receipt.work)
 }
 
 #[tauri::command(rename_all = "camelCase")]

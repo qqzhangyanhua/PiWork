@@ -432,6 +432,7 @@ export const createMockTauriClient = (): MockTauriClient => {
     const id = `work-${++workSequence}`;
     const summary: WorkSummary = {
       id,
+      workspaceId: `workspace-${id}`,
       title: input.title,
       goal: input.goal,
       rootPath: input.rootPath,

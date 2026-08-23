@@ -13,6 +13,7 @@ use piwork_lib::{
 fn work() -> WorkSummary {
     WorkSummary {
         id: "work-1".into(),
+        workspace_id: "workspace-1".into(),
         title: "Ship".into(),
         goal: "Build the foundation".into(),
         root_path: "/workspace".into(),

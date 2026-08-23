@@ -8,6 +8,7 @@ import { AllWorks } from "./AllWorks";
 
 const work = (id: string, title: string, status: WorkSummary["status"]): WorkSummary => ({
   id,
+  workspaceId: `workspace-${id}`,
   title,
   goal: title,
   rootPath: `D:\\workspace\\${id}`,

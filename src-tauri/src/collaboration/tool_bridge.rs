@@ -65,6 +65,7 @@ impl fmt::Debug for HostToolToken {
 /// The context that authorizes one Run's host-tool lease.
 #[derive(Debug, Clone)]
 pub struct AuthorizedRunContext {
+    pub capability_snapshot_id: Option<String>,
     pub run_id: String,
     pub work_id: String,
     pub assignment_id: String,
@@ -168,6 +169,7 @@ mod tests {
 
     fn context(run_id: &str) -> AuthorizedRunContext {
         AuthorizedRunContext {
+            capability_snapshot_id: None,
             run_id: run_id.to_owned(),
             work_id: "work-1".to_owned(),
             assignment_id: "assignment-1".to_owned(),

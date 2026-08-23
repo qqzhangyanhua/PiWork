@@ -452,7 +452,13 @@ impl ConnectorService {
         if !work_exists {
             return Err(AppError::work_not_found(input.work_id));
         }
+        let workspace_id =
+            sqlx::query_scalar::<_, String>("SELECT workspace_id FROM works WHERE id = ?")
+                .bind(&input.work_id)
+                .fetch_one(&self.pool)
+                .await?;
         if input.enabled {
+            let permissions_json = serde_json::to_string(&allowed).unwrap_or_else(|_| "[]".into());
             sqlx::query(
                 "INSERT INTO connector_work_grants
                  (connection_id, work_id, permissions_json, created_at, updated_at)
@@ -462,11 +468,14 @@ impl ConnectorService {
             )
             .bind(&input.connection_id)
             .bind(&input.work_id)
-            .bind(serde_json::to_string(&allowed).unwrap_or_else(|_| "[]".into()))
+            .bind(&permissions_json)
             .bind(Utc::now())
             .bind(Utc::now())
             .execute(&self.pool)
             .await?;
+            sqlx::query("INSERT INTO connector_workspace_grants (connection_id, workspace_id, permissions_json, has_conflict, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?) ON CONFLICT(connection_id, workspace_id) DO UPDATE SET permissions_json = excluded.permissions_json, has_conflict = 0, updated_at = excluded.updated_at")
+                .bind(&input.connection_id).bind(&workspace_id).bind(&permissions_json).bind(Utc::now()).bind(Utc::now())
+                .execute(&self.pool).await?;
         } else {
             sqlx::query(
                 "DELETE FROM connector_work_grants WHERE connection_id = ? AND work_id = ?",
@@ -475,6 +484,8 @@ impl ConnectorService {
             .bind(&input.work_id)
             .execute(&self.pool)
             .await?;
+            sqlx::query("DELETE FROM connector_workspace_grants WHERE connection_id = ? AND workspace_id = ?")
+                .bind(&input.connection_id).bind(&workspace_id).execute(&self.pool).await?;
         }
         self.connection_summary(&input.connection_id).await
     }
@@ -973,7 +984,7 @@ impl ConnectorService {
 
     async fn authorize(
         &self,
-        _work_id: &str,
+        work_id: &str,
         connection_id: &str,
         permission: &str,
     ) -> Result<(), AppError> {
@@ -994,13 +1005,35 @@ impl ConnectorService {
                 .ok_or_else(|| {
                     AppError::invalid_input("connectionId", "connector was not found")
                 })?;
-        if enabled {
-            Ok(())
-        } else {
+        if !enabled {
             Err(AppError::invalid_input(
                 "connectionId",
                 "connector is disabled",
             ))
+        } else {
+            let grant = sqlx::query_as::<_, (String, bool)>(
+                "SELECT grants.permissions_json, grants.has_conflict FROM connector_workspace_grants grants INNER JOIN works ON works.workspace_id = grants.workspace_id WHERE grants.connection_id = ? AND works.id = ?",
+            )
+            .bind(connection_id)
+            .bind(work_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some((permissions_json, false)) = grant else {
+                return Err(AppError::invalid_input(
+                    "permission",
+                    "connector is not granted to this Workspace",
+                ));
+            };
+            let permissions =
+                serde_json::from_str::<Vec<String>>(&permissions_json).unwrap_or_default();
+            if permissions.iter().any(|granted| granted == permission) {
+                Ok(())
+            } else {
+                Err(AppError::invalid_input(
+                    "permission",
+                    "connector permission is not granted to this Workspace",
+                ))
+            }
         }
     }
 
@@ -1663,12 +1696,20 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
+        let workspace_id: String =
+            sqlx::query_scalar("SELECT workspace_id FROM works WHERE id = 'work-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        sqlx::query("INSERT INTO connector_workspace_grants (connection_id, workspace_id, permissions_json, has_conflict, created_at, updated_at) VALUES ('connector-1', ?, '[\"metadata\",\"read_body\",\"send\"]', 0, ?, ?)")
+            .bind(workspace_id).bind(now).bind(now).execute(database.pool()).await.unwrap();
         let service = ConnectorService::new(database.pool().clone(), None);
         (database, service)
     }
 
     fn run_context() -> AuthorizedRunContext {
         AuthorizedRunContext {
+            capability_snapshot_id: None,
             run_id: "run-1".into(),
             work_id: "work-1".into(),
             assignment_id: "assignment-1".into(),
@@ -1711,20 +1752,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabled_connectors_are_available_to_every_work() {
+    async fn enabled_connectors_require_an_explicit_workspace_grant() {
         let (database, service) = test_service().await;
-        for work_id in ["work-1", "future-work"] {
-            for permission in [
-                EMAIL_PERMISSION_METADATA,
-                EMAIL_PERMISSION_READ_BODY,
-                EMAIL_PERMISSION_SEND,
-            ] {
-                service
-                    .authorize(work_id, "connector-1", permission)
-                    .await
-                    .unwrap();
-            }
+        for permission in [
+            EMAIL_PERMISSION_METADATA,
+            EMAIL_PERMISSION_READ_BODY,
+            EMAIL_PERMISSION_SEND,
+        ] {
+            service
+                .authorize("work-1", "connector-1", permission)
+                .await
+                .unwrap();
         }
+        assert!(
+            service
+                .authorize("future-work", "connector-1", EMAIL_PERMISSION_METADATA)
+                .await
+                .is_err()
+        );
 
         sqlx::query("UPDATE connector_connections SET enabled = 0 WHERE id = 'connector-1'")
             .execute(database.pool())

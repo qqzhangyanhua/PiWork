@@ -1,0 +1,1 @@
+The generated `piwork-document-runtime.exe` helper is copied into this directory by `pnpm build:document-runtime:debug` or `pnpm build:document-runtime:release`. The executable is intentionally ignored; keeping the resource directory versioned lets Cargo and Tauri configuration load from a clean checkout before the helper build runs.

@@ -96,10 +96,7 @@ const statusForEvent = (
   if (event.payload.type === "waiting") {
     return "waiting";
   }
-  if (
-    event.payload.type === "runCompleted" ||
-    event.payload.type === "workDeliveryCompleted"
-  ) {
+  if (event.payload.type === "workDeliveryCompleted") {
     return "completed";
   }
   if (event.payload.type === "runFailed") {

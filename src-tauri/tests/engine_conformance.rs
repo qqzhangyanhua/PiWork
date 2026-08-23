@@ -8,8 +8,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use piwork_lib::{
+    capability::RunCapabilitySnapshot,
     domain::{
+        agent::RoleKind,
         event::{LivenessState, SessionTransition},
         work::PermissionMode,
     },
@@ -41,7 +44,7 @@ fn input(message: &str) -> EngineInput {
 }
 
 fn context(run_id: &str, generation: u32) -> EngineRunContext {
-    EngineRunContext::new(
+    let context = EngineRunContext::new(
         EngineRunIdentity::new(
             CONTRACT_WORK_ID.into(),
             run_id.into(),
@@ -56,7 +59,25 @@ fn context(run_id: &str, generation: u32) -> EngineRunContext {
         Some("model-configuration-contract".into()),
         PermissionMode::AskEveryStep,
     )
-    .unwrap()
+    .unwrap();
+    let workspace_root = context.root_path().to_path_buf();
+    context.with_capability_snapshot(RunCapabilitySnapshot {
+        id: format!("snapshot-{run_id}"),
+        schema_version: 1,
+        run_id: run_id.into(),
+        work_id: CONTRACT_WORK_ID.into(),
+        assignment_id: format!("assignment-{run_id}"),
+        agent_instance_id: "agent-instance-contract".into(),
+        role_kind: RoleKind::Lead,
+        permission_mode: PermissionMode::AskEveryStep,
+        workspace_root,
+        expert_pack_ids: Vec::new(),
+        host_tool_ids: Vec::new(),
+        extension_tool_ids: Vec::new(),
+        created_at: Utc::now(),
+        expires_at: None,
+        revoked_at: None,
+    })
 }
 
 #[test]

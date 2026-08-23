@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use crate::{
     agent::service::AgentService, assignment::service::AssignmentService,
-    connectors::ConnectorService, extensions::ExtensionService, memory::WorkspaceMemoryService,
-    model::ModelService, resource::service::ResourceService, work::service::WorkService,
+    connectors::ConnectorService, execution::ExecutionCoordinator, extensions::ExtensionService,
+    memory::WorkspaceMemoryService, model::ModelService, resource::service::ResourceService,
+    work::service::WorkService,
 };
 
 pub struct AppState {
@@ -12,6 +13,7 @@ pub struct AppState {
     resource_service: Option<Arc<ResourceService>>,
     agent_service: Arc<AgentService>,
     assignment_service: Option<Arc<AssignmentService>>,
+    execution_coordinator: Option<Arc<ExecutionCoordinator>>,
     extension_service: Option<Arc<ExtensionService>>,
     connector_service: Option<Arc<ConnectorService>>,
     memory_service: Option<Arc<WorkspaceMemoryService>>,
@@ -25,6 +27,7 @@ impl AppState {
             resource_service: None,
             agent_service,
             assignment_service: None,
+            execution_coordinator: None,
             extension_service: None,
             connector_service: None,
             memory_service: None,
@@ -42,6 +45,7 @@ impl AppState {
             resource_service: None,
             agent_service,
             assignment_service: None,
+            execution_coordinator: None,
             extension_service: None,
             connector_service: None,
             memory_service: None,
@@ -60,6 +64,7 @@ impl AppState {
             resource_service: Some(resource_service),
             agent_service,
             assignment_service: None,
+            execution_coordinator: None,
             extension_service: None,
             connector_service: None,
             memory_service: None,
@@ -68,6 +73,14 @@ impl AppState {
 
     pub fn with_assignment_service(mut self, assignment_service: Arc<AssignmentService>) -> Self {
         self.assignment_service = Some(assignment_service);
+        self
+    }
+
+    pub fn with_execution_coordinator(
+        mut self,
+        execution_coordinator: Arc<ExecutionCoordinator>,
+    ) -> Self {
+        self.execution_coordinator = Some(execution_coordinator);
         self
     }
 
@@ -110,6 +123,12 @@ impl AppState {
         self.assignment_service
             .as_ref()
             .expect("production AppState must include AssignmentService")
+    }
+
+    pub fn execution_coordinator(&self) -> &Arc<ExecutionCoordinator> {
+        self.execution_coordinator
+            .as_ref()
+            .expect("production AppState must include ExecutionCoordinator")
     }
 
     pub fn extension_service(&self) -> &Arc<ExtensionService> {

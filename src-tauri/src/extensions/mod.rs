@@ -401,8 +401,8 @@ impl ExtensionService {
 
     pub async fn runtime_snapshot(
         &self,
-        _agent_instance_id: &str,
-        _work_id: &str,
+        agent_instance_id: &str,
+        work_id: &str,
     ) -> Result<ExtensionRuntimeSnapshot, AppError> {
         let lifecycle_status = sqlx::query_scalar::<_, String>(
             "SELECT lifecycle_status FROM extension_packages WHERE package_id = ?",
@@ -412,6 +412,33 @@ impl ExtensionService {
         .await?;
         if lifecycle_status.as_deref() != Some("installed") {
             return Ok(ExtensionRuntimeSnapshot::default());
+        }
+        let agent_grant = sqlx::query_as::<_, (bool, String)>(
+            "SELECT enabled, tool_allowlist_json FROM extension_agent_grants WHERE package_id = ? AND agent_instance_id = ?",
+        )
+        .bind(WEB_ACCESS_PACKAGE_ID)
+        .bind(agent_instance_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((true, agent_tools_json)) = agent_grant else {
+            return Ok(ExtensionRuntimeSnapshot::default());
+        };
+        let mut granted_tools =
+            serde_json::from_str::<BTreeSet<String>>(&agent_tools_json).unwrap_or_default();
+        let workspace_policy = sqlx::query_as::<_, (bool, String, bool)>(
+            "SELECT policies.enabled, policies.tool_allowlist_json, policies.has_conflict FROM extension_workspace_policies policies INNER JOIN works ON works.workspace_id = policies.workspace_id WHERE policies.package_id = ? AND works.id = ?",
+        )
+        .bind(WEB_ACCESS_PACKAGE_ID)
+        .bind(work_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some((enabled, workspace_tools_json, has_conflict)) = workspace_policy {
+            if !enabled || has_conflict {
+                return Ok(ExtensionRuntimeSnapshot::default());
+            }
+            let workspace_tools =
+                serde_json::from_str::<BTreeSet<String>>(&workspace_tools_json).unwrap_or_default();
+            granted_tools.retain(|tool| workspace_tools.contains(tool));
         }
         let settings = self.web_access_settings().await?;
         if !settings.enabled {
@@ -497,6 +524,10 @@ impl ExtensionService {
         }
         if fetch_enabled {
             tool_ids.extend(["fetch_content".to_owned(), "get_search_content".to_owned()]);
+        }
+        tool_ids.retain(|tool| granted_tools.contains(tool));
+        if tool_ids.is_empty() {
+            return Ok(ExtensionRuntimeSnapshot::default());
         }
         Ok(ExtensionRuntimeSnapshot {
             extension_paths: vec![entry],
@@ -687,7 +718,12 @@ struct NpmSearchScore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::sqlite::Database;
+    use crate::{
+        agent::repository::DEFAULT_LEAD_INSTANCE_ID,
+        domain::work::{CreateWorkInput, PermissionMode},
+        storage::sqlite::Database,
+        work::repository::WorkRepository,
+    };
 
     #[test]
     fn tool_allowlists_are_normalized_and_reject_unknown_tools() {
@@ -699,7 +735,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabled_builtin_extension_is_available_without_agent_or_work_grants() {
+    async fn enabled_builtin_extension_requires_an_explicit_agent_grant() {
         let database = Database::open_in_memory().await.unwrap();
         sqlx::query(
             "UPDATE web_access_settings SET enabled = 1, url_fetch_enabled = 1, \
@@ -717,8 +753,38 @@ mod tests {
         std::fs::write(&entry, "export default () => {};").unwrap();
         let service = ExtensionService::new(database.pool().clone(), Some(entry)).unwrap();
 
+        let denied = service
+            .runtime_snapshot(DEFAULT_LEAD_INSTANCE_ID, "work-future")
+            .await
+            .unwrap();
+        assert!(denied.tool_ids.is_empty());
+
+        let work = WorkRepository::new(database.pool().clone())
+            .create(CreateWorkInput {
+                title: "Web research".into(),
+                goal: "Use an explicitly granted extension".into(),
+                root_path: temporary.path().to_string_lossy().into_owned(),
+                permission_mode: PermissionMode::Balanced,
+                resource_draft_id: None,
+            })
+            .await
+            .unwrap();
+        service
+            .set_agent_enabled(
+                WEB_ACCESS_PACKAGE_ID,
+                DEFAULT_LEAD_INSTANCE_ID,
+                true,
+                vec![
+                    "web_search".into(),
+                    "source_check".into(),
+                    "fetch_content".into(),
+                    "get_search_content".into(),
+                ],
+            )
+            .await
+            .unwrap();
         let snapshot = service
-            .runtime_snapshot("agent-instance:future", "work-future")
+            .runtime_snapshot(DEFAULT_LEAD_INSTANCE_ID, &work.summary.id)
             .await
             .unwrap();
 

@@ -567,7 +567,7 @@ async fn scheduler_injects_only_the_assignment_selected_capability_pack() {
     );
     let handle = scheduler.spawn();
     handle.wake().unwrap();
-    wait_for_assignment_status(&repository, &assignment.id, AssignmentStatus::Completed).await;
+    wait_for_assignment_status(&repository, &assignment.id, AssignmentStatus::DeadLetter).await;
 
     let prompts = engine.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
@@ -589,7 +589,7 @@ async fn lead_resume_waiting_releases_the_work_slot_and_runs_the_child() {
     let repository =
         AssignmentRepository::with_event_sink(pool.clone(), Arc::clone(&publisher) as _);
     let work_repository = WorkRepository::new(pool.clone());
-    let agent_repository = AgentRepository::new(pool);
+    let agent_repository = AgentRepository::new(pool.clone());
     let engine = Arc::new(WaitingLoopEngine::default());
     let scheduler = AssignmentScheduler::new(
         repository.clone(),
@@ -605,6 +605,10 @@ async fn lead_resume_waiting_releases_the_work_slot_and_runs_the_child() {
         repository.clone(),
         WorkRepository::new(database.pool().clone()),
         agent_repository,
+        handle.clone(),
+    );
+    let member_service = piwork_lib::collaboration::service::MemberResultService::new(
+        repository.clone(),
         handle.clone(),
     );
 
@@ -647,6 +651,26 @@ async fn lead_resume_waiting_releases_the_work_slot_and_runs_the_child() {
         "the child must acquire the same-Work slot after the Lead yields"
     );
 
+    let child_run_id: String = sqlx::query_scalar(
+        "SELECT id FROM runs WHERE assignment_id = ? AND status = 'running' ORDER BY attempt_number DESC LIMIT 1",
+    )
+    .bind(&delegated.assignment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut envelope = valid_result_envelope();
+    envelope.evidence[0].assignment_id = delegated.assignment_id.clone();
+    member_service
+        .submit_assignment_result(piwork_lib::collaboration::service::MemberResultSubmission {
+            work_id: "work-waiting-loop".into(),
+            assignment_id: delegated.assignment_id.clone(),
+            run_id: child_run_id,
+            author_agent_id: "agent-instance:piwork-researcher".into(),
+            runtime_owner: "waiting-loop-owner".into(),
+            envelope,
+        })
+        .await
+        .unwrap();
     engine.release_second.notify_one();
     wait_for_assignment_status(
         &repository,
@@ -655,7 +679,12 @@ async fn lead_resume_waiting_releases_the_work_slot_and_runs_the_child() {
     )
     .await;
     handle.wake().unwrap();
-    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Completed).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while engine.started_assignments.lock().unwrap().len() < 3 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Waiting).await;
     assert_eq!(
         engine.started_assignments.lock().unwrap().as_slice(),
         [
@@ -756,7 +785,7 @@ async fn lead_resume_context_includes_validated_dependency_results() {
     );
     let handle = scheduler.spawn();
     handle.wake().unwrap();
-    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Completed).await;
+    wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Waiting).await;
 
     let prompts = engine.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
@@ -825,6 +854,7 @@ async fn harness_accepts_completion_already_committed_by_a_host_tool() {
                 },
                 effective_permission: PermissionMode::Balanced,
                 runtime_owner: "host-completion-owner".into(),
+                extension_tool_ids: Vec::new(),
             })
             .await
     });
@@ -938,7 +968,7 @@ async fn seed_running_member_assignment(
     repository: &AssignmentRepository,
     pool: &sqlx::SqlitePool,
     work_id: &str,
-) -> String {
+) -> (String, String) {
     let child = repository
         .accept(AcceptAssignmentInput {
             id: None,
@@ -975,7 +1005,7 @@ async fn seed_running_member_assignment(
         .await
         .unwrap();
     let _ = pool;
-    child.id
+    (child.id, run.id)
 }
 
 fn valid_result_envelope() -> ResultEnvelope {
@@ -1019,7 +1049,8 @@ async fn member_submits_a_valid_result_and_completes() {
 
     // Seed and run the member assignment before the scheduler starts so the two
     // do not race to claim the same queued Assignment.
-    let child_id = seed_running_member_assignment(&repository, &pool, "work-member").await;
+    let (child_id, run_id) =
+        seed_running_member_assignment(&repository, &pool, "work-member").await;
 
     let scheduler = AssignmentScheduler::new(
         repository.clone(),
@@ -1041,7 +1072,7 @@ async fn member_submits_a_valid_result_and_completes() {
         .submit_assignment_result(piwork_lib::collaboration::service::MemberResultSubmission {
             work_id: "work-member".into(),
             assignment_id: child_id.clone(),
-            run_id: "run-1".into(),
+            run_id,
             author_agent_id: "agent-instance:piwork-researcher".into(),
             runtime_owner: "member-owner".into(),
             envelope,
@@ -1321,6 +1352,7 @@ async fn lead_records_decisions_plan_and_delivery() {
         )
         .await
         .unwrap();
+    std::fs::write(temp.path().join("notes.md"), "Delivered notes").unwrap();
     let completed = service
         .complete_work_delivery(
             &lead_id,

@@ -120,24 +120,11 @@ async fn repository_lists_builtin_instances_and_capabilities() {
         ]
     );
 
-    let catalog = packs
-        .iter()
-        .filter(|pack| pack.catalog_capability_id.is_some())
-        .collect::<Vec<_>>();
-    assert_eq!(catalog.len(), 96);
     assert!(
-        catalog
+        packs
             .iter()
-            .all(|pack| pack.status == CapabilityPackStatus::CatalogOnly)
-    );
-    assert_eq!(
-        catalog
-            .iter()
-            .map(|pack| pack.catalog_capability_id.as_deref().unwrap())
-            .collect::<Vec<_>>(),
-        (1..=96)
-            .map(|index| format!("catalog-capability:{index:03}"))
-            .collect::<Vec<_>>()
+            .all(|pack| pack.status != CapabilityPackStatus::CatalogOnly),
+        "migration 0010 removes presentation-only catalog packs"
     );
 }
 
@@ -271,13 +258,15 @@ fn codes(
 #[tokio::test]
 async fn assembly_rejects_catalog_only_pack() {
     let (_database, repository, role, source) = builtin_fixture("agent-instance:piwork-lead").await;
-    let catalog_pack = repository
+    let mut catalog_pack = repository
         .list_capability_packs()
         .await
         .unwrap()
         .into_iter()
-        .find(|pack| pack.status == CapabilityPackStatus::CatalogOnly)
+        .next()
         .unwrap();
+    catalog_pack.catalog_capability_id = Some("catalog-capability:test".into());
+    catalog_pack.status = CapabilityPackStatus::CatalogOnly;
 
     let diagnostic_codes = codes(validate_assembly(
         &role,
@@ -476,7 +465,7 @@ async fn service_copy_is_local_read_only_and_does_not_modify_builtin_source() {
 }
 
 #[tokio::test]
-async fn service_rejects_catalog_only_copy_without_persisting_rows() {
+async fn service_rejects_removed_catalog_pack_without_persisting_rows() {
     let (database, repository, _role, _source) =
         builtin_fixture("agent-instance:piwork-lead").await;
     let service = AgentService::new(repository, BTreeSet::new(), BTreeSet::new());
@@ -490,11 +479,12 @@ async fn service_rejects_catalog_only_copy_without_persisting_rows() {
         parallelism_override: None,
     };
 
-    let diagnostics = service
-        .validate_agent_assembly(input.clone())
-        .await
-        .unwrap();
-    assert_eq!(diagnostics[0].code, AssemblyDiagnosticCode::NotExecutable);
+    assert!(
+        service
+            .validate_agent_assembly(input.clone())
+            .await
+            .is_err()
+    );
     assert!(service.save_agent_copy(input).await.is_err());
     let local_instances: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM agent_instances WHERE builtin = 0")

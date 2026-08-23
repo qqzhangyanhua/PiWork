@@ -18,6 +18,7 @@ use std::{
 use serde_json::Value;
 
 use crate::{
+    capability::{CapabilityBroker, CapabilityDecision, CapabilityOperation},
     collaboration::tool_bridge::{AuthorizedRunContext, HostToolRegistry},
     error::AppError,
 };
@@ -41,13 +42,30 @@ impl HostToolServer {
         registry: Arc<HostToolRegistry>,
         dispatch: Arc<ToolDispatch>,
     ) -> std::io::Result<Self> {
+        Self::bind_inner(registry, dispatch, None)
+    }
+
+    pub fn bind_with_capability_broker(
+        registry: Arc<HostToolRegistry>,
+        dispatch: Arc<ToolDispatch>,
+        broker: CapabilityBroker,
+    ) -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Handle::current();
+        Self::bind_inner(registry, dispatch, Some((broker, runtime)))
+    }
+
+    fn bind_inner(
+        registry: Arc<HostToolRegistry>,
+        dispatch: Arc<ToolDispatch>,
+        capability: Option<(CapabilityBroker, tokio::runtime::Handle)>,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let endpoint = format!("http://{}/tool", listener.local_addr()?);
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_shutdown = Arc::clone(&shutdown);
         let join = std::thread::spawn(move || {
-            serve_loop(listener, registry, dispatch, thread_shutdown);
+            serve_loop(listener, registry, dispatch, capability, thread_shutdown);
         });
         Ok(Self {
             endpoint,
@@ -74,13 +92,14 @@ fn serve_loop(
     listener: TcpListener,
     registry: Arc<HostToolRegistry>,
     dispatch: Arc<ToolDispatch>,
+    capability: Option<(CapabilityBroker, tokio::runtime::Handle)>,
     shutdown: Arc<AtomicBool>,
 ) {
     while !shutdown.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((stream, _addr)) => {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-                let _ = serve_one(stream, &registry, &dispatch);
+                let _ = serve_one(stream, &registry, &dispatch, capability.as_ref());
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -96,6 +115,7 @@ fn serve_one(
     mut stream: TcpStream,
     registry: &Arc<HostToolRegistry>,
     dispatch: &Arc<ToolDispatch>,
+    capability: Option<&(CapabilityBroker, tokio::runtime::Handle)>,
 ) -> std::io::Result<()> {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 2048];
@@ -109,7 +129,7 @@ fn serve_one(
             break respond(400, json_error("request too large"));
         }
         if let Some(body) = complete_body(&buffer) {
-            break handle_body(body, registry, dispatch);
+            break handle_body(body, registry, dispatch, capability);
         }
     };
     stream.write_all(response.as_bytes())?;
@@ -142,6 +162,7 @@ fn handle_body(
     body: &[u8],
     registry: &Arc<HostToolRegistry>,
     dispatch: &Arc<ToolDispatch>,
+    capability: Option<&(CapabilityBroker, tokio::runtime::Handle)>,
 ) -> String {
     let Ok(request) = serde_json::from_slice::<Value>(body) else {
         return respond(400, json_error("invalid json body"));
@@ -166,7 +187,35 @@ fn handle_body(
     if !context.allowed_tools.iter().any(|allowed| allowed == tool) {
         return respond(403, json_error("tool not authorized for this run"));
     }
-    match dispatch(tool, &context, arguments) {
+    if let Some((broker, runtime)) = capability {
+        let Some(snapshot_id) = context.capability_snapshot_id.as_deref() else {
+            return respond(403, json_error("capability snapshot is required"));
+        };
+        let snapshot = runtime.block_on(broker.inspect(snapshot_id));
+        let Ok(Some(snapshot)) = snapshot else {
+            return respond(403, json_error("capability snapshot is unavailable"));
+        };
+        let decision = runtime.block_on(broker.authorize_and_record(
+            &snapshot,
+            &CapabilityOperation::HostTool {
+                tool_id: tool.to_owned(),
+            },
+        ));
+        let Ok(CapabilityDecision::Allow { audit }) = decision else {
+            return respond(403, json_error("capability snapshot denied the tool"));
+        };
+        let Ok(execution_id) = runtime.block_on(broker.begin_execution(&audit)) else {
+            return respond(403, json_error("capability audit is unavailable"));
+        };
+        let result = dispatch(tool, &context, arguments);
+        let _ = runtime.block_on(broker.finish_execution(&execution_id, result.is_ok()));
+        return dispatch_response(result);
+    }
+    dispatch_response(dispatch(tool, &context, arguments))
+}
+
+fn dispatch_response(result: Result<Value, AppError>) -> String {
+    match result {
         Ok(value) => respond(
             200,
             serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_owned()),
@@ -225,6 +274,7 @@ mod tests {
         let registry = Arc::new(HostToolRegistry::new());
         let lease = registry.issue(
             AuthorizedRunContext {
+                capability_snapshot_id: None,
                 run_id: "run-1".into(),
                 work_id: "work-1".into(),
                 assignment_id: "a1".into(),
@@ -278,6 +328,7 @@ mod tests {
         let registry = Arc::new(HostToolRegistry::new());
         registry.issue(
             AuthorizedRunContext {
+                capability_snapshot_id: None,
                 run_id: "run-1".into(),
                 work_id: "work-1".into(),
                 assignment_id: "a1".into(),

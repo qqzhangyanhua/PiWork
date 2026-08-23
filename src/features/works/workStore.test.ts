@@ -33,6 +33,7 @@ const deferred = <T,>() => {
 
 const work: WorkSummary = {
   id: "w1",
+  workspaceId: "workspace-w1",
   title: "Build the store",
   goal: "Replay events",
   rootPath: "D:/dev/PiWork",
@@ -656,7 +657,7 @@ describe("createWorkStore", () => {
     expect(store.getState().latestRuns.w1).toEqual(newerRun);
   });
 
-  it("does not let a stale hydrate detail overwrite a newer live event", async () => {
+  it("does not let Run completion claim Work completion over persisted state", async () => {
     const staleSummary: WorkSummary = {
       ...work,
       status: "running",
@@ -686,7 +687,7 @@ describe("createWorkStore", () => {
     await hydration;
 
     expect(store.getState().works.w1).toMatchObject({
-      status: "completed",
+      status: "running",
       updatedAt: "2026-07-28T11:00:00.000Z",
     });
   });
@@ -741,7 +742,7 @@ describe("createWorkStore", () => {
     ).toBe(false);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
-      status: "completed",
+      status: "running",
       updatedAt: "2026-07-28T09:00:03.000Z",
     });
   });
@@ -837,7 +838,7 @@ describe("createWorkStore", () => {
     ).toEqual([1, 2, 3]);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
-      status: "completed",
+      status: "running",
       updatedAt: "2026-07-28T09:00:03.000Z",
     });
   });
@@ -1304,7 +1305,7 @@ describe("createWorkStore", () => {
     expect(store.getState().loading).toBe(false);
   });
 
-  it("does not let a late start response overwrite a terminal event", async () => {
+  it("keeps a completed Run non-terminal until a delivery is accepted", async () => {
     const startResult = deferred<StartWorkOutput>();
     const client: PiWorkClient = {
       ...unusedClient,
@@ -1331,7 +1332,7 @@ describe("createWorkStore", () => {
     await starting;
 
     expect(store.getState().works.w1).toMatchObject({
-      status: "completed",
+      status: "running",
       updatedAt: "2026-07-28T09:00:01.000Z",
     });
   });
@@ -1371,7 +1372,7 @@ describe("createWorkStore", () => {
     });
 
     expect(store.getState().works.w1).toMatchObject({
-      status: "completed",
+      status: "running",
       updatedAt: "2026-07-28T09:00:03.000Z",
     });
   });

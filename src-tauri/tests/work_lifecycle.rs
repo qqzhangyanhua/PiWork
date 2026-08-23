@@ -8,8 +8,8 @@ use piwork_lib::{
         agent::PermissionPolicy,
         event::{WorkEventEnvelope, WorkEventPayload},
         work::{
-            CreateWorkInput, MessageRole, PermissionMode, RunStatus, RunSummary, StartWorkInput,
-            StartWorkOutput, WorkDetail, WorkStatus,
+            CreateWorkInput, MessageRole, PermissionMode, RunStatus, RunSummary, StartWorkOutput,
+            WorkDetail, WorkStatus,
         },
     },
     engine::{
@@ -19,7 +19,7 @@ use piwork_lib::{
         supervisor::EngineSupervisor,
     },
     storage::sqlite::Database,
-    work::{repository::WorkRepository, service::WorkService},
+    work::{project_files, repository::WorkRepository, service::WorkService},
 };
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -1065,18 +1065,9 @@ async fn start_work_returns_before_the_engine_stream_finishes() {
         Arc::new(publisher),
         "Fake model",
     ));
-    let service = WorkService::with_supervisor(harness.repository, supervisor);
-
     let run = tokio::time::timeout(
         std::time::Duration::from_millis(150),
-        service.start_work(
-            &work.summary.id,
-            StartWorkInput {
-                prompt: "Build it".into(),
-                referenced_files: Vec::new(),
-                resource_ids: Vec::new(),
-            },
-        ),
+        supervisor.start(&work.summary.id, "Build it"),
     )
     .await
     .expect("start_work waited for the engine event stream")
@@ -1997,15 +1988,22 @@ async fn referenced_files_expand_only_the_engine_prompt() {
         Arc::new(publisher),
         "Recording model",
     ));
-    let service = WorkService::with_supervisor(harness.repository.clone(), supervisor);
-
-    let output = service
-        .start_work(
+    let user_prompt = "Review @{context.md}";
+    let engine_prompt = project_files::build_engine_prompt(
+        std::path::Path::new(&work.summary.root_path),
+        user_prompt,
+        &["context.md".into()],
+    )
+    .unwrap();
+    let output = supervisor
+        .start_with_engine_input(
             &work.summary.id,
-            StartWorkInput {
-                prompt: "Review @{context.md}".into(),
-                referenced_files: vec!["context.md".into()],
-                resource_ids: Vec::new(),
+            user_prompt,
+            vec![],
+            EngineInput {
+                message: engine_prompt,
+                images: vec![],
+                documents: vec![],
             },
         )
         .await
@@ -2872,15 +2870,7 @@ async fn startup_marks_unfinished_runs_interrupted_without_resuming() {
         .set_run_status(&run.id, RunStatus::Running)
         .await
         .unwrap();
-    let engine = Arc::new(StartCountingEngine::new());
-    let (publisher, _published) = ChannelEventPublisher::channel(1);
-    let supervisor = Arc::new(EngineSupervisor::new(
-        harness.repository.clone(),
-        engine.clone(),
-        Arc::new(publisher),
-        "Fake model",
-    ));
-    let service = WorkService::with_supervisor(harness.repository.clone(), supervisor);
+    let service = WorkService::new(harness.repository.clone());
 
     let recovered = service.recover_interrupted_runs().await.unwrap();
 
@@ -2893,7 +2883,6 @@ async fn startup_marks_unfinished_runs_interrupted_without_resuming() {
     assert_eq!(recovered, 1);
     assert_eq!(recovered_work.summary.status, WorkStatus::Interrupted);
     assert_eq!(recovered_work.runs[0].status, RunStatus::Interrupted);
-    assert_eq!(engine.start_count(), 0);
 }
 
 #[tokio::test]

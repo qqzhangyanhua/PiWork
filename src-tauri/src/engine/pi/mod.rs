@@ -1211,7 +1211,7 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
                 configuration.map_err(|_| EngineError::Start("model configuration is unavailable".into()))?
             }
         };
-        let extension_snapshot = match extension_service.as_ref() {
+        let mut extension_snapshot = match extension_service.as_ref() {
             Some(service) => tokio::select! {
                 biased;
                 _ = wait_for_startup_cancellation(&mut cancel, &mut caller_acknowledgement) => {
@@ -1223,6 +1223,20 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             },
             None => ExtensionRuntimeSnapshot::default(),
         };
+        let capability_snapshot = context.capability_snapshot().ok_or_else(|| {
+            EngineError::Start("Run capability snapshot is required for Pi execution".into())
+        })?;
+        let granted_extension_tools = extension_snapshot
+            .tool_ids
+            .iter()
+            .filter(|tool| capability_snapshot.extension_tool_ids().contains(tool))
+            .cloned()
+            .collect::<Vec<_>>();
+        if granted_extension_tools.is_empty() {
+            extension_snapshot.extension_paths.clear();
+            extension_snapshot.runtime_files.clear();
+            extension_snapshot.sensitive_values.clear();
+        }
         let session_directory = {
             let new_directory = session_directory(
                 &sessions_root,
@@ -1307,11 +1321,11 @@ async fn run_pi_lifecycle(request: PiLifecycleRequest) {
             &configuration.model_id,
             context.effective_permission(),
         );
-        let capability_manifest = context
-            .capability_manifest()
-            .clone()
-            .with_extension_tool_ids(extension_snapshot.tool_ids.clone());
-        arguments = arguments.with_extension_tools(&capability_manifest.executable_tool_ids());
+        let mut executable_tools = capability_snapshot.host_tool_ids().to_vec();
+        executable_tools.extend(granted_extension_tools);
+        executable_tools.sort();
+        executable_tools.dedup();
+        arguments = arguments.with_extension_tools(&executable_tools);
         if let Some((path, _lease)) = &host_tools {
             arguments = arguments.with_extension(path);
         }

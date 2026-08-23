@@ -1,17 +1,24 @@
 use std::{collections::BTreeSet, future::Future, sync::Arc};
 
+#[cfg(all(test, windows))]
+#[link(name = "resource", kind = "static")]
+unsafe extern "C" {}
+
 use tauri::{Manager, path::BaseDirectory};
 
 pub mod agent;
 pub mod app_state;
 pub mod assignment;
+pub mod capability;
 pub mod collaboration;
 pub mod connectors;
+pub mod delivery;
 pub mod document_runtime;
 pub mod domain;
 pub mod engine;
 pub mod environment;
 pub mod error;
+pub mod execution;
 pub mod extensions;
 pub mod memory;
 pub mod model;
@@ -20,6 +27,7 @@ pub mod resource;
 pub mod secret;
 pub mod storage;
 pub mod work;
+pub mod workspace;
 
 type StartupError = Box<dyn std::error::Error>;
 type StartupResult<T> = Result<T, StartupError>;
@@ -194,6 +202,9 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     let resource_cache_dir = resource_cache_dir.clone();
                     async move {
                         let database = storage::sqlite::Database::open(database_path).await?;
+                        workspace::WorkspaceRepository::new(database.pool().clone())
+                            .reconcile_legacy_paths()
+                            .await?;
                         let repository =
                             work::repository::WorkRepository::new(database.pool().clone());
                         let agent_repository =
@@ -217,6 +228,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         work::service::WorkService::new(repository.clone())
                             .recover_interrupted_runs()
                             .await?;
+                        repository.rebuild_work_statuses().await?;
                         let model_repository =
                             model::ModelConfigurationRepository::new(database.pool().clone());
                         let resource_repository =
@@ -295,6 +307,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     let host_tool_registry =
                         Arc::new(collaboration::tool_bridge::HostToolRegistry::new());
                     let host_tool_endpoint = Arc::new(std::sync::OnceLock::new());
+                    let capability_broker = capability::CapabilityBroker::new(pool.clone());
                     let scheduler = assignment::scheduler::AssignmentScheduler::new(
                         assignment_repository.clone(),
                         repository.clone(),
@@ -308,6 +321,8 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         registry: Arc::clone(&host_tool_registry),
                         endpoint: Arc::clone(&host_tool_endpoint),
                     })
+                    .with_capability_broker(capability_broker.clone())
+                    .with_extension_service(Arc::clone(&extension_service))
                     .with_memory_service(Arc::clone(&memory_service));
                     let scheduler_handle = scheduler.spawn();
 
@@ -335,9 +350,10 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             dispatcher.dispatch(tool, context, arguments)
                         });
                     let host_tool_server =
-                        collaboration::tool_server::HostToolServer::bind(
+                        collaboration::tool_server::HostToolServer::bind_with_capability_broker(
                             Arc::clone(&host_tool_registry),
                             dispatch,
+                            capability_broker,
                         )?;
                     let _ = host_tool_endpoint.set(host_tool_server.endpoint().to_owned());
                     if !app.manage(host_tool_server) {
@@ -358,13 +374,14 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     let assignment_service = Arc::new(assignment::service::AssignmentService::new(
                         assignment_repository,
                         repository.clone(),
+                        scheduler_handle.clone(),
+                    ));
+                    let execution_coordinator = Arc::new(execution::ExecutionCoordinator::new(
+                        Arc::clone(&assignment_service),
+                        repository.clone(),
                         scheduler_handle,
                     ));
-                    let service =
-                        Arc::new(work::service::WorkService::with_assignment_service(
-                            repository,
-                            Arc::clone(&assignment_service),
-                        ));
+                    let service = Arc::new(work::service::WorkService::new(repository));
                     let agent_service = Arc::new(agent::service::AgentService::new(
                         agent_repository,
                         production_agent_tools(),
@@ -378,6 +395,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             agent_service,
                         )
                         .with_assignment_service(assignment_service)
+                        .with_execution_coordinator(execution_coordinator)
                         .with_extension_service(extension_service)
                         .with_connector_service(Arc::clone(&connector_service))
                         .with_memory_service(Arc::clone(&memory_service)),

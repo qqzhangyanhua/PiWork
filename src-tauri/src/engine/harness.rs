@@ -20,20 +20,20 @@ use uuid::Uuid;
 
 use crate::{
     assignment::repository::AssignmentRepository,
+    capability::{CapabilityBroker, RunCapabilityRequest},
     collaboration::{
         tool_bridge::{AuthorizedRunContext, HostToolRegistry},
         tools::role_tool_allowlist,
     },
     domain::{
         agent::AgentInstanceSummary,
-        assignment::{AgentSessionSummary, AssignmentStatus, AssignmentSummary},
+        assignment::{AgentSessionSummary, AssignmentKind, AssignmentStatus, AssignmentSummary},
         event::WorkEventEnvelope,
         work::{PermissionMode, RunSummary, WorkSummary},
     },
     engine::{
         EngineAdapter, EngineEvent, EngineInput, EngineRunContext, EngineRunIdentity,
-        EngineSessionRef, RunCapabilityManifest, WAITING_ON_ASSIGNMENTS_REASON,
-        publisher::EventPublisher,
+        EngineSessionRef, WAITING_ON_ASSIGNMENTS_REASON, publisher::EventPublisher,
     },
     error::AppError,
     work::repository::WorkRepository,
@@ -57,6 +57,7 @@ pub struct AssignmentExecutionRequest {
     pub input: EngineInput,
     pub effective_permission: PermissionMode,
     pub runtime_owner: String,
+    pub extension_tool_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +111,7 @@ pub struct EngineHarness {
     publisher: Arc<dyn EventPublisher>,
     startup_timeout: Duration,
     host_tools: Option<HostToolBridgeConfig>,
+    capability_broker: Option<CapabilityBroker>,
 }
 
 impl EngineHarness {
@@ -126,6 +128,7 @@ impl EngineHarness {
             publisher,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
             host_tools: None,
+            capability_broker: None,
         }
     }
 
@@ -133,6 +136,11 @@ impl EngineHarness {
     /// role-scoped lease. Without this the Pi extension is never loaded.
     pub fn with_host_tools(mut self, config: HostToolBridgeConfig) -> Self {
         self.host_tools = Some(config);
+        self
+    }
+
+    pub fn with_capability_broker(mut self, broker: CapabilityBroker) -> Self {
+        self.capability_broker = Some(broker);
         self
     }
 
@@ -154,6 +162,7 @@ impl EngineHarness {
             input,
             effective_permission,
             runtime_owner,
+            extension_tool_ids,
         } = request;
 
         let session = self
@@ -176,35 +185,56 @@ impl EngineHarness {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        let context = EngineRunContext::new(
+        let mut context = EngineRunContext::new(
             identity,
             PathBuf::from(&work.root_path),
             work.permission_mode,
             agent.model_configuration_override.clone(),
             effective_permission,
         )
-        .map_err(|error| AppError::engine(error.to_string()))?
-        .with_capability_manifest(RunCapabilityManifest::new(expert_pack_ids, host_tool_ids));
+        .map_err(|error| AppError::engine(error.to_string()))?;
+        if let Some(broker) = &self.capability_broker {
+            let snapshot = broker
+                .snapshot(RunCapabilityRequest {
+                    run_id: run.id.clone(),
+                    work_id: work.id.clone(),
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: agent.id.clone(),
+                    role_kind: agent.definition.role_kind,
+                    permission_mode: effective_permission,
+                    workspace_root: PathBuf::from(&work.root_path),
+                    expert_pack_ids,
+                    host_tool_ids,
+                    extension_tool_ids,
+                    expires_at: None,
+                })
+                .await?;
+            context = context.with_capability_snapshot(snapshot);
+        }
 
         // Issue a role-scoped host tool lease before starting the engine. The
         // guard revokes it on every exit path (including startup failure and
         // the `?` early returns below), so a token never outlives its Run.
-        let (lease, _lease_guard) = match self.host_tools.as_ref().and_then(|config| {
-            config
-                .endpoint
-                .get()
-                .cloned()
-                .map(|endpoint| (config, endpoint))
-        }) {
-            Some((config, endpoint)) => {
+        let (lease, _lease_guard) = match (
+            self.host_tools.as_ref().and_then(|config| {
+                config
+                    .endpoint
+                    .get()
+                    .cloned()
+                    .map(|endpoint| (config, endpoint))
+            }),
+            context.capability_snapshot(),
+        ) {
+            (Some((config, endpoint)), Some(snapshot)) => {
                 let lease = config.registry.issue(
                     AuthorizedRunContext {
+                        capability_snapshot_id: Some(snapshot.id.clone()),
                         run_id: run.id.clone(),
                         work_id: work.id.clone(),
                         assignment_id: assignment.id.clone(),
                         agent_instance_id: agent.id.clone(),
                         runtime_owner: runtime_owner.clone(),
-                        allowed_tools: context.capability_manifest().host_tool_ids().to_vec(),
+                        allowed_tools: snapshot.host_tool_ids().to_vec(),
                     },
                     endpoint,
                 );
@@ -214,7 +244,7 @@ impl EngineHarness {
                 };
                 (Some(lease), Some(guard))
             }
-            None => (None, None),
+            _ => (None, None),
         };
         let context = match lease {
             Some(lease) => context.with_host_tool_lease(lease),
@@ -310,6 +340,7 @@ impl EngineHarness {
                 Utc::now(),
             )
             .await?;
+        self.work_repository.reproject_work_status(&work.id).await?;
 
         let mut sequence = self.work_repository.next_run_sequence(&run.id).await?;
         let mut previous_event_id: Option<String> = None;
@@ -371,12 +402,20 @@ impl EngineHarness {
 
             match event {
                 EngineEvent::RunCompleted {
-                    summary,
-                    artifacts,
-                    validation,
-                    limitations,
+                    summary: _,
+                    artifacts: _,
+                    validation: _,
+                    limitations: _,
                 } => {
-                    terminal = Some((summary, artifacts, validation, limitations));
+                    match assignment.kind {
+                        AssignmentKind::Lead => {
+                            waiting = Some("delivery_required".to_owned());
+                        }
+                        AssignmentKind::Member => {
+                            failed =
+                                Some("Member Run ended without a valid Result Envelope".to_owned());
+                        }
+                    }
                     break;
                 }
                 EngineEvent::RunFailed { message } => {
@@ -412,6 +451,7 @@ impl EngineHarness {
                     )
                     .await?;
             }
+            self.work_repository.reproject_work_status(&work.id).await?;
             Ok(AssignmentExecutionOutcome::Completed {
                 result_summary: summary,
                 artifacts,
@@ -432,6 +472,7 @@ impl EngineHarness {
             self.assignment_repository
                 .mark_ready(&session.id, &run.id)
                 .await?;
+            self.work_repository.reproject_work_status(&work.id).await?;
             Ok(AssignmentExecutionOutcome::Waiting { reason })
         } else {
             let message = failed
@@ -441,6 +482,7 @@ impl EngineHarness {
                 .await?;
             self.finalize_failure(&assignment, &run, &session, &runtime_owner, &message, now)
                 .await?;
+            self.work_repository.reproject_work_status(&work.id).await?;
             Ok(AssignmentExecutionOutcome::Failed { message })
         }
     }
@@ -471,6 +513,10 @@ impl EngineHarness {
                 RETRY_BASE,
                 RETRY_MAX,
             )
+            .await;
+        let _ = self
+            .work_repository
+            .reproject_work_status(&assignment.work_id)
             .await;
     }
 

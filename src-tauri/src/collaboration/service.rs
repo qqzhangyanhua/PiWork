@@ -9,10 +9,8 @@ use crate::{
         repository::{AcceptAssignmentInput, AssignmentRepository},
         scheduler::AssignmentSchedulerHandle,
     },
-    collaboration::{
-        memory::MemoryService,
-        result::{RepairDecision, ResultSubmissionContext, repair_decision, validate_result},
-    },
+    collaboration::memory::MemoryService,
+    delivery::{DeliveryModule, WorkDeliverySubmission},
     domain::{
         agent::WorkAgentSummary,
         assignment::{AssignmentKind, AssignmentSideEffect, AssignmentStatus, AssignmentSummary},
@@ -21,11 +19,12 @@ use crate::{
             ResultEnvelope, UpdateWorkPlanInput,
         },
         event::WorkEventPayload,
-        work::WorkStatus,
     },
     error::AppError,
     work::repository::WorkRepository,
 };
+
+pub use crate::delivery::{MemberResultSubmission, SubmitOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DelegateResult {
@@ -36,9 +35,9 @@ pub struct DelegateResult {
 #[derive(Clone)]
 pub struct LeadToolService {
     repository: AssignmentRepository,
-    work_repository: WorkRepository,
     agent_repository: AgentRepository,
     scheduler: AssignmentSchedulerHandle,
+    delivery: DeliveryModule,
 }
 
 impl LeadToolService {
@@ -48,11 +47,16 @@ impl LeadToolService {
         agent_repository: AgentRepository,
         scheduler: AssignmentSchedulerHandle,
     ) -> Self {
+        let delivery = DeliveryModule::new(
+            work_repository.pool().clone(),
+            repository.clone(),
+            work_repository.clone(),
+        );
         Self {
             repository,
-            work_repository,
             agent_repository,
             scheduler,
+            delivery,
         }
     }
 
@@ -274,12 +278,10 @@ impl LeadToolService {
                 "only a running assignment can be cancelled",
             ));
         }
-        self.scheduler.interrupt(&child.work_id)?;
         let cancelled = self
-            .repository
-            .get_assignment(child_assignment_id)
-            .await?
-            .ok_or_else(|| AppError::invalid_input("assignmentId", "assignment not found"))?;
+            .scheduler
+            .cancel_assignment(&child.work_id, child_assignment_id)
+            .await?;
         self.scheduler.wake()?;
         Ok(cancelled)
     }
@@ -368,39 +370,14 @@ impl LeadToolService {
         runtime_owner: &str,
         input: CompleteWorkDeliveryInput,
     ) -> Result<AssignmentSummary, AppError> {
-        let lead = self
-            .repository
-            .get_assignment(lead_assignment_id)
-            .await?
-            .ok_or_else(|| {
-                AppError::invalid_input("leadAssignmentId", "lead assignment not found")
-            })?;
-        if lead.kind != AssignmentKind::Lead {
-            return Err(AppError::invalid_input(
-                "leadAssignmentId",
-                "only the Lead assignment can complete delivery",
-            ));
-        }
-        self.repository
-            .emit_collaboration_event(
-                &lead.id,
-                WorkEventPayload::WorkDeliveryCompleted {
-                    summary: input.summary.clone(),
-                    artifacts: input.artifacts.clone(),
-                    validation: input.validation.clone(),
-                    limitations: input.limitations.clone(),
-                },
-            )
-            .await?;
-        let completed = self
-            .repository
-            .complete_by_assignment(&lead.id, &input.summary, runtime_owner)
-            .await?;
-        let _ = self
-            .work_repository
-            .set_work_status(&lead.work_id, WorkStatus::Completed)
-            .await;
-        Ok(completed)
+        self.delivery
+            .complete_work(WorkDeliverySubmission {
+                lead_assignment_id: lead_assignment_id.to_owned(),
+                runtime_owner: runtime_owner.to_owned(),
+                input,
+            })
+            .await
+            .map(|receipt| receipt.assignment)
     }
 }
 
@@ -412,14 +389,19 @@ pub struct MemberResultService {
     repository: AssignmentRepository,
     scheduler: AssignmentSchedulerHandle,
     memory: Option<MemoryService>,
+    delivery: DeliveryModule,
 }
 
 impl MemberResultService {
     pub fn new(repository: AssignmentRepository, scheduler: AssignmentSchedulerHandle) -> Self {
+        let pool = repository.pool().clone();
+        let delivery =
+            DeliveryModule::new(pool.clone(), repository.clone(), WorkRepository::new(pool));
         Self {
             repository,
             scheduler,
             memory: None,
+            delivery,
         }
     }
 
@@ -464,119 +446,29 @@ impl MemberResultService {
         &self,
         submission: MemberResultSubmission,
     ) -> Result<SubmitOutcome, AppError> {
-        let envelope_json = serde_json::to_string(&submission.envelope)
-            .map_err(|error| AppError::Database(sqlx::Error::Encode(Box::new(error))))?;
-        let context = ResultSubmissionContext {
-            work_id: submission.work_id.clone(),
-            assignment_id: submission.assignment_id.clone(),
-            run_id: submission.run_id.clone(),
-            author_agent_id: submission.author_agent_id.clone(),
-        };
-
-        match validate_result(&context, submission.envelope) {
-            Ok(valid) => {
-                self.repository
-                    .record_result(
-                        &submission.assignment_id,
-                        &submission.author_agent_id,
-                        &envelope_json,
-                        "valid",
-                        0,
-                    )
-                    .await?;
-                let summary = valid.envelope.summary.clone();
-                let status = valid.envelope.status;
-                let assignment = self
-                    .repository
-                    .complete_by_assignment(
-                        &submission.assignment_id,
-                        &summary,
-                        &submission.runtime_owner,
-                    )
-                    .await?;
-                self.repository
-                    .emit_collaboration_event(
-                        &submission.assignment_id,
-                        WorkEventPayload::AssignmentResultSubmitted {
-                            assignment_id: submission.assignment_id.clone(),
-                            agent_instance_id: submission.author_agent_id.clone(),
-                            status,
-                            summary,
-                        },
-                    )
-                    .await?;
+        let work_id = submission.work_id.clone();
+        let assignment_id = submission.assignment_id.clone();
+        let author_agent_id = submission.author_agent_id.clone();
+        let memory_candidates = submission.envelope.memory_candidates.clone();
+        let outcome = self.delivery.submit_member_result(submission).await?;
+        match &outcome {
+            SubmitOutcome::Accepted { .. } => {
                 self.propose_memory_candidates(
-                    &submission.work_id,
-                    &submission.assignment_id,
-                    &submission.author_agent_id,
-                    &valid.envelope.memory_candidates,
+                    &work_id,
+                    &assignment_id,
+                    &author_agent_id,
+                    &memory_candidates,
                 )
                 .await?;
                 self.scheduler.wake()?;
-                Ok(SubmitOutcome::Accepted { assignment })
             }
-            Err(diagnostics) => {
-                let prior = self
-                    .repository
-                    .latest_repair_attempt(&submission.assignment_id)
-                    .await?;
-                match repair_decision(prior, diagnostics) {
-                    RepairDecision::RequestRepair { diagnostics } => {
-                        self.repository
-                            .record_result(
-                                &submission.assignment_id,
-                                &submission.author_agent_id,
-                                &envelope_json,
-                                "repair_requested",
-                                prior,
-                            )
-                            .await?;
-                        Ok(SubmitOutcome::RepairRequested { diagnostics })
-                    }
-                    RepairDecision::Reject { diagnostics } => {
-                        self.repository
-                            .record_result(
-                                &submission.assignment_id,
-                                &submission.author_agent_id,
-                                &envelope_json,
-                                "rejected",
-                                prior,
-                            )
-                            .await?;
-                        self.repository
-                            .emit_collaboration_event(
-                                &submission.assignment_id,
-                                WorkEventPayload::AssignmentResultRejected {
-                                    assignment_id: submission.assignment_id.clone(),
-                                    agent_instance_id: submission.author_agent_id.clone(),
-                                    reason: diagnostics.join("; "),
-                                },
-                            )
-                            .await?;
-                        self.scheduler.wake()?;
-                        Ok(SubmitOutcome::Rejected { diagnostics })
-                    }
-                }
+            SubmitOutcome::Rejected { .. } => {
+                self.scheduler.wake()?;
             }
+            SubmitOutcome::RepairRequested { .. } => {}
         }
+        Ok(outcome)
     }
-}
-
-pub struct MemberResultSubmission {
-    pub work_id: String,
-    pub assignment_id: String,
-    pub run_id: String,
-    pub author_agent_id: String,
-    pub runtime_owner: String,
-    pub envelope: ResultEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[allow(clippy::large_enum_variant)] // wire DTO, not a hot-loop type
-pub enum SubmitOutcome {
-    Accepted { assignment: AssignmentSummary },
-    RepairRequested { diagnostics: Vec<String> },
-    Rejected { diagnostics: Vec<String> },
 }
 
 /// Dispatches an authenticated Host Tool call to the Lead or Member service.

@@ -71,6 +71,7 @@ pub enum PermissionMode {
 pub struct WorkSummary {
     // Canonical UUID string.
     pub id: String,
+    pub workspace_id: String,
     pub title: String,
     pub goal: String,
     pub root_path: String,
@@ -199,6 +200,7 @@ mod tests {
         let timestamp = Utc.with_ymd_and_hms(2026, 7, 28, 7, 0, 0).unwrap();
         let summary = WorkSummary {
             id: id.clone(),
+            workspace_id: "workspace-1".into(),
             title: "Ship PiWork".into(),
             goal: "Build the foundation".into(),
             root_path: "D:/dev/PiWork".into(),
@@ -214,6 +216,7 @@ mod tests {
             serde_json::to_value(summary).unwrap(),
             json!({
                 "id": id,
+                "workspaceId": "workspace-1",
                 "title": "Ship PiWork",
                 "goal": "Build the foundation",
                 "rootPath": "D:/dev/PiWork",

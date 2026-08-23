@@ -11,7 +11,7 @@
 use std::{collections::BTreeMap, collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{TimeDelta, Utc};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{
     agent::repository::AgentRepository,
@@ -33,6 +33,7 @@ use crate::{
         publisher::EventPublisher,
     },
     error::AppError,
+    extensions::ExtensionService,
     memory::{MemoryCaptureRequest, MemoryRecallRequest, WorkspaceMemoryService},
     work::repository::WorkRepository,
 };
@@ -40,10 +41,18 @@ use crate::{
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const HYDRATE_LIMIT: u32 = 256;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SchedulerCommand {
     Wake,
-    Interrupt { work_id: String },
+    Stop {
+        work_id: String,
+        response: oneshot::Sender<Result<(), AppError>>,
+    },
+    CancelAssignment {
+        work_id: String,
+        assignment_id: String,
+        response: oneshot::Sender<Result<AssignmentSummary, AppError>>,
+    },
     Shutdown,
 }
 
@@ -59,12 +68,37 @@ impl AssignmentSchedulerHandle {
             .map_err(|_| AppError::engine("assignment scheduler is not running"))
     }
 
-    pub fn interrupt(&self, work_id: &str) -> Result<(), AppError> {
+    pub async fn stop(&self, work_id: &str) -> Result<(), AppError> {
+        let (response, receiver) = oneshot::channel();
         self.commands
-            .try_send(SchedulerCommand::Interrupt {
+            .send(SchedulerCommand::Stop {
                 work_id: work_id.to_owned(),
+                response,
             })
-            .map_err(|_| AppError::engine("assignment scheduler is not running"))
+            .await
+            .map_err(|_| AppError::engine("assignment scheduler is not running"))?;
+        receiver.await.map_err(|_| {
+            AppError::engine("assignment scheduler stopped before control completed")
+        })?
+    }
+
+    pub async fn cancel_assignment(
+        &self,
+        work_id: &str,
+        assignment_id: &str,
+    ) -> Result<AssignmentSummary, AppError> {
+        let (response, receiver) = oneshot::channel();
+        self.commands
+            .send(SchedulerCommand::CancelAssignment {
+                work_id: work_id.to_owned(),
+                assignment_id: assignment_id.to_owned(),
+                response,
+            })
+            .await
+            .map_err(|_| AppError::engine("assignment scheduler is not running"))?;
+        receiver.await.map_err(|_| {
+            AppError::engine("assignment scheduler stopped before control completed")
+        })?
     }
 
     pub async fn shutdown(&self) {
@@ -84,6 +118,7 @@ pub struct AssignmentScheduler {
     limits: QueueLimits,
     active_runs: Arc<Mutex<HashMap<String, (String, String)>>>,
     memory_service: Option<Arc<WorkspaceMemoryService>>,
+    extension_service: Option<Arc<ExtensionService>>,
 }
 
 impl AssignmentScheduler {
@@ -113,6 +148,7 @@ impl AssignmentScheduler {
             limits: default_limits(),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             memory_service: None,
+            extension_service: None,
         }
     }
 
@@ -125,6 +161,16 @@ impl AssignmentScheduler {
 
     pub fn with_memory_service(mut self, memory_service: Arc<WorkspaceMemoryService>) -> Self {
         self.memory_service = Some(memory_service);
+        self
+    }
+
+    pub fn with_capability_broker(mut self, broker: crate::capability::CapabilityBroker) -> Self {
+        self.harness = self.harness.clone().with_capability_broker(broker);
+        self
+    }
+
+    pub fn with_extension_service(mut self, extension_service: Arc<ExtensionService>) -> Self {
+        self.extension_service = Some(extension_service);
         self
     }
 
@@ -169,8 +215,13 @@ impl AssignmentScheduler {
                             return;
                         }
                         Some(SchedulerCommand::Wake) => {}
-                        Some(SchedulerCommand::Interrupt { work_id }) => {
-                            scheduler.interrupt_work(&work_id).await;
+                        Some(SchedulerCommand::Stop { work_id, response }) => {
+                            let result = scheduler.stop_work(&work_id).await;
+                            let _ = response.send(result);
+                        }
+                        Some(SchedulerCommand::CancelAssignment { work_id, assignment_id, response }) => {
+                            let result = scheduler.cancel_assignment(&work_id, &assignment_id).await;
+                            let _ = response.send(result);
                         }
                     }
                 }
@@ -275,6 +326,17 @@ impl AssignmentScheduler {
             agent_memory,
         );
 
+        let extension_tool_ids = match &self.extension_service {
+            Some(service) => service
+                .runtime_snapshot(&agent.id, &work.summary.id)
+                .await
+                .map(|snapshot| snapshot.tool_ids)
+                .unwrap_or_else(|error| {
+                    eprintln!("CoDo extension capability snapshot degraded: {error}");
+                    Vec::new()
+                }),
+            None => Vec::new(),
+        };
         let request = AssignmentExecutionRequest {
             assignment: assignment.clone(),
             work: work.summary.clone(),
@@ -287,6 +349,7 @@ impl AssignmentScheduler {
             },
             effective_permission: effective_permission(&assignment),
             runtime_owner: self.owner_id.clone(),
+            extension_tool_ids,
         };
         let outcome = self.harness.execute(request).await;
         if let (Some(memory), Ok(AssignmentExecutionOutcome::Completed { result_summary, .. })) =
@@ -309,29 +372,7 @@ impl AssignmentScheduler {
     }
 
     async fn ensure_work_running(&self, work_id: &str) {
-        use crate::domain::work::WorkStatus;
-        let Ok(Some(work)) = self.work_repository.get(work_id).await else {
-            return;
-        };
-        match work.summary.status {
-            WorkStatus::Running => {}
-            WorkStatus::Queued => {
-                let _ = self
-                    .work_repository
-                    .set_work_status(work_id, WorkStatus::Running)
-                    .await;
-            }
-            _ => {
-                let _ = self
-                    .work_repository
-                    .set_work_status(work_id, WorkStatus::Queued)
-                    .await;
-                let _ = self
-                    .work_repository
-                    .set_work_status(work_id, WorkStatus::Running)
-                    .await;
-            }
-        }
+        let _ = self.work_repository.reproject_work_status(work_id).await;
     }
 
     async fn release_claim(
@@ -364,42 +405,73 @@ impl AssignmentScheduler {
             outcome: queue_outcome,
         };
         let _ = queue.lock().await.release(completion);
-        self.reflect_work_terminal(&claim.work_id, &outcome).await;
-    }
-
-    /// Aborts the engine and cancels the currently running assignment for a
-    /// Work so a replacement can be queued without a stale retry.
-    async fn interrupt_work(&self, work_id: &str) {
-        let key = self.active_runs.lock().await.remove(work_id);
-        let Some((assignment_id, run_id)) = key else {
-            return;
-        };
-        let _ = self.engine.abort(&run_id).await;
         let _ = self
-            .repository
-            .cancel(
-                &assignment_id,
-                &run_id,
-                &self.owner_id,
-                "interrupted",
-                Utc::now(),
-            )
+            .work_repository
+            .reproject_work_status(&claim.work_id)
             .await;
     }
 
-    async fn reflect_work_terminal(
+    async fn stop_work(&self, work_id: &str) -> Result<(), AppError> {
+        let active = self.active_runs.lock().await.get(work_id).cloned();
+        if let Some((_assignment_id, run_id)) = active {
+            match self.engine.abort(&run_id).await {
+                Ok(()) | Err(crate::engine::EngineError::NotRunning) => {}
+                Err(crate::engine::EngineError::CleanupUnconfirmed) => {
+                    self.repository
+                        .interrupt_work(
+                            work_id,
+                            "engine cleanup could not be confirmed",
+                            Utc::now(),
+                        )
+                        .await?;
+                    return Err(AppError::engine("engine cleanup could not be confirmed"));
+                }
+                Err(error) => return Err(AppError::engine(error.to_string())),
+            }
+        }
+        self.repository
+            .stop_work(work_id, "stopped by user", Utc::now())
+            .await?;
+        self.active_runs.lock().await.remove(work_id);
+        self.work_repository.reproject_work_status(work_id).await?;
+        Ok(())
+    }
+
+    async fn cancel_assignment(
         &self,
         work_id: &str,
-        outcome: &Result<AssignmentExecutionOutcome, AppError>,
-    ) {
-        use crate::domain::work::WorkStatus;
-        let target = match outcome {
-            Ok(AssignmentExecutionOutcome::Completed { .. }) => WorkStatus::Completed,
-            Ok(AssignmentExecutionOutcome::Waiting { .. }) => WorkStatus::Waiting,
-            Ok(AssignmentExecutionOutcome::Stopped) => WorkStatus::Stopped,
-            Ok(AssignmentExecutionOutcome::Failed { .. }) | Err(_) => WorkStatus::Failed,
+        assignment_id: &str,
+    ) -> Result<AssignmentSummary, AppError> {
+        let active = self.active_runs.lock().await.get(work_id).cloned();
+        let Some((active_assignment_id, run_id)) = active else {
+            return Err(AppError::invalid_input(
+                "assignmentId",
+                "assignment is not actively running",
+            ));
         };
-        let _ = self.work_repository.set_work_status(work_id, target).await;
+        if active_assignment_id != assignment_id {
+            return Err(AppError::invalid_input(
+                "assignmentId",
+                "assignment is not the active Work assignment",
+            ));
+        }
+        match self.engine.abort(&run_id).await {
+            Ok(()) | Err(crate::engine::EngineError::NotRunning) => {}
+            Err(error) => return Err(AppError::engine(error.to_string())),
+        }
+        let assignment = self
+            .repository
+            .cancel(
+                assignment_id,
+                &run_id,
+                &self.owner_id,
+                "cancelled by parent Lead",
+                Utc::now(),
+            )
+            .await?;
+        self.active_runs.lock().await.remove(work_id);
+        self.work_repository.reproject_work_status(work_id).await?;
+        Ok(assignment)
     }
 }
 

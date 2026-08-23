@@ -299,6 +299,7 @@ describe("useWorkEvents", () => {
         createWork: async () => ({
           summary: {
             id: "created",
+            workspaceId: "workspace-created",
             title: "Created",
             goal: "Test ownership",
             rootPath: "D:/dev/PiWork",

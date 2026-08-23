@@ -109,7 +109,7 @@ async fn assignment_status(pool: &sqlx::SqlitePool, assignment_id: &str) -> Stri
 }
 
 #[tokio::test]
-async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
+async fn scheduler_requires_a_delivery_after_a_claimed_lead_run_ends() {
     let temp = tempfile::tempdir().unwrap();
     let database = Database::open_in_memory().await.unwrap();
     let pool = database.pool().clone();
@@ -137,9 +137,9 @@ async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
     let assignment_id = accept_lead(&repository, "work-scheduler").await;
     handle.wake().unwrap();
 
-    // Poll until the assignment reaches a terminal state and the scheduler has
-    // reflected the Work's terminal status.
-    let mut completed = false;
+    // A plain Lead engine completion is not a Work Delivery. The Assignment
+    // completes, while the Work projector leaves the aggregate idle.
+    let mut delivery_required = false;
     for _ in 0..200 {
         let status = assignment_status(&pool, &assignment_id).await;
         let work_status: String =
@@ -147,8 +147,8 @@ async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        if status == "completed" && work_status == "completed" {
-            completed = true;
+        if status == "waiting" && work_status == "waiting" {
+            delivery_required = true;
             break;
         }
         if matches!(status.as_str(), "failed" | "dead_letter" | "cancelled") {
@@ -159,8 +159,8 @@ async fn scheduler_runs_a_claimed_lead_assignment_to_completion() {
 
     handle.shutdown().await;
     assert!(
-        completed,
-        "lead assignment should complete via the scheduler"
+        delivery_required,
+        "lead assignment should wait for a valid Work Delivery"
     );
 
     // The Run must carry real identity.
@@ -253,7 +253,7 @@ async fn scheduler_marks_recovery_confirmation_for_unknown_side_effects() {
 }
 
 #[tokio::test]
-async fn start_lead_assignment_persists_then_schedules_to_completion() {
+async fn start_lead_assignment_persists_then_waits_for_delivery() {
     let temp = tempfile::tempdir().unwrap();
     let database = Database::open_in_memory().await.unwrap();
     let pool = database.pool().clone();
@@ -293,18 +293,18 @@ async fn start_lead_assignment_persists_then_schedules_to_completion() {
         "agent-instance:piwork-lead"
     );
 
-    let mut completed = false;
+    let mut delivery_required = false;
     for _ in 0..200 {
-        if assignment_status(&pool, &started.assignment.id).await == "completed" {
-            completed = true;
+        if assignment_status(&pool, &started.assignment.id).await == "waiting" {
+            delivery_required = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     handle.shutdown().await;
     assert!(
-        completed,
-        "lead assignment should complete through the scheduler"
+        delivery_required,
+        "lead assignment should wait for a valid Work Delivery"
     );
 
     let message_count: i64 =

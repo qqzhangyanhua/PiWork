@@ -35,6 +35,7 @@ const deferred = <T,>() => {
 const seededDetail = (status: WorkDetail["summary"]["status"] = "draft"): WorkDetail => ({
   summary: {
     id: "work-1",
+    workspaceId: "workspace-work-1",
     title: "营收看板",
     goal: "构建营收看板",
     rootPath: "D:\\workspace\\revenue",
@@ -497,6 +498,16 @@ describe("WorkSurface", () => {
     const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
 
     client.emit(runCompletedEvent({ runId: "run-1" }));
+    client.emit({
+      ...event(3, {
+        type: "workDeliveryCompleted",
+        summary: "已完成并交付。",
+        artifacts: [],
+        validation: [],
+        limitations: [],
+      }),
+      occurredAt: "2026-07-28T08:00:21.000Z",
+    });
     expect(await screen.findByText("任务已完成")).toBeInTheDocument();
 
     await user.type(composer, "再优化一次");

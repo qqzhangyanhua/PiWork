@@ -14,9 +14,10 @@ use crate::{
         },
         collaboration::ResultEnvelope,
         event::{WorkEventEnvelope, WorkEventPayload},
-        work::{RunStatus, RunSummary},
+        work::{RunStatus, RunSummary, WorkStatus},
     },
     error::AppError,
+    work::projector::{WorkControlFact, WorkExecutionFacts, project_work_status},
 };
 
 const MAX_ID_BYTES: usize = 255;
@@ -212,6 +213,10 @@ async fn release_abandoned_claim(pool: SqlitePool, lease_token: String) {
 impl AssignmentRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self::with_event_sink(pool, Arc::new(UnavailableEventSink))
+    }
+
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub fn with_event_sink(pool: SqlitePool, event_sink: Arc<dyn AssignmentEventSink>) -> Self {
@@ -663,6 +668,178 @@ impl AssignmentRepository {
         transaction.commit().await?;
         self.drain_after_commit().await;
         Ok(assignment.summary)
+    }
+
+    pub async fn stop_work(
+        &self,
+        work_id: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64, AppError> {
+        self.finalize_work_control(work_id, reason, now, false)
+            .await
+    }
+
+    pub async fn interrupt_work(
+        &self,
+        work_id: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64, AppError> {
+        self.finalize_work_control(work_id, reason, now, true).await
+    }
+
+    async fn finalize_work_control(
+        &self,
+        work_id: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+        interrupted: bool,
+    ) -> Result<u64, AppError> {
+        let work_id = validate_id("workId", work_id)?;
+        let reason = validate_text("reason", reason)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let current = sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
+            .bind(&work_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| AppError::work_not_found(&work_id))?;
+        let target = if interrupted {
+            WorkStatus::Interrupted
+        } else {
+            WorkStatus::Stopped
+        };
+        if current == target {
+            transaction.commit().await?;
+            return Ok(0);
+        }
+        if !matches!(
+            current,
+            WorkStatus::Queued | WorkStatus::Running | WorkStatus::Waiting
+        ) {
+            return Err(AppError::invalid_work_state(&work_id, current, target));
+        }
+
+        let rows = sqlx::query_as::<_, AssignmentRow>(&format!(
+            "{} WHERE work_id = ? AND status IN ('queued', 'claimed', 'running', 'waiting', 'recovery_confirmation_required') ORDER BY created_at, id",
+            ASSIGNMENT_SELECT
+        ))
+        .bind(&work_id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut affected = 0_u64;
+        for row in rows {
+            let mut assignment = AssignmentRecord::try_from(row)?;
+            let run = sqlx::query_as::<_, RunRow>(
+                "SELECT id, work_id, assignment_id, agent_instance_id, engine_session_id, status, attempt_number \
+                 FROM runs WHERE assignment_id = ? ORDER BY attempt_number DESC LIMIT 1",
+            )
+            .bind(&assignment.id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(run) = &run
+                && matches!(
+                    run.status,
+                    RunStatus::Queued | RunStatus::Running | RunStatus::Waiting
+                )
+            {
+                let run_status = if interrupted {
+                    "interrupted"
+                } else {
+                    "stopped"
+                };
+                sqlx::query(
+                    "UPDATE runs SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+                )
+                .bind(run_status)
+                .bind(now)
+                .bind(now)
+                .bind(&run.id)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            let assignment_status = if interrupted {
+                AssignmentStatus::Interrupted
+            } else {
+                AssignmentStatus::Cancelled
+            };
+            let assignment_status_value = if interrupted {
+                "interrupted"
+            } else {
+                "cancelled"
+            };
+            sqlx::query(
+                "UPDATE assignments SET status = ?, runtime_owner_id = NULL, completed_at = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(assignment_status_value)
+            .bind(now)
+            .bind(now)
+            .bind(&assignment.id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE agent_sessions SET status = 'ready', runtime_owner_id = NULL, current_assignment_id = NULL, updated_at = ? \
+                 WHERE work_id = ? AND current_assignment_id = ? AND status = 'running'",
+            )
+            .bind(now)
+            .bind(&work_id)
+            .bind(&assignment.id)
+            .execute(&mut *transaction)
+            .await?;
+            assignment.status = assignment_status;
+            assignment.completed_at = Some(now);
+            assignment.updated_at = now;
+            let run_id = run.as_ref().map(|run| run.id.clone());
+            let session_id = run.as_ref().and_then(|run| run.engine_session_id.clone());
+            let payload = if interrupted {
+                WorkEventPayload::AssignmentInterrupted {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    agent_session_id: session_id.clone(),
+                    reason: reason.clone(),
+                }
+            } else {
+                WorkEventPayload::AssignmentCancelled {
+                    assignment_id: assignment.id.clone(),
+                    agent_instance_id: assignment.assigned_agent_id.clone(),
+                    agent_session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    reason: reason.clone(),
+                }
+            };
+            assignment_event(
+                &mut transaction,
+                &assignment,
+                run_id.as_deref(),
+                session_id,
+                now,
+                payload,
+            )
+            .await?;
+            affected = affected.saturating_add(1);
+        }
+        let work_status = project_work_status(WorkExecutionFacts {
+            control: Some(if interrupted {
+                WorkControlFact::Interrupted
+            } else {
+                WorkControlFact::Stopped
+            }),
+            ..WorkExecutionFacts::default()
+        });
+        let updated =
+            sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(work_status)
+                .bind(now)
+                .bind(&work_id)
+                .bind(current)
+                .execute(&mut *transaction)
+                .await?;
+        if updated.rows_affected() != 1 {
+            return Err(AppError::concurrent_work_modification(&work_id));
+        }
+        transaction.commit().await?;
+        self.drain_after_commit().await;
+        Ok(affected)
     }
 
     pub async fn complete(

@@ -17,9 +17,13 @@ use crate::{
         },
     },
     error::AppError,
+    workspace::WorkspaceRepository,
 };
 
-use super::state_machine::{RunAction, WorkAction, transition, transition_run};
+use super::{
+    projector::{WorkControlFact, WorkExecutionFacts, project_work_status},
+    state_machine::{RunAction, WorkAction, transition, transition_run},
+};
 use crate::agent::repository::DEFAULT_LEAD_INSTANCE_ID;
 
 #[derive(Clone)]
@@ -30,6 +34,86 @@ pub struct WorkRepository {
 impl WorkRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    pub async fn reproject_work_status(&self, work_id: &str) -> Result<WorkStatus, AppError> {
+        let current = sqlx::query_scalar::<_, WorkStatus>("SELECT status FROM works WHERE id = ?")
+            .bind(work_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::work_not_found(work_id))?;
+        let lead = sqlx::query_as::<_, (String, AssignmentStatus)>(
+            "SELECT id, status FROM assignments WHERE work_id = ? AND kind = 'lead' ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(work_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (lead_id, lead_assignment) = match lead {
+            Some((id, status)) => (Some(id), Some(status)),
+            None => (None, None),
+        };
+        let member_assignments = match lead_id.as_deref() {
+            Some(lead_id) => sqlx::query_scalar::<_, AssignmentStatus>(
+                "SELECT status FROM assignments WHERE work_id = ? AND parent_assignment_id = ? ORDER BY created_at, id",
+            )
+            .bind(work_id)
+            .bind(lead_id)
+            .fetch_all(&self.pool)
+            .await?,
+            None => Vec::new(),
+        };
+        let run_statuses = sqlx::query_scalar::<_, RunStatus>(
+            "SELECT status FROM runs WHERE work_id = ? ORDER BY created_at, id",
+        )
+        .bind(work_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let valid_delivery = match lead_id.as_deref() {
+            Some(lead_id) => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM work_deliveries WHERE work_id = ? AND lead_assignment_id = ? AND status = 'valid')",
+            )
+            .bind(work_id)
+            .bind(lead_id)
+            .fetch_one(&self.pool)
+            .await?,
+            None => false,
+        };
+        let projected = project_work_status(WorkExecutionFacts {
+            archived: current == WorkStatus::Archived,
+            control: match current {
+                WorkStatus::Stopped => Some(WorkControlFact::Stopped),
+                WorkStatus::Interrupted => Some(WorkControlFact::Interrupted),
+                _ => None,
+            },
+            lead_assignment,
+            member_assignments,
+            run_statuses,
+            valid_delivery,
+        });
+        if projected != current {
+            sqlx::query("UPDATE works SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+                .bind(projected)
+                .bind(Utc::now())
+                .bind(work_id)
+                .bind(current)
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(projected)
+    }
+
+    pub async fn rebuild_work_statuses(&self) -> Result<u64, AppError> {
+        let work_ids = sqlx::query_scalar::<_, String>("SELECT id FROM works ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?;
+        for work_id in &work_ids {
+            self.reproject_work_status(work_id).await?;
+        }
+        Ok(work_ids.len() as u64)
     }
 
     pub async fn create(&self, input: CreateWorkInput) -> Result<WorkDetail, AppError> {
@@ -62,9 +146,13 @@ impl WorkRepository {
                 "rootPath must be a directory",
             ));
         }
+        let workspace = WorkspaceRepository::new(self.pool.clone())
+            .resolve_or_create(&canonical_path, input.permission_mode)
+            .await?;
         let now = Utc::now();
         let summary = WorkSummary {
             id: Uuid::new_v4().to_string(),
+            workspace_id: workspace.id,
             title: title.to_owned(),
             goal: goal.to_owned(),
             root_path: canonical_path.to_string_lossy().into_owned(),
@@ -77,10 +165,11 @@ impl WorkRepository {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         sqlx::query(
             "INSERT INTO works \
-             (id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, workspace_id, title, goal, root_path, permission_mode, status, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&summary.id)
+        .bind(&summary.workspace_id)
         .bind(&summary.title)
         .bind(&summary.goal)
         .bind(&summary.root_path)
@@ -168,8 +257,11 @@ impl WorkRepository {
         id: &str,
     ) -> Result<Option<WorkRow>, AppError> {
         Ok(sqlx::query_as::<_, WorkRow>(
-            "SELECT id, title, goal, root_path, permission_mode, status, created_at, updated_at \
-             FROM works WHERE id = ?",
+            "SELECT works.id, works.workspace_id, works.title, works.goal, \
+                    COALESCE(workspaces.canonical_root_path, works.root_path) AS root_path, \
+                    works.permission_mode, works.status, works.created_at, works.updated_at \
+             FROM works LEFT JOIN workspaces ON workspaces.id = works.workspace_id \
+             WHERE works.id = ?",
         )
         .bind(id)
         .fetch_optional(&mut *connection)
@@ -288,8 +380,11 @@ impl WorkRepository {
 
     pub async fn list(&self) -> Result<Vec<WorkSummary>, AppError> {
         let rows = sqlx::query_as::<_, WorkRow>(
-            "SELECT id, title, goal, root_path, permission_mode, status, created_at, updated_at \
-             FROM works ORDER BY updated_at DESC, created_at DESC, id ASC",
+            "SELECT works.id, works.workspace_id, works.title, works.goal, \
+                    COALESCE(workspaces.canonical_root_path, works.root_path) AS root_path, \
+                    works.permission_mode, works.status, works.created_at, works.updated_at \
+             FROM works LEFT JOIN workspaces ON workspaces.id = works.workspace_id \
+             ORDER BY works.updated_at DESC, works.created_at DESC, works.id ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -300,19 +395,13 @@ impl WorkRepository {
     pub async fn recover_interrupted_runs(&self) -> Result<u64, AppError> {
         let now = Utc::now();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query(
-            "UPDATE works SET status = ?, updated_at = ? \
-             WHERE id IN (\
-                 SELECT DISTINCT work_id FROM runs \
-                 WHERE status IN (?, ?, ?)\
-             )",
+        let work_ids = sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT work_id FROM runs WHERE status IN (?, ?, ?) ORDER BY work_id",
         )
-        .bind(WorkStatus::Interrupted)
-        .bind(now)
         .bind(RunStatus::Running)
         .bind(RunStatus::Waiting)
         .bind(RunStatus::Queued)
-        .execute(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
         let recovered = sqlx::query(
             "UPDATE runs \
@@ -329,6 +418,10 @@ impl WorkRepository {
         .await?
         .rows_affected();
         transaction.commit().await?;
+
+        for work_id in work_ids {
+            self.reproject_work_status(&work_id).await?;
+        }
 
         Ok(recovered)
     }
@@ -1253,6 +1346,7 @@ fn run_action_for_target(status: RunStatus) -> Option<RunAction> {
 #[derive(FromRow)]
 struct WorkRow {
     id: String,
+    workspace_id: String,
     title: String,
     goal: String,
     root_path: String,
@@ -1266,6 +1360,7 @@ impl From<WorkRow> for WorkSummary {
     fn from(row: WorkRow) -> Self {
         Self {
             id: row.id,
+            workspace_id: row.workspace_id,
             title: row.title,
             goal: row.goal,
             root_path: row.root_path,

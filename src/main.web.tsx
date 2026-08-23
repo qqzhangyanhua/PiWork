@@ -130,6 +130,7 @@ const team = (): WorkTeamSummary => ({
 
 const demoWorkSummary: WorkSummary = {
   id: "work-demo",
+  workspaceId: "workspace-demo",
   title: "营收看板",
   goal: "构建营收看板",
   rootPath: "D:/workspace/revenue",
@@ -141,6 +142,7 @@ const demoWorkSummary: WorkSummary = {
 
 const draftWorkSummary: WorkSummary = {
   id: "work-draft",
+  workspaceId: "workspace-docs",
   title: "文档翻译",
   goal: "翻译 README 到中文",
   rootPath: "D:/workspace/docs",
@@ -592,6 +594,7 @@ const demoClient: PiWorkClient = {
   createWork: async (input) => ({
     summary: {
       id: `work-${Date.now()}`,
+      workspaceId: `workspace-${input.rootPath}`,
       title: input.title,
       goal: input.goal,
       rootPath: input.rootPath,

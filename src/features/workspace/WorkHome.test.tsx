@@ -24,6 +24,7 @@ const work = (
   createdAt: updatedAt,
   updatedAt,
   ...overrides,
+  workspaceId: overrides.workspaceId ?? `workspace-${id}`,
 });
 
 const renderHome = ({

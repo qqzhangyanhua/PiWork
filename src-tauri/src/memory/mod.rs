@@ -304,13 +304,16 @@ impl WorkspaceMemoryService {
              recall_enabled = excluded.recall_enabled, updated_at = excluded.updated_at",
         )
         .bind(&root_path)
-        .bind(task_id)
+        .bind(&task_id)
         .bind(input.enabled)
         .bind(input.capture_enabled)
         .bind(input.recall_enabled)
         .bind(Utc::now())
         .execute(&self.pool)
         .await?;
+        sqlx::query("INSERT INTO workspace_memory_bindings (workspace_id, task_id, source_root_path, created_at, updated_at) SELECT id, ?, ?, ?, ? FROM workspaces WHERE path_identity = lower(replace(?, char(92), '/')) ON CONFLICT(workspace_id) DO UPDATE SET task_id = excluded.task_id, source_root_path = excluded.source_root_path, updated_at = excluded.updated_at")
+            .bind(&task_id).bind(&root_path).bind(Utc::now()).bind(Utc::now()).bind(&root_path)
+            .execute(&self.pool).await?;
         self.worker_wake.notify_one();
 
         self.list_workspace_bindings()
@@ -656,8 +659,7 @@ impl WorkspaceMemoryService {
             return Ok(None);
         }
         let binding = sqlx::query_as::<_, BindingRow>(
-            "SELECT root_path, task_id, enabled, capture_enabled, recall_enabled \
-             FROM memory_workspace_bindings WHERE root_path = ?",
+            "SELECT legacy.root_path, workspace_binding.task_id, legacy.enabled, legacy.capture_enabled, legacy.recall_enabled FROM workspaces INNER JOIN workspace_memory_bindings workspace_binding ON workspace_binding.workspace_id = workspaces.id INNER JOIN memory_workspace_bindings legacy ON legacy.root_path = workspace_binding.source_root_path WHERE workspaces.path_identity = lower(replace(?, char(92), '/'))",
         )
         .bind(root_path)
         .fetch_optional(&self.pool)
