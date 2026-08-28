@@ -1,0 +1,29 @@
+src-tauri/src/assignment/mod.rs
+  s_554f65ca20b0af::t_987e8885ed951f 2
+src-tauri/src/assignment/event_outbox.rs
+  s_554f65ca20b0af::t_cfecec96ec3ad8 48
+  s_554f65ca20b0af::t_a2e8f579bf637a 493
+  s_554f65ca20b0af::t_3b4fa8a03a35cb 1-47,49-492
+src-tauri/src/assignment/repository.rs
+  s_554f65ca20b0af::t_024e2cfb6c1c95 23-26,67,72-75,83-86,97
+  s_554f65ca20b0af::t_aade0ab284685f 1916,1923-1925,1928,1930,1934,2364
+src-tauri/src/assignment/event_outbox/tests.rs
+  s_554f65ca20b0af::t_6404eeaadbdbce 1-4,81
+  s_554f65ca20b0af::t_85f1e9ee624507 5-80,82-178
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "4ae12a0e35b12815b784639f051224d0c338fd21",
+  "prompts": {},
+  "sessions": {
+    "s_554f65ca20b0af": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04904-e4ae-72e1-879e-63fa3f76170e",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
