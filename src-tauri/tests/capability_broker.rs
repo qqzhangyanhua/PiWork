@@ -129,7 +129,7 @@ async fn balanced_asks_for_workspace_writes_and_denies_escape() {
         broker.authorize(
             &snapshot,
             &CapabilityOperation::FilesystemWrite {
-                path: root.path().join("..\\escape.txt")
+                path: root.path().join("../escape.txt")
             }
         ),
         CapabilityDecision::Deny {

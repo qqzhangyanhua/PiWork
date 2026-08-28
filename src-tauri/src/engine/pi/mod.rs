@@ -808,10 +808,10 @@ impl PiCommand {
 
         #[cfg(not(windows))]
         {
-            return Ok(Self {
+            Ok(Self {
                 program: "pi".into(),
                 prefix_arguments: Vec::new(),
-            });
+            })
         }
 
         #[cfg(windows)]

@@ -98,9 +98,7 @@ async fn fetch_limited(client: &Client, url: Url, limit: usize) -> Option<(Url, 
         return None;
     }
     let final_url = response.url().clone();
-    if safe_https_url(final_url.as_str()).is_none() {
-        return None;
-    }
+    safe_https_url(final_url.as_str())?;
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {

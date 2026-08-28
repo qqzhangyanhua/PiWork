@@ -569,11 +569,12 @@ async fn scheduler_injects_only_the_assignment_selected_capability_pack() {
     handle.wake().unwrap();
     wait_for_assignment_status(&repository, &assignment.id, AssignmentStatus::DeadLetter).await;
 
-    let prompts = engine.prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 1);
-    assert!(prompts[0].contains("优先使用原始可信来源"));
-    assert!(!prompts[0].contains("ALTERNATE_RESEARCH_INSTRUCTIONS"));
-    drop(prompts);
+    {
+        let prompts = engine.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("优先使用原始可信来源"));
+        assert!(!prompts[0].contains("ALTERNATE_RESEARCH_INSTRUCTIONS"));
+    }
     handle.shutdown().await;
 }
 
@@ -787,13 +788,14 @@ async fn lead_resume_context_includes_validated_dependency_results() {
     handle.wake().unwrap();
     wait_for_assignment_status(&repository, &lead_id, AssignmentStatus::Waiting).await;
 
-    let prompts = engine.prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 1);
-    assert!(
-        prompts[0].contains("The dependency found the scheduler invariant"),
-        "the resumed Lead must receive validated dependency Result Envelopes"
-    );
-    drop(prompts);
+    {
+        let prompts = engine.prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("The dependency found the scheduler invariant"),
+            "the resumed Lead must receive validated dependency Result Envelopes"
+        );
+    }
     handle.shutdown().await;
 }
 

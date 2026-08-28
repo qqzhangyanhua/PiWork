@@ -44,10 +44,7 @@ pub fn project_work_status(facts: WorkExecutionFacts) -> WorkStatus {
         return WorkStatus::Interrupted;
     }
 
-    if facts
-        .run_statuses
-        .iter()
-        .any(|status| *status == RunStatus::Running)
+    if facts.run_statuses.contains(&RunStatus::Running)
         || assignments.clone().any(|status| {
             matches!(
                 status,
@@ -57,18 +54,12 @@ pub fn project_work_status(facts: WorkExecutionFacts) -> WorkStatus {
     {
         return WorkStatus::Running;
     }
-    if facts
-        .run_statuses
-        .iter()
-        .any(|status| *status == RunStatus::Waiting)
+    if facts.run_statuses.contains(&RunStatus::Waiting)
         || facts.lead_assignment == Some(AssignmentStatus::Waiting)
     {
         return WorkStatus::Waiting;
     }
-    if facts
-        .run_statuses
-        .iter()
-        .any(|status| *status == RunStatus::Queued)
+    if facts.run_statuses.contains(&RunStatus::Queued)
         || assignments
             .clone()
             .any(|status| *status == AssignmentStatus::Queued)
@@ -77,25 +68,13 @@ pub fn project_work_status(facts: WorkExecutionFacts) -> WorkStatus {
     }
 
     if facts.lead_assignment.is_none() {
-        if facts
-            .run_statuses
-            .iter()
-            .any(|status| *status == RunStatus::Failed)
-        {
+        if facts.run_statuses.contains(&RunStatus::Failed) {
             return WorkStatus::Failed;
         }
-        if facts
-            .run_statuses
-            .iter()
-            .any(|status| *status == RunStatus::Interrupted)
-        {
+        if facts.run_statuses.contains(&RunStatus::Interrupted) {
             return WorkStatus::Interrupted;
         }
-        if facts
-            .run_statuses
-            .iter()
-            .any(|status| *status == RunStatus::Stopped)
-        {
+        if facts.run_statuses.contains(&RunStatus::Stopped) {
             return WorkStatus::Stopped;
         }
     }

@@ -340,14 +340,14 @@ impl ExtensionService {
         let now = Utc::now();
         let mut transaction = self.pool.begin().await?;
         for provider in &input.providers {
-            if provider.clear_credential {
-                if secret::load(&web_credential_target(&provider.provider_id)).is_ok() {
-                    secret::delete(&web_credential_target(&provider.provider_id)).map_err(
-                        |_| AppError::Credential {
-                            message: "web search credential could not be removed".into(),
-                        },
-                    )?;
-                }
+            if provider.clear_credential
+                && secret::load(&web_credential_target(&provider.provider_id)).is_ok()
+            {
+                secret::delete(&web_credential_target(&provider.provider_id)).map_err(|_| {
+                    AppError::Credential {
+                        message: "web search credential could not be removed".into(),
+                    }
+                })?;
             }
             if let Some(api_key) = provider
                 .api_key
@@ -577,13 +577,13 @@ fn validate_web_access_input(input: &SaveWebAccessSettingsInput) -> Result<(), A
                 "default provider must be enabled",
             ));
         }
-        if let Some(fallback) = input.fallback_provider.as_deref() {
-            if !enabled.contains(fallback) || fallback == default {
-                return Err(AppError::invalid_input(
-                    "fallbackProvider",
-                    "fallback provider must be a different enabled provider",
-                ));
-            }
+        if let Some(fallback) = input.fallback_provider.as_deref()
+            && (!enabled.contains(fallback) || fallback == default)
+        {
+            return Err(AppError::invalid_input(
+                "fallbackProvider",
+                "fallback provider must be a different enabled provider",
+            ));
         }
     }
     for provider in &input.providers {

@@ -33,6 +33,9 @@ type StartupError = Box<dyn std::error::Error>;
 type StartupResult<T> = Result<T, StartupError>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// `Retry` is only produced on Windows (see `prompt_startup_failure` below); other
+// platforms only ever exercise it through the cross-platform tests.
+#[cfg_attr(not(windows), allow(dead_code))]
 enum StartupFailureDecision {
     Retry,
     Exit,
@@ -856,9 +859,10 @@ mod tests {
             "all node_modules trees must stay out of git"
         );
         assert!(
-            !gitignore.lines().any(|line| line.contains(
-                "pi-sidecar/builtin-extensions/pi-web-access/node_modules"
-            )),
+            !gitignore
+                .lines()
+                .any(|line| line
+                    .contains("pi-sidecar/builtin-extensions/pi-web-access/node_modules")),
             "pi-web-access node_modules must not be force-tracked via gitignore exceptions"
         );
 

@@ -10,6 +10,12 @@ impl PlatformCredentialVault {
     }
 }
 
+impl Default for PlatformCredentialVault {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CredentialVault for PlatformCredentialVault {
     fn store_api_key(&self, configuration_id: &str, api_key: &str) -> Result<(), String> {
         secret::store(&credential_target(configuration_id), "PiWork", api_key)
