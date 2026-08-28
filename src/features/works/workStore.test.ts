@@ -179,6 +179,26 @@ const workDetail = (): WorkDetail => ({
 });
 
 describe("createWorkStore", () => {
+  it("clears the running sidebar state when a Run completes", () => {
+    const store = createWorkStore(createMockTauriClient());
+    store.getState().upsertWork({
+      ...work,
+      status: "running",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+    store.getState().applyEvent(event(1, { type: "runStarted", modelLabel: "gpt-5" }));
+
+    store.getState().applyEvent(event(2, {
+      type: "runCompleted",
+      summary: "本轮对话已结束。",
+      artifacts: [],
+      validation: [],
+      limitations: [],
+    }));
+
+    expect(store.getState().works.w1?.status).toBe("idle");
+  });
+
   it("clears the running sidebar state when Work delivery completes", () => {
     const store = createWorkStore(createMockTauriClient());
     store.getState().upsertWork({
@@ -687,7 +707,7 @@ describe("createWorkStore", () => {
     await hydration;
 
     expect(store.getState().works.w1).toMatchObject({
-      status: "running",
+      status: "idle",
       updatedAt: "2026-07-28T11:00:00.000Z",
     });
   });
@@ -742,7 +762,7 @@ describe("createWorkStore", () => {
     ).toBe(false);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
-      status: "running",
+      status: "idle",
       updatedAt: "2026-07-28T09:00:03.000Z",
     });
   });
@@ -838,7 +858,7 @@ describe("createWorkStore", () => {
     ).toEqual([1, 2, 3]);
     expect(store.getState().lastSequenceByRun.r1).toBe(3);
     expect(store.getState().works.w1).toMatchObject({
-      status: "running",
+      status: "idle",
       updatedAt: "2026-07-28T09:00:03.000Z",
     });
   });
@@ -1305,7 +1325,7 @@ describe("createWorkStore", () => {
     expect(store.getState().loading).toBe(false);
   });
 
-  it("keeps a completed Run non-terminal until a delivery is accepted", async () => {
+  it("does not let a late start response revive a completed Run as running", async () => {
     const startResult = deferred<StartWorkOutput>();
     const client: PiWorkClient = {
       ...unusedClient,
@@ -1332,7 +1352,7 @@ describe("createWorkStore", () => {
     await starting;
 
     expect(store.getState().works.w1).toMatchObject({
-      status: "running",
+      status: "idle",
       updatedAt: "2026-07-28T09:00:01.000Z",
     });
   });
@@ -1372,7 +1392,7 @@ describe("createWorkStore", () => {
     });
 
     expect(store.getState().works.w1).toMatchObject({
-      status: "running",
+      status: "idle",
       updatedAt: "2026-07-28T09:00:03.000Z",
     });
   });

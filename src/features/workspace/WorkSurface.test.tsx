@@ -515,6 +515,22 @@ describe("WorkSurface", () => {
     expect(client.startWork).toHaveBeenLastCalledWith("work-1", "再优化一次", [], []);
   });
 
+  it("对完话后立即清除侧栏运行指示", async () => {
+    const client = createMockTauriClient();
+    client.seed(seededDetail("running"));
+    const { container } = render(<WorkSurface client={client} />);
+
+    await screen.findByRole("button", { name: "营收看板, 运行中" });
+    expect(container.querySelector(".project-conversation__spinner")).toBeInTheDocument();
+
+    client.emit(runCompletedEvent({ runId: "run-1" }));
+
+    expect(
+      await screen.findByRole("button", { name: "营收看板, 空闲" }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".project-conversation__spinner")).not.toBeInTheDocument();
+  });
+
   it("交付完成后立即清除侧栏运行指示", async () => {
     const client = createMockTauriClient();
     client.seed(seededDetail("running"));

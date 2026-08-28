@@ -96,6 +96,9 @@ const statusForEvent = (
   if (event.payload.type === "waiting") {
     return "waiting";
   }
+  if (event.payload.type === "runCompleted") {
+    return "idle";
+  }
   if (event.payload.type === "workDeliveryCompleted") {
     return "completed";
   }
@@ -129,7 +132,8 @@ const isTerminalStatus = (status: WorkSummary["status"]) =>
   status === "completed" ||
   status === "failed" ||
   status === "stopped" ||
-  status === "interrupted";
+  status === "interrupted" ||
+  status === "idle";
 
 export const createWorkStore = (client: PiWorkClient = tauriClient) => {
   let hydration: Promise<void> | null = null;
