@@ -1,0 +1,39 @@
+src-tauri/tests/collaboration_loop.rs
+  s_9f27fe770384bd::t_91e323420f072c 572-577
+  s_9f27fe770384bd::t_f067bd1cae1c10 791-798
+src-tauri/src/connectors/icons.rs
+  s_9f27fe770384bd::t_af11b989822ba1 101
+src-tauri/src/work/projector.rs
+  s_9f27fe770384bd::t_dfa8c402a8e750 47
+  s_9f27fe770384bd::t_c182318d7475c6 62
+  s_9f27fe770384bd::t_6831e7b7c1e3ac 71,74,77
+  s_9f27fe770384bd::t_28181e8e8a2331 57
+src-tauri/src/extensions/mod.rs
+  s_9f27fe770384bd::t_ad2642f1dbadfe 343-350
+  s_9f27fe770384bd::t_13febe9019a6cf 580-586
+src-tauri/src/model/credentials.rs
+  s_9f27fe770384bd::t_e6bab392103f1b 13-18
+src-tauri/src/engine/pi/mod.rs
+  s_9f27fe770384bd::t_be0b400a475b9b 811,814
+src-tauri/src/lib.rs
+  s_9f27fe770384bd::t_12b4e64822f4f7 36-38
+  s_9f27fe770384bd::t_c9998966b1cf47 862-865
+src-tauri/tests/capability_broker.rs
+  s_9f27fe770384bd::t_5d792494486c9a 132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "ca068e9605371b0a4e05ff70f4c906d52376db37",
+  "prompts": {},
+  "sessions": {
+    "s_9f27fe770384bd": {
+      "agent_id": {
+        "tool": "droid",
+        "id": "c1f29a1a-895d-4b18-b324-089382a6804a",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
