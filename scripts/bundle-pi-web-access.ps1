@@ -59,6 +59,21 @@ try {
     throw "Bundled typebox version does not match Pi's extension API version."
   }
 
+  $Modules = Join-Path $Target "node_modules"
+  Get-ChildItem -LiteralPath $Modules -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+    Where-Object { @('test', 'tests', 'docs', '.yarn') -contains $_.Name } |
+    Sort-Object { $_.FullName.Length } -Descending |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+  Get-ChildItem -LiteralPath $Modules -Recurse -Force -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -eq 'banner.png' -or $_.Extension -eq '.mp4' } |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+
+  $DemoVideo = Join-Path $Modules "pi-web-access\pi-web-fetch-demo.mp4"
+  $Banner = Join-Path $Modules "pi-web-access\banner.png"
+  if ((Test-Path -LiteralPath $DemoVideo) -or (Test-Path -LiteralPath $Banner)) {
+    throw "Packaging weight was not stripped from the bundled extension."
+  }
+
   $PiEntrypoint = Join-Path $SidecarRoot "dist\piwork-pi.js"
   $PreviousAgentDir = $env:PI_CODING_AGENT_DIR
   try {

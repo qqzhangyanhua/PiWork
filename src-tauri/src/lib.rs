@@ -88,7 +88,8 @@ fn prompt_startup_failure(notice: &StartupFailureNotice) -> StartupResult<Startu
 #[cfg(not(windows))]
 fn prompt_startup_failure(notice: &StartupFailureNotice) -> StartupResult<StartupFailureDecision> {
     eprintln!("CoDo startup failed ({}).", notice.code);
-    Err(std::io::Error::other("native startup failure dialog is unavailable").into())
+    eprintln!("{}", notice.body);
+    Ok(StartupFailureDecision::Exit)
 }
 
 trait SecondInstanceWindow {
@@ -193,7 +194,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                 )
                 .ok();
             let observer = engine::activity_observer::ActivityObserverHandle::in_process();
-            tauri::async_runtime::block_on(orchestrate_startup(
+            match tauri::async_runtime::block_on(orchestrate_startup(
                 || {
                     let database_path = database_path.clone();
                     let app_handle = app_handle.clone();
@@ -417,7 +418,18 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     Ok(())
                 },
                 prompt_startup_failure,
-            ))
+            )) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    eprintln!("CoDo startup error: {error}");
+                    #[cfg(not(windows))]
+                    std::process::exit(1);
+                    #[cfg(windows)]
+                    {
+                        Err(error)
+                    }
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             work::commands::get_default_project_directory,
@@ -749,12 +761,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(macos["bundle"]["targets"], serde_json::json!(["dmg"]));
+        let before_dev = macos["build"]["beforeDevCommand"]
+            .as_str()
+            .expect("macOS beforeDevCommand");
+        assert!(
+            before_dev.contains("scripts/fetch-darwin-node.sh"),
+            "macOS tauri dev must fetch the gitignored Darwin Node runtime"
+        );
         let before = macos["build"]["beforeBuildCommand"]
             .as_str()
             .expect("macOS beforeBuildCommand");
         assert!(
+            before.contains("scripts/build-document-runtime.sh release"),
+            "macOS packaging must ship the release document-runtime helper"
+        );
+        assert!(
             !before.to_ascii_lowercase().contains("powershell"),
             "macOS packaging must not depend on PowerShell"
+        );
+        assert!(
+            macos["bundle"]["resources"]
+                .get("binaries/windows/node.exe")
+                .is_none(),
+            "macOS packaging must not pull in the Windows Node runtime"
         );
     }
 
@@ -773,11 +802,65 @@ mod tests {
                 .any(|line| line == "/src-tauri/binaries/document-runtime/piwork-document-runtime"),
             "macOS document-runtime helper must not enter git"
         );
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("binaries/pi-sidecar/node.exe")
-                .is_file(),
+            manifest.join("binaries/windows/node.exe").is_file(),
             "Windows bundled Node remains in the repository"
+        );
+        assert!(
+            !manifest.join("binaries/pi-sidecar/node.exe").exists(),
+            "Windows Node must not sit in the shared sidecar directory copied on every platform"
+        );
+    }
+
+    #[test]
+    fn windows_bundle_maps_node_exe_into_the_sidecar_runtime_path() {
+        let base: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            base["bundle"]["resources"]["binaries/pi-sidecar"],
+            "pi-sidecar"
+        );
+        assert!(
+            base["bundle"]["resources"]
+                .get("binaries/windows/node.exe")
+                .is_none(),
+            "Windows Node must not be in the shared resource map"
+        );
+
+        let windows_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.windows.conf.json");
+        let windows: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&windows_path).expect("Windows packaging config"),
+        )
+        .unwrap();
+        assert_eq!(
+            windows["bundle"]["resources"]["binaries/windows/node.exe"],
+            "pi-sidecar/node.exe"
+        );
+    }
+
+    #[test]
+    fn bundled_web_access_extension_omits_packaging_weight() {
+        let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries/pi-sidecar/builtin-extensions/pi-web-access/node_modules");
+        assert!(
+            !modules
+                .join("pi-web-access/pi-web-fetch-demo.mp4")
+                .is_file(),
+            "demo video must not ship in the app bundle"
+        );
+        assert!(
+            !modules.join("pi-web-access/banner.png").is_file(),
+            "package banner must not ship in the app bundle"
+        );
+        assert!(
+            !modules.join("@mixmark-io/domino/test").exists(),
+            "extension test fixtures must not ship in the app bundle"
+        );
+        assert!(
+            modules.join("pi-web-access/index.ts").is_file(),
+            "web access entry point must remain"
         );
     }
 
@@ -1009,5 +1092,30 @@ mod tests {
         assert!(rendered.contains("application data"));
         assert!(!rendered.contains("raw SQL secret"));
         assert_eq!(notice.code, "PIWORK-STARTUP-001");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn macos_startup_failure_keeps_the_original_error_and_exits_without_a_dialog_err() {
+        let source = include_str!("lib.rs");
+        let mac_prompt = source
+            .split("#[cfg(not(windows))]\nfn prompt_startup_failure")
+            .nth(1)
+            .expect("macOS startup failure prompt is missing")
+            .split("trait SecondInstanceWindow")
+            .next()
+            .expect("macOS startup failure prompt is unbounded");
+        assert!(mac_prompt.contains("StartupFailureDecision::Exit"));
+        assert!(!mac_prompt.contains("native startup failure dialog is unavailable"));
+
+        let setup = source
+            .split("fn application_builder()")
+            .nth(1)
+            .expect("application builder is missing")
+            .split("#[cfg_attr(mobile")
+            .next()
+            .expect("application builder is unbounded");
+        assert!(setup.contains("eprintln!(\"CoDo startup error: {error}\")"));
+        assert!(setup.contains("std::process::exit(1)"));
     }
 }

@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeDevCommand": "bash scripts/build-document-runtime.sh debug && pnpm dev",
+    "beforeDevCommand": "bash scripts/build-document-runtime.sh debug && bash scripts/fetch-darwin-node.sh && pnpm dev",
     "beforeBuildCommand": "bash scripts/build-document-runtime.sh release && bash scripts/fetch-darwin-node.sh && pnpm build"
   },
   "bundle": {

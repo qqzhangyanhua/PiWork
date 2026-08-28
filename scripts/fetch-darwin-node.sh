@@ -43,6 +43,9 @@ if [[ ! -f "${NODE_BIN}" ]]; then
   exit 1
 fi
 
+# Replace a leftover symlink instead of writing through it (e.g. into
+# /Applications/CoDo.app). `rm` on a symlink removes the link, not the target.
+rm -f "${DEST}"
 cp "${NODE_BIN}" "${DEST}"
 chmod +x "${DEST}"
 

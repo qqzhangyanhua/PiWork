@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "binaries/windows/node.exe": "pi-sidecar/node.exe"
+    }
+  }
+}
