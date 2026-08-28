@@ -1,0 +1,49 @@
+src/i18n/credentialVault.test.ts
+  s_63e24577e19411::t_1719ddb8da1671 1-31
+src/features/connectors/ConnectorPage.tsx
+  s_63e24577e19411::t_427a4233995a93 43,564
+src/features/model-setup/ModelSetup.tsx
+  s_63e24577e19411::t_25a358d392487b 11,113
+src/i18n/locales/zh-CN.json
+  s_63e24577e19411::t_9aa79cab46ab17 2-6,18,96,200,258,276
+src/i18n/locales/en.json
+  s_63e24577e19411::t_5b4e5d4b878f9c 2-6,18,96,200,258,276
+src-tauri/Cargo.toml
+  s_63e24577e19411::t_9f2d2ca1cef2df 52-54
+src-tauri/src/model/mod.rs
+  s_63e24577e19411::t_84f721c3c2d422 182-183
+src/features/model-setup/ModelConnectionEditor.tsx
+  s_63e24577e19411::t_97523f4eb02476 11,204
+src/features/settings/WebAccessSettingsPanel.tsx
+  s_63e24577e19411::t_6dfdb842d11463 22,234
+src-tauri/src/secret.rs
+  s_63e24577e19411::t_c9118588fb8052 76-77,79-111,116,121,125-164
+  s_63e24577e19411::t_635e98e01d94be 78
+src/app/App.test.tsx
+  s_63e24577e19411::t_125d7951ee7415 6,327-332
+src/i18n/credentialVault.ts
+  s_63e24577e19411::t_11a2418ab41d08 1-17
+src-tauri/tests/model_configuration.rs
+  s_63e24577e19411::t_b95bcbe7eeed48 11
+  s_63e24577e19411::t_8b91f744114137 412-479
+src/features/settings/MemorySettingsPanel.tsx
+  s_63e24577e19411::t_53bb6e6179c55e 23,249
+src-tauri/Cargo.lock
+  s_63e24577e19411::t_f170ab4232dc27 3081
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "b828bc214d07bc2fc1297800118a10bcf6954134",
+  "prompts": {},
+  "sessions": {
+    "s_63e24577e19411": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04776-ed90-7693-b7e1-9bd9a59acb61",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
