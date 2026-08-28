@@ -1,0 +1,53 @@
+src-tauri/src/lib.rs
+  s_88c793ce5be86c::t_54a4bac86f4613 1096-1120
+  s_f9ed5deb3b717c::t_66741f9ce65e78 783-784,825-826
+  s_88c793ce5be86c::t_1422f8448330c8 197
+  s_88c793ce5be86c::t_e6b87d5e214527 421-424,431-432
+  s_d94de4355f5853::t_0f90bf711d3e3b 764-770
+  s_88c793ce5be86c::t_d7d670d2fff503 91-92
+  s_88c793ce5be86c::t_fd988478ed0b0a 425-430
+  s_f9ed5deb3b717c::t_89d3d1568f7832 774-777,782,785-787,805,807,810-824,827-845,847-864
+  s_f9ed5deb3b717c::t_bf856ae4cc9cbc 846
+src-tauri/tauri.macos.conf.json
+  s_d94de4355f5853::t_cc8f00be72114b 3
+src-tauri/document-runtime/Cargo.toml
+  s_f9ed5deb3b717c::t_66ee7dc219b7fb 7-9
+scripts/fetch-darwin-node.sh
+  s_d94de4355f5853::t_dc989855ebfb8a 46-48
+scripts/bundle-pi-web-access.ps1
+  s_f9ed5deb3b717c::t_486d8aaec233b7 62-76
+src-tauri/tauri.windows.conf.json
+  s_f9ed5deb3b717c::t_891dbae677e09f 1-7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "dc07d441f9dc012500560e7c6c4ffdbd81e58fad",
+  "prompts": {},
+  "sessions": {
+    "s_88c793ce5be86c": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04826-796f-7a71-9978-2807421bf6d6",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    },
+    "s_d94de4355f5853": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04853-c4b0-7883-a5b8-f2816f311c32",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    },
+    "s_f9ed5deb3b717c": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04872-5f82-7593-b0ed-f3300d4452c9",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
