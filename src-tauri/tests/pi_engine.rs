@@ -18,7 +18,7 @@ fn configuration(provider: ModelProvider) -> RuntimeModelConfiguration {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_declares_only_capabilities_verified_by_its_rpc_translation_and_control_paths() {
     use std::sync::Arc;

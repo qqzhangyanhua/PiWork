@@ -971,15 +971,15 @@ impl PiEngineAdapter {
         runtime_root: PathBuf,
         executable: Option<PathBuf>,
     ) -> Result<Self, EngineError> {
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (model_service, sessions_root, runtime_root, executable);
-            // The shipped Pi sidecar and confirmable Job Object containment are
-            // Windows-only. Do not silently substitute Unix process groups:
-            // detached descendants would escape and cleanup could not be proven.
+            // Confirmable containment is Windows Job Objects or macOS process
+            // groups. Other targets stay fail-closed. A process group is not a
+            // Job Object: descendants that leave the session may leak.
             Err(EngineError::Unsupported("pi_rpc_windows_only"))
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         {
             Ok(Self {
                 model_service,
@@ -1074,10 +1074,10 @@ impl EngineAdapter for PiEngineAdapter {
 
     fn capabilities(&self) -> EngineCapabilities {
         EngineCapabilities {
-            session_resume: cfg!(windows),
+            session_resume: cfg!(any(windows, target_os = "macos")),
             session_rotate: false,
             native_steer: false,
-            cancel: cfg!(windows),
+            cancel: cfg!(any(windows, target_os = "macos")),
             thought_stream: true,
             plan_updates: false,
             permission_requests: false,
@@ -2147,33 +2147,33 @@ mod tests {
 
     #[test]
     fn isolated_session_directory_uses_agent_work_and_generation_segments() {
-        let directory = super::session_directory(
-            std::path::Path::new(r"D:\sessions"),
-            "agent-instance-contract",
-            "work-1",
-            3,
-        )
-        .unwrap();
+        let sessions = std::path::Path::new("sessions");
+        let directory =
+            super::session_directory(sessions, "agent-instance-contract", "work-1", 3).unwrap();
 
         assert_eq!(
             directory,
-            std::path::Path::new(r"D:\sessions\pi\agent-instance-contract\work-1\3")
+            sessions
+                .join("pi")
+                .join("agent-instance-contract")
+                .join("work-1")
+                .join("3")
         );
     }
 
     #[test]
     fn session_directory_maps_windows_hostile_agent_ids_deterministically() {
-        let directory = super::session_directory(
-            std::path::Path::new(r"D:\sessions"),
-            "agent-instance:piwork-lead",
-            "work-1",
-            1,
-        )
-        .unwrap();
+        let sessions = std::path::Path::new("sessions");
+        let directory =
+            super::session_directory(sessions, "agent-instance:piwork-lead", "work-1", 1).unwrap();
 
         assert_eq!(
             directory,
-            std::path::Path::new(r"D:\sessions\pi\agent-instance_piwork-lead\work-1\1")
+            sessions
+                .join("pi")
+                .join("agent-instance_piwork-lead")
+                .join("work-1")
+                .join("1")
         );
         // The drive prefix contributes a colon on Windows; only identity
         // segments must be free of Windows-hostile directory characters.
@@ -2212,7 +2212,7 @@ mod tests {
 
     #[test]
     fn legacy_lead_directory_is_resolved_only_once_before_the_first_rotation() {
-        let sessions = std::path::Path::new(r"D:\sessions");
+        let sessions = std::path::Path::new("sessions");
 
         let legacy = super::resolve_session_directory(
             sessions,
@@ -2224,7 +2224,7 @@ mod tests {
             true,
         )
         .unwrap();
-        assert_eq!(legacy, std::path::Path::new(r"D:\sessions\work-legacy"));
+        assert_eq!(legacy, sessions.join("work-legacy"));
 
         let rotated = super::resolve_session_directory(
             sessions,
@@ -2238,7 +2238,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             rotated,
-            std::path::Path::new(r"D:\sessions\pi\agent-instance_piwork-lead\work-legacy\2")
+            sessions
+                .join("pi")
+                .join("agent-instance_piwork-lead")
+                .join("work-legacy")
+                .join("2")
         );
 
         let non_lead = super::resolve_session_directory(
@@ -2253,7 +2257,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             non_lead,
-            std::path::Path::new(r"D:\sessions\pi\agent-instance_local_researcher\work-legacy\1")
+            sessions
+                .join("pi")
+                .join("agent-instance_local_researcher")
+                .join("work-legacy")
+                .join("1")
         );
     }
 }

@@ -1,9 +1,12 @@
 //! Ownership boundary for the production Pi process and its containment handle.
 //!
-//! The production contract is the Windows NSIS bundle running Pi through its
-//! bundled `node.exe`. Windows Job Objects give that sidecar a containment
-//! primitive whose emptiness can be confirmed. Other targets deliberately fail
-//! closed instead of claiming cleanup for descendants that could detach.
+//! Windows Job Objects give the sidecar a containment primitive whose emptiness
+//! can be confirmed, including for descendants that detach from the console.
+//! macOS starts a new session (`setsid`) and signals that process group on
+//! terminate. That contract is weaker than a Job Object: descendants that leave
+//! the session may leak, and emptiness of the group is not proof that every
+//! historical child is gone. Other targets fail closed rather than claiming
+//! Job Object isolation.
 
 use std::io;
 
@@ -827,7 +830,174 @@ mod platform {
         }
     }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod platform {
+    use std::{io, time::Duration};
+
+    use tokio::process::{Child, Command};
+
+    use super::{CleanupBudget, PiProcessSpawnError, PiProcessStdio};
+
+    // kill(-pgid, …) addresses the session we created with setsid(2).
+    const ESRCH: i32 = 3;
+    const SIGKILL: i32 = 9;
+
+    unsafe extern "C" {
+        fn setsid() -> i32;
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+
+    pub(crate) struct PiProcessTree {
+        child: Child,
+        pgid: i32,
+    }
+
+    impl PiProcessTree {
+        pub(crate) async fn spawn(command: &mut Command) -> Result<Self, PiProcessSpawnError> {
+            // New session so the sidecar is session and process-group leader.
+            // This is not a Windows Job Object: a descendant that calls setsid()
+            // or setpgid() leaves the group and will not be reaped.
+            // SAFETY: pre_exec runs in the forked child before exec. The
+            // closure only calls setsid(2), which is async-signal-safe.
+            unsafe {
+                command.pre_exec(|| {
+                    if setsid() == -1 {
+                        Err(io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+            let child = command.spawn().map_err(PiProcessSpawnError::before_child)?;
+            let Some(pid) = child.id() else {
+                return Err(abandon_spawned_child(
+                    child,
+                    io::Error::new(io::ErrorKind::NotFound, "spawned Pi process has no pid"),
+                )
+                .await);
+            };
+            let Ok(pgid) = i32::try_from(pid) else {
+                return Err(abandon_spawned_child(
+                    child,
+                    io::Error::other("spawned Pi pid is not a process group id"),
+                )
+                .await);
+            };
+            Ok(Self { child, pgid })
+        }
+
+        pub(crate) fn take_stdio(&mut self) -> io::Result<PiProcessStdio> {
+            Ok(PiProcessStdio {
+                stdin: self.child.stdin.take().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "Pi RPC stdin is unavailable")
+                })?,
+                stdout: self.child.stdout.take().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "Pi RPC stdout is unavailable")
+                })?,
+                stderr: self.child.stderr.take(),
+            })
+        }
+
+        pub(crate) async fn terminate_and_confirm(
+            mut self,
+            allow_graceful_exit: bool,
+            cleanup: CleanupBudget,
+        ) -> io::Result<()> {
+            let mut cleanup_errors = Vec::new();
+            let mut child_reaped = false;
+            if allow_graceful_exit {
+                match tokio::time::timeout_at(cleanup.deadline(), self.child.wait()).await {
+                    Ok(Ok(_)) => child_reaped = true,
+                    Ok(Err(error)) => cleanup_errors.push(error),
+                    Err(_) => {}
+                }
+            }
+
+            if let Err(error) = signal_process_group(self.pgid, SIGKILL) {
+                cleanup_errors.push(error);
+            }
+            if !child_reaped {
+                if let Err(error) = self.child.start_kill() {
+                    cleanup_errors.push(error);
+                }
+                match tokio::time::timeout_at(cleanup.deadline(), self.child.wait()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => cleanup_errors.push(error),
+                    Err(_) => cleanup_errors.push(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Pi child did not exit",
+                    )),
+                }
+            }
+            if let Err(error) = confirm_process_group_exited(self.pgid, cleanup).await {
+                cleanup_errors.push(error);
+            }
+
+            if cleanup_errors.is_empty() {
+                Ok(())
+            } else {
+                Err(io::Error::other(
+                    "Pi process cleanup could not be confirmed",
+                ))
+            }
+        }
+    }
+
+    async fn abandon_spawned_child(mut child: Child, source: io::Error) -> PiProcessSpawnError {
+        let cleanup = CleanupBudget::new();
+        let _ = child.start_kill();
+        let cleanup_confirmed = matches!(
+            tokio::time::timeout_at(cleanup.deadline(), child.wait()).await,
+            Ok(Ok(_))
+        );
+        PiProcessSpawnError::after_child(source, cleanup_confirmed, cleanup)
+    }
+
+    fn signal_process_group(pgid: i32, signal: i32) -> io::Result<()> {
+        // SAFETY: pgid is the session leader we spawned; a negative pid is killpg.
+        let result = unsafe { kill(-pgid, signal) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ESRCH) {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    fn process_group_has_members(pgid: i32) -> io::Result<bool> {
+        // SAFETY: same session-leader pgid as spawn. Signal 0 is existence only.
+        // Processes that already left the session are invisible here — the Job
+        // Object gap this path must not paper over.
+        let result = unsafe { kill(-pgid, 0) };
+        if result == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+
+    async fn confirm_process_group_exited(pgid: i32, cleanup: CleanupBudget) -> io::Result<()> {
+        tokio::time::timeout_at(cleanup.deadline(), async {
+            loop {
+                if !process_group_has_members(pgid)? {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Pi process group did not empty"))?
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod platform {
     use std::io;
 
@@ -841,14 +1011,14 @@ mod platform {
         pub(crate) async fn spawn(_command: &mut Command) -> Result<Self, PiProcessSpawnError> {
             Err(PiProcessSpawnError::before_child(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "production Pi process containment is supported only on Windows",
+                "production Pi process containment is supported only on Windows and macOS",
             )))
         }
 
         pub(crate) fn take_stdio(&mut self) -> io::Result<PiProcessStdio> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "production Pi process containment is supported only on Windows",
+                "production Pi process containment is supported only on Windows and macOS",
             ))
         }
 
@@ -859,7 +1029,7 @@ mod platform {
         ) -> io::Result<()> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "production Pi process containment is supported only on Windows",
+                "production Pi process containment is supported only on Windows and macOS",
             ))
         }
     }

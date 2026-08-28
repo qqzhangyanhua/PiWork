@@ -357,7 +357,9 @@ enum FixtureScenario {
     Backpressure,
     MalformedBackpressure,
     InvalidUtf8Backpressure,
+    #[cfg_attr(not(windows), allow(dead_code))]
     InheritedStderrComplete,
+    #[cfg_attr(not(windows), allow(dead_code))]
     InheritedStderrHold,
     StartupBarrier,
     AbortBarrier,
@@ -561,6 +563,7 @@ const path = require('path');
 const childProcess = require('child_process');
 const scenario = '{scenario}';
 fs.writeFileSync(path.join(__dirname, 'argv.json'), JSON.stringify(process.argv.slice(2)));
+fs.writeFileSync(path.join(__dirname, 'sidecar-pid'), String(process.pid));
 const rl = readline.createInterface({{ input: process.stdin }});
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const marker = name => path.join(__dirname, name);
@@ -802,7 +805,7 @@ fn adapter_factories() -> Vec<Box<dyn AdapterFactory>> {
             profile: FakeProfile::Minimal,
         }),
     ];
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     factories.push(Box::new(PiAdapterFactory));
     factories
 }
@@ -822,9 +825,18 @@ async fn wait_for_fixture_marker(root: &Path, name: &str) {
     .await;
 }
 
+#[cfg(windows)]
 fn fixture_descendant_pid(root: &Path) -> u32 {
     std::fs::read_to_string(fixture_marker(root, "stderr-holder-entered"))
         .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn fixture_sidecar_pid(root: &Path) -> u32 {
+    std::fs::read_to_string(fixture_marker(root, "sidecar-pid"))
+        .unwrap()
+        .trim()
         .parse()
         .unwrap()
 }
@@ -862,10 +874,13 @@ fn process_is_alive(process_id: u32) -> bool {
         fn kill(process_id: i32, signal: i32) -> i32;
     }
 
-    unsafe { kill(process_id as i32, 0) == 0 }
-    || std::io::Error::last_os_error().raw_os_error() == Some(1)
+    if unsafe { kill(process_id as i32, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(1)
 }
 
+#[cfg(windows)]
 async fn release_fixture_descendant_if_alive(root: &Path, process_id: u32) {
     if process_is_alive(process_id) {
         std::fs::write(fixture_marker(root, "stderr-holder-release"), b"release").unwrap();
@@ -924,7 +939,37 @@ async fn pi_fixture_adapter(root: &Path, scenario: FixtureScenario) -> Arc<PiEng
     )
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
+#[tokio::test]
+async fn aborting_production_pi_leaves_the_sidecar_process_dead() {
+    let root = tempfile::tempdir().unwrap();
+    let adapter = pi_fixture_adapter(root.path(), FixtureScenario::HoldUntilAbort).await;
+    let (sender, mut receiver) = mpsc::channel(8);
+    adapter
+        .start(context("run-sidecar-reap", 0), input("hold"), sender)
+        .await
+        .unwrap();
+    wait_for_fixture_marker(root.path(), "sidecar-pid").await;
+    let sidecar_pid = fixture_sidecar_pid(root.path());
+    assert!(
+        process_is_alive(sidecar_pid),
+        "fixture sidecar must be running before abort"
+    );
+    assert!(matches!(
+        receive_event(&mut receiver).await,
+        EngineEvent::RunStarted { .. }
+    ));
+
+    adapter.abort("run-sidecar-reap").await.unwrap();
+    collect_closed(receiver).await;
+
+    assert!(
+        !process_is_alive(sidecar_pid),
+        "cancel must leave the session-leader sidecar dead; this does not claim Job Object isolation for descendants that left the session"
+    );
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_uses_effective_permission_for_execution_tools() {
     let root = tempfile::tempdir().unwrap();
@@ -958,7 +1003,7 @@ async fn pi_uses_effective_permission_for_execution_tools() {
     assert!(!tools.contains("bash"));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_startup_crash_diagnostic_does_not_include_stderr_or_launch_secrets() {
     let root = tempfile::tempdir().unwrap();
@@ -1007,7 +1052,7 @@ async fn pi_startup_crash_diagnostic_does_not_include_stderr_or_launch_secrets()
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_prompt_rejection_diagnostic_ignores_rpc_details_and_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1072,7 +1117,7 @@ async fn pi_prompt_rejection_diagnostic_ignores_rpc_details_and_stderr() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_startup_timeout_diagnostic_ignores_stderr() {
     let root = tempfile::tempdir().unwrap();
@@ -1133,7 +1178,7 @@ async fn pi_startup_timeout_diagnostic_ignores_stderr() {
     assert_one_terminal(&collect_closed(retry_receiver).await);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_buffers_pre_acceptance_events_until_after_run_started() {
     let root = tempfile::tempdir().unwrap();
@@ -1169,7 +1214,7 @@ async fn pi_buffers_pre_acceptance_events_until_after_run_started() {
     assert_one_terminal(&events);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_start_returns_before_capacity_one_pre_acceptance_buffer_flush() {
     let root = tempfile::tempdir().unwrap();
@@ -1204,7 +1249,7 @@ async fn pi_start_returns_before_capacity_one_pre_acceptance_buffer_flush() {
     assert_one_terminal(&events);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_immediate_abort_after_acceptance_still_delivers_run_started_before_one_terminal() {
     let root = tempfile::tempdir().unwrap();
@@ -1229,7 +1274,7 @@ async fn pi_immediate_abort_after_acceptance_still_delivers_run_started_before_o
     assert_one_terminal(&events);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_treats_a_pre_acceptance_terminal_as_startup_failure() {
     let root = tempfile::tempdir().unwrap();
@@ -1253,7 +1298,7 @@ async fn pi_treats_a_pre_acceptance_terminal_as_startup_failure() {
     ));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_rejects_a_pre_acceptance_event_flood_without_filling_the_sink() {
     let root = tempfile::tempdir().unwrap();
@@ -1290,7 +1335,7 @@ async fn pi_rejects_a_pre_acceptance_event_flood_without_filling_the_sink() {
     assert!(receiver.recv().await.is_none());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_runtime_context_redacts_sensitive_raw_events() {
     let root = tempfile::tempdir().unwrap();
@@ -1325,7 +1370,7 @@ async fn pi_runtime_context_redacts_sensitive_raw_events() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_reserves_a_run_before_concurrent_startup() {
     let root = tempfile::tempdir().unwrap();
@@ -1368,7 +1413,7 @@ async fn pi_reserves_a_run_before_concurrent_startup() {
     assert!(matches!(second, Ok(Err(EngineError::Start(_)))));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_abort_waits_for_child_exit_and_cleanup_acknowledgement() {
     let root = tempfile::tempdir().unwrap();
@@ -1398,7 +1443,7 @@ async fn pi_abort_waits_for_child_exit_and_cleanup_acknowledgement() {
     assert!(!root.path().join("runtime/run-abort-ack/agent").exists());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_abort_interrupts_sink_backpressure_and_delivers_a_terminal_after_cleanup() {
     let root = tempfile::tempdir().unwrap();
@@ -1467,7 +1512,7 @@ async fn pi_abort_interrupts_sink_backpressure_and_delivers_a_terminal_after_cle
     assert!(receiver.recv().await.is_none());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_abort_fails_boundedly_when_capacity_one_sink_is_never_drained() {
     let root = tempfile::tempdir().unwrap();
@@ -1530,7 +1575,7 @@ async fn pi_abort_fails_boundedly_when_capacity_one_sink_is_never_drained() {
     ));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_abort_interrupts_error_terminal_backpressure() {
     for (scenario, run_id) in [
@@ -1589,6 +1634,9 @@ async fn pi_abort_interrupts_error_terminal_backpressure() {
     }
 }
 
+// Windows Job Objects reap even Node children spawned with `detached: true`.
+// Unix process groups cannot: those children call setsid() and may leak.
+// Keep this assertion Windows-only so macOS is not treated as Job Object equivalent.
 #[cfg(windows)]
 #[tokio::test]
 async fn pi_completion_reaps_a_descendant_that_inherits_stderr() {
@@ -1623,6 +1671,8 @@ async fn pi_completion_reaps_a_descendant_that_inherits_stderr() {
     );
 }
 
+// See pi_completion_reaps_a_descendant_that_inherits_stderr: detached descendants
+// are a Job Object guarantee, not a process-group guarantee.
 #[cfg(windows)]
 #[tokio::test]
 async fn pi_abort_reaps_a_descendant_that_inherits_stderr() {
@@ -1661,6 +1711,8 @@ async fn pi_abort_reaps_a_descendant_that_inherits_stderr() {
     );
 }
 
+// See pi_completion_reaps_a_descendant_that_inherits_stderr: detached descendants
+// are a Job Object guarantee, not a process-group guarantee.
 #[cfg(windows)]
 #[tokio::test]
 async fn dropping_pi_reaps_a_descendant_that_inherits_stderr() {
@@ -1701,7 +1753,7 @@ async fn dropping_pi_reaps_a_descendant_that_inherits_stderr() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_rejects_restart_while_abort_cleanup_is_in_progress() {
     let root = tempfile::tempdir().unwrap();
@@ -1738,7 +1790,7 @@ async fn pi_rejects_restart_while_abort_cleanup_is_in_progress() {
     assert!(matches!(restart, Err(EngineError::Start(_))));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn pi_allows_same_run_restart_after_abort_cleanup_acknowledgement() {
     let root = tempfile::tempdir().unwrap();
@@ -1787,7 +1839,7 @@ async fn pi_allows_same_run_restart_after_abort_cleanup_acknowledgement() {
     collect_closed(second_receiver).await;
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn cancelling_a_pi_abort_caller_does_not_strand_completion() {
     let root = tempfile::tempdir().unwrap();
@@ -1844,7 +1896,7 @@ async fn cancelling_a_pi_abort_caller_does_not_strand_completion() {
     collect_closed(restarted_receiver).await;
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn dropping_pi_after_receiver_close_releases_the_node_process() {
     let root = tempfile::tempdir().unwrap();
@@ -1909,7 +1961,7 @@ async fn dropping_a_holding_fake_releases_its_run_task() {
     assert!(matches!(events.last(), Some(EngineEvent::RunFailed { .. })));
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn cancelling_pi_startup_sends_abort_and_reaps_the_node_process() {
     let root = tempfile::tempdir().unwrap();
