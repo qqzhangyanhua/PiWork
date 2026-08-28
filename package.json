@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "bundle:pi-web-access": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bundle-pi-web-access.ps1",
     "build:document-runtime:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-document-runtime.ps1 -Profile debug",
     "build:document-runtime:release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-document-runtime.ps1 -Profile release",
     "build": "tsc -b && vite build",

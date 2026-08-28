@@ -58,5 +58,6 @@ content retrieval extension.
 Upstream: https://github.com/nicobailon/pi-web-access
 License: MIT
 Copyright 2025 Nico Bailon
-Complete license text: bundled at
+Complete license text: shipped in the app bundle at
 `pi-sidecar/builtin-extensions/pi-web-access/node_modules/pi-web-access/LICENSE`
+(generated at package time by `scripts/bundle-pi-web-access.*`, not stored in git)

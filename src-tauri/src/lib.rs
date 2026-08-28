@@ -765,12 +765,20 @@ mod tests {
             .as_str()
             .expect("macOS beforeDevCommand");
         assert!(
+            before_dev.contains("scripts/bundle-pi-web-access.sh"),
+            "macOS tauri dev must generate the gitignored pi-web-access extension"
+        );
+        assert!(
             before_dev.contains("scripts/fetch-darwin-node.sh"),
             "macOS tauri dev must fetch the gitignored Darwin Node runtime"
         );
         let before = macos["build"]["beforeBuildCommand"]
             .as_str()
             .expect("macOS beforeBuildCommand");
+        assert!(
+            before.contains("scripts/bundle-pi-web-access.sh"),
+            "macOS packaging must generate the gitignored pi-web-access extension"
+        );
         assert!(
             before.contains("scripts/build-document-runtime.sh release"),
             "macOS packaging must ship the release document-runtime helper"
@@ -841,27 +849,57 @@ mod tests {
     }
 
     #[test]
-    fn bundled_web_access_extension_omits_packaging_weight() {
+    fn web_access_extension_is_gitignored_and_bundled_by_script() {
+        let gitignore = include_str!("../../.gitignore");
+        assert!(
+            gitignore.lines().any(|line| line == "**/node_modules/"),
+            "all node_modules trees must stay out of git"
+        );
+        assert!(
+            !gitignore.lines().any(|line| line.contains(
+                "pi-sidecar/builtin-extensions/pi-web-access/node_modules"
+            )),
+            "pi-web-access node_modules must not be force-tracked via gitignore exceptions"
+        );
+
+        let base: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let before_build = base["build"]["beforeBuildCommand"]
+            .as_str()
+            .expect("beforeBuildCommand");
+        assert!(
+            before_build.contains("bundle:pi-web-access"),
+            "Windows/default packaging must generate pi-web-access before bundling"
+        );
+
+        let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts");
+        assert!(
+            scripts.join("bundle-pi-web-access.sh").is_file(),
+            "macOS/Linux bundle script must exist"
+        );
+        assert!(
+            scripts.join("bundle-pi-web-access.ps1").is_file(),
+            "Windows bundle script must exist"
+        );
+
         let modules = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("binaries/pi-sidecar/builtin-extensions/pi-web-access/node_modules");
-        assert!(
-            !modules
-                .join("pi-web-access/pi-web-fetch-demo.mp4")
-                .is_file(),
-            "demo video must not ship in the app bundle"
-        );
-        assert!(
-            !modules.join("pi-web-access/banner.png").is_file(),
-            "package banner must not ship in the app bundle"
-        );
-        assert!(
-            !modules.join("@mixmark-io/domino/test").exists(),
-            "extension test fixtures must not ship in the app bundle"
-        );
-        assert!(
-            modules.join("pi-web-access/index.ts").is_file(),
-            "web access entry point must remain"
-        );
+        if modules.join("pi-web-access/index.ts").is_file() {
+            assert!(
+                !modules
+                    .join("pi-web-access/pi-web-fetch-demo.mp4")
+                    .is_file(),
+                "demo video must not ship in the app bundle"
+            );
+            assert!(
+                !modules.join("pi-web-access/banner.png").is_file(),
+                "package banner must not ship in the app bundle"
+            );
+            assert!(
+                !modules.join("@mixmark-io/domino/test").exists(),
+                "extension test fixtures must not ship in the app bundle"
+            );
+        }
     }
 
     #[test]

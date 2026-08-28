@@ -10,10 +10,36 @@ $Registry = "https://registry.npmjs.org"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $SidecarRoot = (Resolve-Path (Join-Path $RepoRoot "src-tauri\binaries\pi-sidecar")).Path
 $Target = Join-Path $SidecarRoot "builtin-extensions\pi-web-access"
+$Entry = Join-Path $Target "node_modules\pi-web-access\index.ts"
+$Manifest = Join-Path $Target "node_modules\pi-web-access\package.json"
+$TypeBoxManifest = Join-Path $Target "node_modules\typebox\package.json"
+$Modules = Join-Path $Target "node_modules"
 $ResolvedTargetParent = [System.IO.Path]::GetFullPath((Split-Path $Target -Parent))
 
 if (-not $ResolvedTargetParent.StartsWith($SidecarRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "Refusing to write outside the Pi sidecar directory."
+}
+
+function Test-AlreadyBundled {
+  if (-not ((Test-Path -LiteralPath $Entry) -and (Test-Path -LiteralPath $Manifest) -and (Test-Path -LiteralPath $TypeBoxManifest))) {
+    return $false
+  }
+  $Installed = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
+  $InstalledTypeBox = Get-Content -LiteralPath $TypeBoxManifest -Raw | ConvertFrom-Json
+  if ($Installed.version -ne $PackageVersion -or $InstalledTypeBox.version -ne $TypeBoxVersion) {
+    return $false
+  }
+  if ((Test-Path -LiteralPath (Join-Path $Modules "pi-web-access\pi-web-fetch-demo.mp4")) -or
+      (Test-Path -LiteralPath (Join-Path $Modules "pi-web-access\banner.png")) -or
+      (Test-Path -LiteralPath (Join-Path $Modules "@mixmark-io\domino\test"))) {
+    return $false
+  }
+  return $true
+}
+
+if (Test-AlreadyBundled) {
+  Write-Host "Bundled $PackageName@$PackageVersion already present at $Target"
+  exit 0
 }
 
 $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("piwork-web-access-" + [guid]::NewGuid().ToString("N"))
@@ -44,8 +70,6 @@ try {
   # compatible with the 1.1.x version bundled by Pi, not typebox 1.3.x.
   npm install --prefix $Target --ignore-scripts --omit=dev --omit=optional --legacy-peer-deps --no-audit --no-fund --no-save --package-lock=false $Tarball "typebox@$TypeBoxVersion"
 
-  $Entry = Join-Path $Target "node_modules\pi-web-access\index.ts"
-  $Manifest = Join-Path $Target "node_modules\pi-web-access\package.json"
   if (-not (Test-Path -LiteralPath $Entry)) {
     throw "Bundled extension entry point is missing."
   }
@@ -54,12 +78,11 @@ try {
     throw "Bundled extension version does not match $PackageVersion."
   }
 
-  $InstalledTypeBox = Get-Content -LiteralPath (Join-Path $Target "node_modules\typebox\package.json") -Raw | ConvertFrom-Json
+  $InstalledTypeBox = Get-Content -LiteralPath $TypeBoxManifest -Raw | ConvertFrom-Json
   if ($InstalledTypeBox.version -ne $TypeBoxVersion) {
     throw "Bundled typebox version does not match Pi's extension API version."
   }
 
-  $Modules = Join-Path $Target "node_modules"
   Get-ChildItem -LiteralPath $Modules -Recurse -Force -Directory -ErrorAction SilentlyContinue |
     Where-Object { @('test', 'tests', 'docs', '.yarn') -contains $_.Name } |
     Sort-Object { $_.FullName.Length } -Descending |

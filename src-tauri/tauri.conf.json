@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.piwork.desktop",
   "build": {
-    "beforeDevCommand": "pnpm build:document-runtime:debug && pnpm dev",
+    "beforeDevCommand": "pnpm bundle:pi-web-access && pnpm build:document-runtime:debug && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build:document-runtime:release && pnpm build",
+    "beforeBuildCommand": "pnpm bundle:pi-web-access && pnpm build:document-runtime:release && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
