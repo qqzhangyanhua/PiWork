@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod event_outbox;
 pub mod queue;
 pub mod repository;
 pub mod scheduler;
