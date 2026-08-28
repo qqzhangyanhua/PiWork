@@ -197,6 +197,11 @@ export type ConnectorWorkGrantSummary = {
   permissions: ConnectorPermission[];
 };
 
+export type ConnectorAgentGrantSummary = {
+  agentInstanceId: string;
+  permissions: ConnectorPermission[];
+};
+
 export type EmailConnectorSummary = {
   id: string;
   displayName: string;
@@ -216,6 +221,7 @@ export type EmailConnectorSummary = {
   credentialConfigured: boolean;
   grantedWorkIds: string[];
   workGrants: ConnectorWorkGrantSummary[];
+  agentGrants: ConnectorAgentGrantSummary[];
 };
 
 export type SaveEmailConnectorInput = {
@@ -316,6 +322,11 @@ export type PiWorkClient = {
   ): Promise<WorkspaceMemoryBindingSummary>;
   drainMemoryCaptureOutbox?(): Promise<number>;
   listEmailConnectors?(): Promise<EmailConnectorSummary[]>;
+  resolveConnectorIcon?(
+    service: string,
+    homepageUrl: string | null,
+    iconUrl: string | null,
+  ): Promise<string | null>;
   saveEmailConnector?(input: SaveEmailConnectorInput): Promise<EmailConnectorSummary>;
   testEmailConnector?(input: SaveEmailConnectorInput): Promise<ConnectorTestResult>;
   setEmailConnectorEnabled?(connectionId: string, enabled: boolean): Promise<EmailConnectorSummary>;
@@ -323,6 +334,12 @@ export type PiWorkClient = {
   setConnectorWorkGrant?(
     connectionId: string,
     workId: string,
+    enabled: boolean,
+    permissions: ConnectorPermission[],
+  ): Promise<EmailConnectorSummary>;
+  setConnectorAgentGrant?(
+    connectionId: string,
+    agentInstanceId: string,
     enabled: boolean,
     permissions: ConnectorPermission[],
   ): Promise<EmailConnectorSummary>;
@@ -426,6 +443,8 @@ export const tauriClient: PiWorkClient = {
     invoke<number>("drain_memory_capture_outbox"),
   listEmailConnectors: () =>
     invoke<EmailConnectorSummary[]>("list_email_connectors"),
+  resolveConnectorIcon: (service, homepageUrl, iconUrl) =>
+    invoke<string | null>("resolve_connector_icon", { service, homepageUrl, iconUrl }),
   saveEmailConnector: (input) =>
     invoke<EmailConnectorSummary>("save_email_connector", { input }),
   testEmailConnector: (input) =>
@@ -437,6 +456,10 @@ export const tauriClient: PiWorkClient = {
   setConnectorWorkGrant: (connectionId, workId, enabled, permissions) =>
     invoke<EmailConnectorSummary>("set_connector_work_grant", {
       input: { connectionId, workId, enabled, permissions },
+    }),
+  setConnectorAgentGrant: (connectionId, agentInstanceId, enabled, permissions) =>
+    invoke<EmailConnectorSummary>("set_connector_agent_grant", {
+      input: { connectionId, agentInstanceId, enabled, permissions },
     }),
   listEmailMetadata: (connectionId, query = "", limit = 50) =>
     invoke<EmailMetadataSummary[]>("list_email_metadata", { connectionId, query, limit }),

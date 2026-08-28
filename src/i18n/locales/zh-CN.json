@@ -259,8 +259,15 @@
     }
   },
   "connectors": {
-    "title": "连接器", "subtitle": "将外部服务安全接入 CoDo，并自动提供给所有智能体", "accounts": "邮箱账户", "add": "添加邮箱连接器",
-    "loading": "正在读取连接器…", "loadError": "无法读取连接器", "empty": "还没有邮箱连接器。", "newAccount": "新连接", "accountSettings": "邮箱连接器", "addTitle": "接入企业邮箱",
+    "title": "连接器", "subtitle": "浏览 {{count}} 个可用连接器；只有完成配置并授权后，智能体才能使用", "viewsLabel": "连接器视图", "views": { "all": "全部", "connected": "已连接", "agents": "已授权" },
+    "search": "搜索连接器", "searchPlaceholder": "搜索服务、场景或认证方式", "scenariosLabel": "使用场景", "scenarios": { "all": "全部场景", "productivity": "效率工具", "data-storage": "数据与存储", "developer": "开发工具", "marketing": "市场营销", "communication": "沟通协作", "ai": "AI 服务", "other": "其他", "cross-border-ecommerce": "跨境电商", "docs": "文档" },
+    "catalog": "连接器目录", "details": "连接器详情", "catalogRevision": "目录版本 {{revision}}", "results": "{{count}} 个结果", "metadataOnlyCatalog": "仅加载目录元数据", "noResults": "没有匹配的连接器", "loadMore": "再显示 {{count}} 个", "actionCount": "{{count}} 个 Action",
+    "status": { "available": "可配置", "configured": "已配置", "connected": "已连接", "notConnected": "未连接" },
+    "actions": "可用 Action", "authentication": "认证方式", "connectionInstances": "连接实例", "auth": { "no_auth": "无需认证", "api_key": "API Key", "oauth2": "OAuth 2.0", "custom_credential": "自定义凭据" },
+    "catalogOnlyTitle": "当前只收录目录信息", "catalogOnlyDescription": "PiWork 不会因为它出现在目录里就加载执行器或暴露给智能体。此 provider 的 OpenConnector 运行时适配接通后，才会开放配置、连接和 Agent 授权。",
+    "lifecycleTitle": "接入状态", "lifecycle": { "discovered": "已发现", "discoveredDescription": "名称、场景、认证方式和 Action 数量可搜索。", "configure": "配置并验证", "configureDescription": "凭据验证成功后才创建连接实例。", "bind": "授权给 Agent", "bindDescription": "按 Agent 显式开启，未授权的 Agent 看不到此连接。" },
+    "accounts": "邮箱账户", "add": "添加邮箱连接器", "newConnection": "新建连接",
+    "loading": "正在读取连接状态…", "loadError": "无法读取连接状态", "empty": "还没有邮箱连接器。", "newAccount": "新连接", "accountSettings": "邮箱连接器", "addTitle": "接入企业邮箱",
     "identity": "账户与凭据", "identityDescription": "密码只保存在 Windows 凭据管理器，不会写入项目或插件。", "displayName": "显示名称", "displayNamePlaceholder": "例如：公司邮箱",
     "emailAddress": "邮箱地址", "username": "登录用户名", "password": "客户端专用密码", "passwordStored": "凭据已保存，留空则保持不变", "passwordPlaceholder": "输入邮箱密码或客户端专用密码",
     "servers": "邮件服务器", "serversDescription": "一期仅支持 TLS 加密的 IMAP 与 SMTP。", "preset": "服务预设", "presets": { "aliyun": "阿里企业邮箱", "custom": "自定义 IMAP / SMTP" },
@@ -269,6 +276,7 @@
     "testErrors": { "imapAuthentication": "IMAP 登录失败，请确认邮箱账号和客户端专用密码，并检查管理员是否已开启 IMAP 服务。", "imapConfiguration": "IMAP 服务器配置无效，请检查地址和端口。", "imapConnection": "无法连接 IMAP 服务器，请检查网络、服务器地址和端口。", "imapNetwork": "无法连接 IMAP 服务器，请检查网络、服务器地址和端口。", "imapProtocol": "IMAP 服务器返回了无法识别的响应。", "imapTimeout": "连接 IMAP 服务器超时，请检查网络、服务器地址和端口。", "imapTls": "IMAP TLS 握手失败，请检查服务器地址、端口和系统证书。", "smtpAuthentication": "IMAP 登录已通过，但 SMTP 登录失败，请确认客户端专用密码并检查管理员是否已开启 SMTP 服务。", "smtpConfiguration": "SMTP 服务器配置无效，请检查地址和端口。", "smtpConnection": "IMAP 登录已通过，但无法连接或登录 SMTP 服务器，请检查 SMTP 服务和客户端专用密码。", "smtpTimeout": "IMAP 登录已通过，但连接 SMTP 服务器超时。", "smtpTls": "IMAP 登录已通过，但 SMTP TLS 握手失败，请检查服务器地址、端口和系统证书。" },
     "saved": "连接器配置已保存", "saveError": "无法保存连接器配置。", "enabledMessage": "连接器已开启，并以当前收件箱 UID 建立基线。", "disabledMessage": "连接器已关闭。", "enableError": "无法开启连接器；请先通过连接测试。",
     "delete": "删除连接器", "deleteConfirm": "删除“{{name}}”及其本地邮件元数据？", "workAccess": "智能体可用范围", "workAccessDescription": "开启后，当前及未来的所有 Work 和智能体都可直接搜索、读取和发送邮件；删除类操作仍需确认。", "allAgentsAccess": "已自动提供给所有 Work 和智能体",
+    "agentAccess": "Agent 可用范围", "agentAccessDescription": "连接成功后仍不会自动提供给任何 Agent。请只为确实需要此邮箱的 Agent 开启。", "noAgents": "当前没有可授权的 Agent。", "notAvailableToAgent": "未授权", "addToAgent": "将 {{connector}} 添加给 {{agent}}", "removeFromAgent": "从 {{agent}} 移除 {{connector}}", "agentGrantSaved": "Agent 授权已更新", "agentGrantError": "无法更新 Agent 授权。",
     "noWorks": "创建 Work 后可在这里授权。", "permissions": "邮箱权限", "permission": { "metadata": "搜索元数据", "read_body": "读取正文", "send": "发送邮件" }, "grantError": "无法更新 Work 授权。",
     "recentMail": "最近邮件", "metadataOnly": "这里只保存发件人、主题、时间等元数据，不保存正文。",
     "health": { "healthy": "连接正常", "degraded": "连接不稳定", "error": "连接异常", "untested": "尚未测试", "disabled": "已关闭" }

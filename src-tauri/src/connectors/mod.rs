@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::{error::AppError, secret};
 
 pub mod commands;
+mod icons;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_TICK: Duration = Duration::from_secs(30);
@@ -56,12 +57,20 @@ pub struct EmailConnectorSummary {
     pub credential_configured: bool,
     pub granted_work_ids: Vec<String>,
     pub work_grants: Vec<ConnectorWorkGrantSummary>,
+    pub agent_grants: Vec<ConnectorAgentGrantSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorWorkGrantSummary {
     pub work_id: String,
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorAgentGrantSummary {
+    pub agent_instance_id: String,
     pub permissions: Vec<String>,
 }
 
@@ -141,6 +150,16 @@ pub struct PendingConnectorActionSummary {
 pub struct SetConnectorWorkGrantInput {
     pub connection_id: String,
     pub work_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetConnectorAgentGrantInput {
+    pub connection_id: String,
+    pub agent_instance_id: String,
     pub enabled: bool,
     #[serde(default)]
     pub permissions: Vec<String>,
@@ -237,6 +256,12 @@ impl ConnectorService {
         )
         .fetch_all(&self.pool)
         .await?;
+        let agent_grants = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT connection_id, agent_instance_id, permissions_json
+             FROM connector_agent_grants ORDER BY agent_instance_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(|row| EmailConnectorSummary {
@@ -253,6 +278,16 @@ impl ConnectorService {
                         work_id: work_id.clone(),
                         permissions: serde_json::from_str(permissions).unwrap_or_default(),
                     })
+                    .collect(),
+                agent_grants: agent_grants
+                    .iter()
+                    .filter(|(connection_id, _, _)| connection_id == &row.id)
+                    .map(
+                        |(_, agent_instance_id, permissions)| ConnectorAgentGrantSummary {
+                            agent_instance_id: agent_instance_id.clone(),
+                            permissions: serde_json::from_str(permissions).unwrap_or_default(),
+                        },
+                    )
                     .collect(),
                 id: row.id,
                 display_name: row.display_name,
@@ -490,6 +525,69 @@ impl ConnectorService {
         self.connection_summary(&input.connection_id).await
     }
 
+    pub async fn set_agent_grant(
+        &self,
+        input: SetConnectorAgentGrantInput,
+    ) -> Result<EmailConnectorSummary, AppError> {
+        let permissions = normalize_permissions(input.permissions)?;
+        let connection = self
+            .connection(&input.connection_id)
+            .await?
+            .ok_or_else(|| AppError::invalid_input("connectionId", "connector was not found"))?;
+        if input.enabled && !connection.enabled {
+            return Err(AppError::invalid_input(
+                "connectionId",
+                "connect and enable the connector before adding it to an Agent",
+            ));
+        }
+        if input.enabled && permissions.is_empty() {
+            return Err(AppError::invalid_input(
+                "permissions",
+                "at least one connector permission is required",
+            ));
+        }
+        let agent_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_instances WHERE id = ? AND status = 'active')",
+        )
+        .bind(&input.agent_instance_id)
+        .fetch_one(&self.pool)
+        .await?;
+        if !agent_exists {
+            return Err(AppError::invalid_input(
+                "agentInstanceId",
+                "active Agent was not found",
+            ));
+        }
+        if input.enabled {
+            let permissions_json =
+                serde_json::to_string(&permissions).unwrap_or_else(|_| "[]".into());
+            sqlx::query(
+                "INSERT INTO connector_agent_grants
+                 (connection_id, agent_instance_id, permissions_json, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(connection_id, agent_instance_id) DO UPDATE SET
+                 permissions_json = excluded.permissions_json, updated_at = excluded.updated_at",
+            )
+            .bind(&input.connection_id)
+            .bind(&input.agent_instance_id)
+            .bind(permissions_json)
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM connector_agent_grants
+                 WHERE connection_id = ? AND agent_instance_id = ?",
+            )
+            .bind(&input.connection_id)
+            .bind(&input.agent_instance_id)
+            .execute(&self.pool)
+            .await?;
+        }
+        self.connection_summary(&input.connection_id).await
+    }
+
     pub async fn list_metadata(
         &self,
         connection_id: &str,
@@ -615,13 +713,18 @@ impl ConnectorService {
     ) -> Result<Value, AppError> {
         match tool {
             TOOL_LIST_EMAIL_ACCOUNTS => {
-                let accounts = self.enabled_accounts().await?;
+                let accounts = self.visible_accounts(context).await?;
                 Ok(json!(accounts))
             }
             TOOL_SEARCH_EMAIL_METADATA => {
                 let connection_id = required_string(&arguments, "connectionId")?;
-                self.authorize(&context.work_id, connection_id, EMAIL_PERMISSION_METADATA)
-                    .await?;
+                self.authorize(
+                    &context.work_id,
+                    &context.agent_instance_id,
+                    connection_id,
+                    EMAIL_PERMISSION_METADATA,
+                )
+                .await?;
                 let query = arguments.get("query").and_then(Value::as_str).unwrap_or("");
                 Ok(json!(self.list_metadata(connection_id, query, 50).await?))
             }
@@ -637,8 +740,13 @@ impl ConnectorService {
         arguments: Value,
     ) -> Result<Value, AppError> {
         let connection_id = required_string(&arguments, "connectionId")?;
-        self.authorize(&context.work_id, connection_id, EMAIL_PERMISSION_READ_BODY)
-            .await?;
+        self.authorize(
+            &context.work_id,
+            &context.agent_instance_id,
+            connection_id,
+            EMAIL_PERMISSION_READ_BODY,
+        )
+        .await?;
         let uid = arguments
             .get("uid")
             .and_then(Value::as_u64)
@@ -691,8 +799,13 @@ impl ConnectorService {
         arguments: Value,
     ) -> Result<Value, AppError> {
         let connection_id = required_string(&arguments, "connectionId")?;
-        self.authorize(&context.work_id, connection_id, EMAIL_PERMISSION_SEND)
-            .await?;
+        self.authorize(
+            &context.work_id,
+            &context.agent_instance_id,
+            connection_id,
+            EMAIL_PERMISSION_SEND,
+        )
+        .await?;
         let to = required_string(&arguments, "to")?;
         let subject = required_string(&arguments, "subject")?;
         let body = required_string(&arguments, "body")?;
@@ -985,6 +1098,7 @@ impl ConnectorService {
     async fn authorize(
         &self,
         work_id: &str,
+        agent_instance_id: &str,
         connection_id: &str,
         permission: &str,
     ) -> Result<(), AppError> {
@@ -1006,44 +1120,73 @@ impl ConnectorService {
                     AppError::invalid_input("connectionId", "connector was not found")
                 })?;
         if !enabled {
-            Err(AppError::invalid_input(
+            return Err(AppError::invalid_input(
                 "connectionId",
                 "connector is disabled",
-            ))
-        } else {
-            let grant = sqlx::query_as::<_, (String, bool)>(
-                "SELECT grants.permissions_json, grants.has_conflict FROM connector_workspace_grants grants INNER JOIN works ON works.workspace_id = grants.workspace_id WHERE grants.connection_id = ? AND works.id = ?",
-            )
-            .bind(connection_id)
-            .bind(work_id)
-            .fetch_optional(&self.pool)
-            .await?;
-            let Some((permissions_json, false)) = grant else {
-                return Err(AppError::invalid_input(
-                    "permission",
-                    "connector is not granted to this Workspace",
-                ));
-            };
-            let permissions =
-                serde_json::from_str::<Vec<String>>(&permissions_json).unwrap_or_default();
-            if permissions.iter().any(|granted| granted == permission) {
+            ));
+        }
+
+        let agent_permissions = sqlx::query_scalar::<_, String>(
+            "SELECT permissions_json FROM connector_agent_grants
+             WHERE connection_id = ? AND agent_instance_id = ?",
+        )
+        .bind(connection_id)
+        .bind(agent_instance_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if !permission_is_granted(agent_permissions.as_deref(), permission) {
+            return Err(AppError::invalid_input(
+                "permission",
+                "connector permission is not granted to this Agent",
+            ));
+        }
+
+        // A Workspace policy can narrow an Agent grant, but cannot create Agent access by itself.
+        let workspace_grant = sqlx::query_as::<_, (String, bool)>(
+            "SELECT grants.permissions_json, grants.has_conflict
+             FROM connector_workspace_grants grants
+             INNER JOIN works ON works.workspace_id = grants.workspace_id
+             WHERE grants.connection_id = ? AND works.id = ?",
+        )
+        .bind(connection_id)
+        .bind(work_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match workspace_grant {
+            None => Ok(()),
+            Some((permissions_json, false))
+                if permission_is_granted(Some(&permissions_json), permission) =>
+            {
                 Ok(())
-            } else {
-                Err(AppError::invalid_input(
-                    "permission",
-                    "connector permission is not granted to this Workspace",
-                ))
             }
+            Some(_) => Err(AppError::invalid_input(
+                "permission",
+                "connector permission is restricted by this Workspace",
+            )),
         }
     }
 
-    async fn enabled_accounts(&self) -> Result<Vec<EmailConnectorSummary>, AppError> {
-        Ok(self
-            .list_connections()
-            .await?
-            .into_iter()
-            .filter(|connection| connection.enabled)
-            .collect())
+    async fn visible_accounts(
+        &self,
+        context: &crate::collaboration::tool_bridge::AuthorizedRunContext,
+    ) -> Result<Vec<EmailConnectorSummary>, AppError> {
+        let mut visible = Vec::new();
+        for connection in self.list_connections().await? {
+            if connection.enabled
+                && self
+                    .authorize(
+                        &context.work_id,
+                        &context.agent_instance_id,
+                        &connection.id,
+                        EMAIL_PERMISSION_METADATA,
+                    )
+                    .await
+                    .is_ok()
+            {
+                visible.push(connection);
+            }
+        }
+        Ok(visible)
     }
 
     async fn get_or_create_action(
@@ -1191,6 +1334,7 @@ impl ConnectorService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_notification(
         &self,
         category: &str,
@@ -1351,6 +1495,12 @@ fn normalize_permissions(permissions: Vec<String>) -> Result<Vec<String>, AppErr
         ));
     }
     Ok(normalized.into_iter().collect())
+}
+
+fn permission_is_granted(permissions_json: Option<&str>, permission: &str) -> bool {
+    permissions_json
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .is_some_and(|permissions| permissions.iter().any(|granted| granted == permission))
 }
 
 fn input_row(input: &SaveEmailConnectorInput) -> EmailConnectionRow {
@@ -1752,24 +1902,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabled_connectors_require_an_explicit_workspace_grant() {
+    async fn disabled_connectors_deny_an_explicit_agent_grant() {
         let (database, service) = test_service().await;
+        let agent_instance_id: String =
+            sqlx::query_scalar("SELECT id FROM agent_instances WHERE status = 'active' LIMIT 1")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert!(
+            service
+                .authorize(
+                    "work-1",
+                    &agent_instance_id,
+                    "connector-1",
+                    EMAIL_PERMISSION_METADATA,
+                )
+                .await
+                .is_err(),
+            "a Workspace grant must not expose a connector without an Agent grant"
+        );
+        service
+            .set_agent_grant(SetConnectorAgentGrantInput {
+                connection_id: "connector-1".into(),
+                agent_instance_id: agent_instance_id.clone(),
+                enabled: true,
+                permissions: vec![
+                    EMAIL_PERMISSION_METADATA.into(),
+                    EMAIL_PERMISSION_READ_BODY.into(),
+                    EMAIL_PERMISSION_SEND.into(),
+                ],
+            })
+            .await
+            .unwrap();
         for permission in [
             EMAIL_PERMISSION_METADATA,
             EMAIL_PERMISSION_READ_BODY,
             EMAIL_PERMISSION_SEND,
         ] {
             service
-                .authorize("work-1", "connector-1", permission)
+                .authorize("work-1", &agent_instance_id, "connector-1", permission)
                 .await
                 .unwrap();
         }
-        assert!(
-            service
-                .authorize("future-work", "connector-1", EMAIL_PERMISSION_METADATA)
-                .await
-                .is_err()
-        );
 
         sqlx::query("UPDATE connector_connections SET enabled = 0 WHERE id = 'connector-1'")
             .execute(database.pool())
@@ -1777,9 +1951,92 @@ mod tests {
             .unwrap();
         assert!(
             service
-                .authorize("work-1", "connector-1", EMAIL_PERMISSION_METADATA)
+                .authorize(
+                    "work-1",
+                    &agent_instance_id,
+                    "connector-1",
+                    EMAIL_PERMISSION_METADATA,
+                )
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_grants_make_only_the_selected_agent_see_the_connector() {
+        let (database, service) = test_service().await;
+        sqlx::query("DELETE FROM connector_workspace_grants WHERE connection_id = 'connector-1'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let agent_instance_id: String =
+            sqlx::query_scalar("SELECT id FROM agent_instances WHERE status = 'active' LIMIT 1")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+
+        assert!(
+            service
+                .authorize(
+                    "work-1",
+                    &agent_instance_id,
+                    "connector-1",
+                    EMAIL_PERMISSION_METADATA,
+                )
+                .await
+                .is_err()
+        );
+
+        let summary = service
+            .set_agent_grant(SetConnectorAgentGrantInput {
+                connection_id: "connector-1".into(),
+                agent_instance_id: agent_instance_id.clone(),
+                enabled: true,
+                permissions: vec![
+                    EMAIL_PERMISSION_METADATA.into(),
+                    EMAIL_PERMISSION_SEND.into(),
+                ],
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary.agent_grants.len(), 1);
+        service
+            .authorize(
+                "work-1",
+                &agent_instance_id,
+                "connector-1",
+                EMAIL_PERMISSION_METADATA,
+            )
+            .await
+            .unwrap();
+        assert!(
+            service
+                .authorize(
+                    "work-1",
+                    "another-agent",
+                    "connector-1",
+                    EMAIL_PERMISSION_METADATA,
+                )
+                .await
+                .is_err()
+        );
+
+        let mut granted_context = run_context();
+        granted_context.agent_instance_id = agent_instance_id;
+        assert_eq!(
+            service
+                .visible_accounts(&granted_context)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            service
+                .visible_accounts(&run_context())
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

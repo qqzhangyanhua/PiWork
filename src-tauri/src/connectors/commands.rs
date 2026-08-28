@@ -1,11 +1,22 @@
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{app_state::AppState, error::AppError};
 
 use super::{
     AppNotificationSummary, ConnectorTestResult, EmailConnectorSummary, EmailMetadataSummary,
-    PendingConnectorActionSummary, SaveEmailConnectorInput, SetConnectorWorkGrantInput,
+    PendingConnectorActionSummary, SaveEmailConnectorInput, SetConnectorAgentGrantInput,
+    SetConnectorWorkGrantInput,
 };
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn resolve_connector_icon(
+    app: AppHandle,
+    service: String,
+    homepage_url: Option<String>,
+    icon_url: Option<String>,
+) -> Option<String> {
+    super::icons::resolve(&app, &service, homepage_url.as_deref(), icon_url.as_deref()).await
+}
 
 #[tauri::command]
 pub async fn list_email_connectors(
@@ -59,6 +70,14 @@ pub async fn set_connector_work_grant(
     input: SetConnectorWorkGrantInput,
 ) -> Result<EmailConnectorSummary, AppError> {
     state.connector_service().set_work_grant(input).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_connector_agent_grant(
+    state: State<'_, AppState>,
+    input: SetConnectorAgentGrantInput,
+) -> Result<EmailConnectorSummary, AppError> {
+    state.connector_service().set_agent_grant(input).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
