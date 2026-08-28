@@ -1,0 +1,31 @@
+src-tauri/src/lib.rs
+  s_d3e2cff53d5405::t_3ca927dace099b 728-731,739-782
+  s_d3e2cff53d5405::t_2a6a4a05404b9d 783
+src-tauri/binaries/document-runtime/README.md
+  s_d3e2cff53d5405::t_0ab5baa46cb8ed 1
+scripts/fetch-darwin-node.sh
+  s_d3e2cff53d5405::t_b67965e0f8d25b 13
+  s_d3e2cff53d5405::t_18d4f1392fb099 1-12,14-53
+.gitignore
+  s_d3e2cff53d5405::t_355c008413e981 15-16
+scripts/build-document-runtime.sh
+  s_d3e2cff53d5405::t_d4437f956f02b6 4-7
+  s_d3e2cff53d5405::t_f0a5f6aa388e1b 11-12,14-18,27
+  s_d3e2cff53d5405::t_bf8b1d0e40bbc7 1-3,8-10,13,19-26,28-39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "909b3bb8c91b7cd1c35dcd709116b99544fea747",
+  "prompts": {},
+  "sessions": {
+    "s_d3e2cff53d5405": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a047da-1956-75e1-98c7-61ff952a3866",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
