@@ -12,6 +12,8 @@ skills-lock.json
 **/target/
 /src-tauri/gen/
 /src-tauri/binaries/document-runtime/piwork-document-runtime.exe
+/src-tauri/binaries/document-runtime/piwork-document-runtime
+/src-tauri/binaries/pi-sidecar/node
 
 # JavaScript
 /node_modules/

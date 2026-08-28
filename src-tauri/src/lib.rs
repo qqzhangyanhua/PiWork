@@ -725,10 +725,59 @@ mod tests {
             config["bundle"]["resources"]["binaries/pi-sidecar"],
             "pi-sidecar"
         );
+        assert_eq!(
+            config["bundle"]["resources"]["binaries/document-runtime"],
+            "document-runtime"
+        );
         assert!(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../NOTICE")
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn macos_bundle_target_is_dmg_while_windows_keeps_nsis() {
+        let windows: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(windows["bundle"]["targets"], serde_json::json!(["nsis"]));
+
+        let macos_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.macos.conf.json");
+        let macos: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&macos_path).expect("macOS packaging config"),
+        )
+        .unwrap();
+        assert_eq!(macos["bundle"]["targets"], serde_json::json!(["dmg"]));
+        let before = macos["build"]["beforeBuildCommand"]
+            .as_str()
+            .expect("macOS beforeBuildCommand");
+        assert!(
+            !before.to_ascii_lowercase().contains("powershell"),
+            "macOS packaging must not depend on PowerShell"
+        );
+    }
+
+    #[test]
+    fn darwin_sidecar_node_is_gitignored_and_windows_node_exe_remains_versioned() {
+        let gitignore = include_str!("../../.gitignore");
+        assert!(
+            gitignore
+                .lines()
+                .any(|line| line == "/src-tauri/binaries/pi-sidecar/node"),
+            "darwin Node must not enter git"
+        );
+        assert!(
+            gitignore
+                .lines()
+                .any(|line| line == "/src-tauri/binaries/document-runtime/piwork-document-runtime"),
+            "macOS document-runtime helper must not enter git"
+        );
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries/pi-sidecar/node.exe")
+                .is_file(),
+            "Windows bundled Node remains in the repository"
         );
     }
 
