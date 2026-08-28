@@ -1,0 +1,53 @@
+src-tauri/src/lib.rs
+  s_fdcbfe83e3c94c::t_f29a85c0ac4c78 767-770,778-781
+  s_fdcbfe83e3c94c::t_85b47f71f3158b 852-853,855-856,859-862,864-869,871-878,881-882,884-902
+scripts/bundle-pi-web-access.ps1
+  s_fdcbfe83e3c94c::t_c8ee63a8daa7dd 13-16,23-44,81
+scripts/bundle-pi-web-access.sh
+  s_fdcbfe83e3c94c::t_126c5186d21e1b 1-135
+THIRD_PARTY_NOTICES.md
+  s_fdcbfe83e3c94c::t_6b6e803b7556fa 61,63
+AGENT.md
+  s_fdcbfe83e3c94c::t_4ff9d29a27e462 106
+  s_a5f4cbe477e648::t_bec540784f5cb7 1-105,107
+src-tauri/tauri.conf.json
+  s_fdcbfe83e3c94c::t_d4d9d103dfdd07 7,9
+.gitignore
+  s_fdcbfe83e3c94c::t_bdc53f1fb4a44c 21
+src-tauri/tauri.macos.conf.json
+  s_d5d5e6bff8e431::t_f9366164726a91 3-4
+package.json
+  s_fdcbfe83e3c94c::t_848faaaeea7564 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "40a6deea436b3b0fd8941cf20b6b2c304a1c21a0",
+  "prompts": {},
+  "sessions": {
+    "s_a5f4cbe477e648": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "df8c7278-ca70-4b2c-976b-9b5109e84b05",
+        "model": "grok-4.5"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    },
+    "s_d5d5e6bff8e431": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a0489a-7d73-7b20-8c27-26406ff15b7b",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    },
+    "s_fdcbfe83e3c94c": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "efca3adf-8ec7-45d2-9b9d-9ac66c1a8f5e",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
