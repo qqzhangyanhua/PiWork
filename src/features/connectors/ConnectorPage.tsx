@@ -40,6 +40,7 @@ import type {
   PiWorkClient,
   SaveEmailConnectorInput,
 } from "../../app/tauriClient";
+import { credentialVaultLabel } from "../../i18n/credentialVault";
 import openConnectorCatalog from "./openConnectorCatalog.generated.json";
 
 type ConnectorDraft = SaveEmailConnectorInput & { password: string };
@@ -560,7 +561,7 @@ export function ConnectorPage({ client }: { client: PiWorkClient }) {
                 <section aria-labelledby="connector-identity-heading" className="connector-section">
                   <div className="connector-section__heading">
                     <AtSign aria-hidden="true" size={15} />
-                    <div><h3 id="connector-identity-heading">{creating ? t("connectors.addTitle") : t("connectors.identity")}</h3><p>{t("connectors.identityDescription")}</p></div>
+                    <div><h3 id="connector-identity-heading">{creating ? t("connectors.addTitle") : t("connectors.identity")}</h3><p>{t("connectors.identityDescription", { vault: credentialVaultLabel(t) })}</p></div>
                   </div>
                   <div className="connector-field-grid">
                     <label><span>{t("connectors.displayName")}</span><input onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} placeholder={t("connectors.displayNamePlaceholder")} value={draft.displayName} /></label>

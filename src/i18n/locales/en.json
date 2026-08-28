@@ -1,4 +1,9 @@
 {
+  "vault": {
+    "macos": "macOS Keychain",
+    "windows": "Windows Credential Manager",
+    "other": "the operating system credential store"
+  },
   "app": { "name": "CoDo", "slogan": "Ask less. Get more done." },
   "account": { "menu": "Account", "localUser": "Local user", "deviceOnly": "This device only" },
   "settings": {
@@ -10,7 +15,7 @@
     "shortcut": "Ctrl+,",
     "activeModel": "Currently using {{model}}",
     "savedModels": "Configured models",
-    "savedModelsDescription": "Configuration metadata stays in CoDo app data; credentials remain in Windows secure storage.",
+    "savedModelsDescription": "Configuration metadata stays in CoDo app data; credentials remain in {{vault}}.",
     "addModel": "Add model",
     "addModelDescription": "Connect a provider, verify its credential, then choose an available model.",
     "cancelAdd": "Cancel adding",
@@ -88,7 +93,7 @@
     "connectBody": "Verify a provider and choose a default model before creating a conversation.",
     "provider": "Provider",
     "apiKey": "API key",
-    "credentialNote": "The API key is stored only in Windows Credential Manager and is never written to project files.",
+    "credentialNote": "The API key is stored only in {{vault}} and is never written to project files.",
     "baseUrl": "Base URL",
     "defaultModel": "Default model",
     "test": "Test connection",
@@ -192,7 +197,7 @@
     "loading": "Loading memory settings…",
     "loadError": "Unable to load memory settings.",
     "connectionTitle": "TencentDB Agent Memory",
-    "connectionDescription": "One CoDo configuration connects to one Team; each workspace gets an isolated Task within it. Passwords and keys remain in Windows Credential Manager.",
+    "connectionDescription": "One CoDo configuration connects to one Team; each workspace gets an isolated Task within it. Passwords and keys remain in {{vault}}.",
     "hubEndpoint": "Memory Hub URL",
     "endpoint": "Memory API URL",
     "authMode": "Public authentication",
@@ -250,7 +255,7 @@
     "routingTitle": "Search routing", "routingDescription": "Fallback is used only for timeouts, quotas, network failures, or invalid responses.",
     "defaultProvider": "Default provider", "fallbackProvider": "Fallback provider", "noProvider": "Enable a provider first", "noFallback": "No fallback",
     "urlFetch": "URL content retrieval", "urlFetchDescription": "Allow reading links supplied by the user or returned in search results.",
-    "providersTitle": "Search providers", "providersDescription": "Keys stay in Windows Credential Manager; SQLite stores only routing metadata.",
+    "providersTitle": "Search providers", "providersDescription": "Keys stay in {{vault}}; SQLite stores only routing metadata.",
     "apiKey": "{{provider}} API key", "keyConfigured": "Stored securely; enter a new value to replace it", "keyPlaceholder": "Enter API key", "keyRequired": "Key required", "ready": "Ready",
     "showKey": "Show key", "hideKey": "Hide key", "clearKey": "Remove stored key", "endpoint": "Service endpoint", "endpointOptional": "Optional custom endpoint",
     "providerDescriptions": {
@@ -268,7 +273,7 @@
     "lifecycleTitle": "Connection lifecycle", "lifecycle": { "discovered": "Discovered", "discoveredDescription": "Name, scenario, authentication, and Action count are searchable.", "configure": "Configure and verify", "configureDescription": "A connection instance is created only after credentials pass verification.", "bind": "Grant to an Agent", "bindDescription": "Enable the connection for individual Agents. Other Agents cannot discover it." },
     "accounts": "Email accounts", "add": "Add email connector", "newConnection": "New connection",
     "loading": "Loading connection state…", "loadError": "Unable to load connection state", "empty": "No email connectors yet.", "newAccount": "New connection", "accountSettings": "Email connector", "addTitle": "Connect enterprise email",
-    "identity": "Account and credential", "identityDescription": "Passwords stay in Windows Credential Manager and are never written to projects or plugins.", "displayName": "Display name", "displayNamePlaceholder": "For example: Company email",
+    "identity": "Account and credential", "identityDescription": "Passwords stay in {{vault}} and are never written to projects or plugins.", "displayName": "Display name", "displayNamePlaceholder": "For example: Company email",
     "emailAddress": "Email address", "username": "Login username", "password": "App password", "passwordStored": "Credential is stored; leave blank to keep it", "passwordPlaceholder": "Enter password or app password",
     "servers": "Mail servers", "serversDescription": "Phase one supports TLS-encrypted IMAP and SMTP only.", "preset": "Service preset", "presets": { "aliyun": "Alibaba enterprise email", "custom": "Custom IMAP / SMTP" },
     "pollInterval": "Poll interval", "minutes": "{{count}} min", "port": "Port", "tlsOnly": "TLS encrypted connections only",

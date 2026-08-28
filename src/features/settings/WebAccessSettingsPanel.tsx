@@ -19,6 +19,7 @@ import type {
   SaveWebAccessSettingsInput,
   WebAccessSettingsSummary,
 } from "../../app/tauriClient";
+import { credentialVaultLabel } from "../../i18n/credentialVault";
 
 const PROVIDER_LABELS: Record<string, string> = {
   exa: "Exa",
@@ -230,7 +231,7 @@ export function WebAccessSettingsPanel({ client }: { client: PiWorkClient }) {
         <section className="web-provider-section" aria-labelledby="web-provider-title">
           <div className="settings-section-heading">
             <div><Globe2 aria-hidden="true" size={15} /><h3 id="web-provider-title">{t("webAccess.providersTitle")}</h3></div>
-            <p>{t("webAccess.providersDescription")}</p>
+            <p>{t("webAccess.providersDescription", { vault: credentialVaultLabel(t) })}</p>
           </div>
           <div className="web-provider-list">
             {draft.providers.map((provider) => {

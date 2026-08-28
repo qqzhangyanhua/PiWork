@@ -20,6 +20,7 @@ import type {
   PiWorkClient,
   WorkspaceMemoryBindingSummary,
 } from "../../app/tauriClient";
+import { credentialVaultLabel } from "../../i18n/credentialVault";
 
 const defaultSettings: MemorySettingsSummary = {
   enabled: false,
@@ -245,7 +246,7 @@ export function MemorySettingsPanel({ client }: { client: PiWorkClient }) {
         <section aria-labelledby="memory-connection-title" className="memory-settings__section">
           <div className="settings-section-heading">
             <div><Cloud aria-hidden="true" size={15} /><h3 id="memory-connection-title">{t("memory.connectionTitle")}</h3></div>
-            <p>{t("memory.connectionDescription")}</p>
+            <p>{t("memory.connectionDescription", { vault: credentialVaultLabel(t) })}</p>
           </div>
           <div className="memory-connection-grid">
             <label className="memory-field memory-field--wide">

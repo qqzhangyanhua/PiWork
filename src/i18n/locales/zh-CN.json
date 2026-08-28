@@ -1,4 +1,9 @@
 {
+  "vault": {
+    "macos": "macOS 钥匙串",
+    "windows": "Windows 凭据管理器",
+    "other": "系统凭据库"
+  },
   "app": { "name": "CoDo", "slogan": "Ask less. Get more done." },
   "account": { "menu": "账户", "localUser": "本地用户", "deviceOnly": "仅此设备" },
   "settings": {
@@ -10,7 +15,7 @@
     "shortcut": "Ctrl+,",
     "activeModel": "当前使用 {{model}}",
     "savedModels": "已配置模型",
-    "savedModelsDescription": "配置元数据保存在 CoDo 应用数据中，凭据由 Windows 安全存储保护。",
+    "savedModelsDescription": "配置元数据保存在 CoDo 应用数据中，凭据由 {{vault}} 保护。",
     "addModel": "新增模型",
     "addModelDescription": "连接 Provider、验证凭据，然后选择一个可用模型。",
     "cancelAdd": "取消新增",
@@ -88,7 +93,7 @@
     "connectBody": "验证 Provider 并选择默认模型后，才能创建对话。",
     "provider": "Provider",
     "apiKey": "API Key",
-    "credentialNote": "API Key 仅保存在 Windows Credential Manager 中，不会写入项目文件。",
+    "credentialNote": "API Key 仅保存在 {{vault}} 中，不会写入项目文件。",
     "baseUrl": "Base URL",
     "defaultModel": "默认模型",
     "test": "测试连接",
@@ -192,7 +197,7 @@
     "loading": "正在读取记忆设置…",
     "loadError": "无法读取记忆设置。",
     "connectionTitle": "腾讯 Agent Memory",
-    "connectionDescription": "一个 CoDo 配置连接一个 Team；其下的每个工作区自动使用独立 Task 隔离记忆。密码和密钥保存在 Windows 凭据管理器。",
+    "connectionDescription": "一个 CoDo 配置连接一个 Team；其下的每个工作区自动使用独立 Task 隔离记忆。密码和密钥保存在 {{vault}}。",
     "hubEndpoint": "Memory Hub 地址",
     "endpoint": "Memory API 地址",
     "authMode": "公网认证方式",
@@ -250,7 +255,7 @@
     "routingTitle": "搜索路由", "routingDescription": "默认服务失败时，仅在超时、限流、网络或无效响应场景使用备用服务。",
     "defaultProvider": "默认服务", "fallbackProvider": "备用服务", "noProvider": "先开启搜索服务", "noFallback": "不使用备用服务",
     "urlFetch": "URL 内容抓取", "urlFetchDescription": "允许读取用户或搜索结果中的网页链接。",
-    "providersTitle": "搜索服务", "providersDescription": "密钥保存在 Windows 凭据管理器；SQLite 只保存启停和路由信息。",
+    "providersTitle": "搜索服务", "providersDescription": "密钥保存在 {{vault}}；SQLite 只保存启停和路由信息。",
     "apiKey": "{{provider}} API Key", "keyConfigured": "已安全保存，输入新值可替换", "keyPlaceholder": "输入 API Key", "keyRequired": "需要密钥", "ready": "可用",
     "showKey": "显示密钥", "hideKey": "隐藏密钥", "clearKey": "移除已保存密钥", "endpoint": "服务地址", "endpointOptional": "可选自定义地址",
     "providerDescriptions": {
@@ -268,7 +273,7 @@
     "lifecycleTitle": "接入状态", "lifecycle": { "discovered": "已发现", "discoveredDescription": "名称、场景、认证方式和 Action 数量可搜索。", "configure": "配置并验证", "configureDescription": "凭据验证成功后才创建连接实例。", "bind": "授权给 Agent", "bindDescription": "按 Agent 显式开启，未授权的 Agent 看不到此连接。" },
     "accounts": "邮箱账户", "add": "添加邮箱连接器", "newConnection": "新建连接",
     "loading": "正在读取连接状态…", "loadError": "无法读取连接状态", "empty": "还没有邮箱连接器。", "newAccount": "新连接", "accountSettings": "邮箱连接器", "addTitle": "接入企业邮箱",
-    "identity": "账户与凭据", "identityDescription": "密码只保存在 Windows 凭据管理器，不会写入项目或插件。", "displayName": "显示名称", "displayNamePlaceholder": "例如：公司邮箱",
+    "identity": "账户与凭据", "identityDescription": "密码只保存在 {{vault}}，不会写入项目或插件。", "displayName": "显示名称", "displayNamePlaceholder": "例如：公司邮箱",
     "emailAddress": "邮箱地址", "username": "登录用户名", "password": "客户端专用密码", "passwordStored": "凭据已保存，留空则保持不变", "passwordPlaceholder": "输入邮箱密码或客户端专用密码",
     "servers": "邮件服务器", "serversDescription": "一期仅支持 TLS 加密的 IMAP 与 SMTP。", "preset": "服务预设", "presets": { "aliyun": "阿里企业邮箱", "custom": "自定义 IMAP / SMTP" },
     "pollInterval": "轮询频率", "minutes": "{{count}} 分钟", "port": "端口", "tlsOnly": "仅使用 TLS 加密连接",

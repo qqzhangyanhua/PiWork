@@ -8,7 +8,7 @@ use piwork_lib::{
     model::{
         AvailableModel, CredentialVault, ModelConfigurationRepository, ModelConnectionInput,
         ModelConnectionResult, ModelConnectionTester, ModelProvider, ModelService,
-        SaveModelConfigurationInput, SelectModelForConfigurationInput,
+        PlatformCredentialVault, SaveModelConfigurationInput, SelectModelForConfigurationInput,
     },
     storage::sqlite::Database,
 };
@@ -408,4 +408,72 @@ async fn legacy_single_configuration_and_credential_are_migrated() {
             .unwrap(),
         "sk-legacy"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn platform_vault_keeps_the_api_key_out_of_sqlite() {
+    let database = Database::open_in_memory().await.unwrap();
+    let vault = Arc::new(PlatformCredentialVault::new());
+    let service = ModelService::new(
+        ModelConfigurationRepository::new(database.pool().clone()),
+        vault.clone(),
+        Arc::new(FakeConnectionTester),
+    );
+
+    let saved = service
+        .save(SaveModelConfigurationInput {
+            id: None,
+            provider: ModelProvider::Openai,
+            api_key: "sk-secret-that-must-not-enter-sqlite".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model_id: "gpt-5.2".into(),
+        })
+        .await
+        .unwrap();
+    struct Cleanup<'a> {
+        vault: &'a PlatformCredentialVault,
+        id: String,
+    }
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = self.vault.delete_api_key(&self.id);
+        }
+    }
+    let _cleanup = Cleanup {
+        vault: vault.as_ref(),
+        id: saved.id.clone(),
+    };
+
+    assert_eq!(
+        service.runtime_configuration().await.unwrap().api_key,
+        "sk-secret-that-must-not-enter-sqlite"
+    );
+
+    service
+        .save(SaveModelConfigurationInput {
+            id: Some(saved.id.clone()),
+            provider: ModelProvider::Openai,
+            api_key: "sk-updated-keychain-secret".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            model_id: "gpt-5.2".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        service.runtime_configuration().await.unwrap().api_key,
+        "sk-updated-keychain-secret"
+    );
+
+    let rows: Vec<String> = sqlx::query_scalar("SELECT value FROM settings")
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+    assert!(
+        rows.iter()
+            .all(|value| !value.contains("sk-secret") && !value.contains("sk-updated"))
+    );
+
+    vault.delete_api_key(&saved.id).unwrap();
+    assert!(vault.load_api_key(&saved.id).is_err());
 }

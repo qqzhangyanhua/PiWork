@@ -179,6 +179,8 @@ impl ModelConfigurationRepository {
     }
 }
 
+pub use credentials::PlatformCredentialVault;
+
 pub trait CredentialVault: Send + Sync {
     fn store_api_key(&self, configuration_id: &str, api_key: &str) -> Result<(), String>;
     fn delete_api_key(&self, configuration_id: &str) -> Result<(), String>;

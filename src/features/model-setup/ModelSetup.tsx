@@ -8,6 +8,7 @@ import type {
   PiWorkClient,
 } from "../../app/tauriClient";
 import { CoDoLogo } from "../../components/brand/CoDoLogo";
+import { credentialVaultLabel } from "../../i18n/credentialVault";
 
 const providers: Array<{ id: ModelProvider; label: string; baseUrl: string }> = [
   { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1" },
@@ -109,7 +110,7 @@ export function ModelConfigurationForm({
       </select>
       <label htmlFor={`model-api-key-${mode}`}>{t("model.apiKey")}</label>
       <input id={`model-api-key-${mode}`} type="password" value={apiKey} autoComplete="new-password" onChange={(event) => { setApiKey(event.target.value); resetVerification(); }} disabled={testing || saving} />
-      <p className="model-setup__credential-note">{t("model.credentialNote")}</p>
+      <p className="model-setup__credential-note">{t("model.credentialNote", { vault: credentialVaultLabel(t) })}</p>
       {provider === "custom" && <><label htmlFor={`model-base-url-${mode}`}>{t("model.baseUrl")}</label><input id={`model-base-url-${mode}`} type="url" value={baseUrl} onChange={(event) => { setBaseUrl(event.target.value); resetVerification(); }} disabled={testing || saving} /></>}
       <button className="button" type="button" onClick={() => void testConnection()} disabled={!apiKey.trim() || !baseUrl.trim() || testing || saving}>{testing ? t("model.testing") : t("model.test")}</button>
       {testing && <p className="model-setup__connection-status" role="status">{t("model.testingStatus")}</p>}

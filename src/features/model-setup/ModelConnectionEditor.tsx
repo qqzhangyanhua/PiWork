@@ -8,6 +8,7 @@ import type {
   ModelProvider,
   PiWorkClient,
 } from "../../app/tauriClient";
+import { credentialVaultLabel } from "../../i18n/credentialVault";
 import { BrandSelect, type BrandSelectOption } from "./BrandSelect";
 
 const providers: Array<{ id: ModelProvider; label: string; baseUrl: string }> = [
@@ -200,7 +201,7 @@ export function ModelConnectionEditor({
                 value={apiKey}
               />
             )}
-            <p>{t("model.credentialNote")}</p>
+            <p>{t("model.credentialNote", { vault: credentialVaultLabel(t) })}</p>
           </div>
 
           {provider === "custom" && (

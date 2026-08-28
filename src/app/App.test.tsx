@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SaveAgentAssemblyInput } from "../bindings";
 import { i18n } from "../i18n";
+import { credentialVaultKind } from "../i18n/credentialVault";
 import { createMockTauriClient } from "../test/mockTauriClient";
 import { App } from "./App";
 
@@ -323,7 +324,12 @@ describe("App", () => {
     client.testModelConnection.mockResolvedValue({ models: [] });
     render(<App client={client} />);
 
-    expect(await screen.findByText(/Windows Credential Manager/u)).toBeInTheDocument();
+    expect(
+      await screen.findByText(new RegExp(i18n.t(`vault.${credentialVaultKind()}`), "u")),
+    ).toBeInTheDocument();
+    if (credentialVaultKind() !== "windows") {
+      expect(screen.queryByText(/Windows Credential Manager/u)).not.toBeInTheDocument();
+    }
     await user.type(screen.getByLabelText("API key"), "sk-test-secret");
     await user.click(screen.getByRole("button", { name: "Test connection" }));
 
