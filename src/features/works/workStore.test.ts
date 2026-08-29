@@ -172,7 +172,7 @@ const resource = (
 });
 
 const workDetail = (): WorkDetail => ({
-  summary: work,
+  summary: { ...work },
   runs: [],
   messages: [],
   events: [],
@@ -1029,7 +1029,7 @@ describe("createWorkStore", () => {
       startWork: async () => output,
     };
     const store = createWorkStore(client);
-    store.getState().upsertWork(work);
+    store.getState().upsertWork({ ...work, status: "draft" });
 
     await store.getState().startWork("w1", "Queue it");
 

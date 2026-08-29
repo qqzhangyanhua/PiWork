@@ -787,8 +787,8 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         try {
           const output = await client.queueWorkInput(workId, {
             instruction,
-            referencedFiles,
-            resourceIds,
+            referencedFiles: [...referencedFiles],
+            resourceIds: [...resourceIds],
           });
           set((state) => reduceWork(state, { type: "startResponse", output }));
           succeedOperation(operation);
