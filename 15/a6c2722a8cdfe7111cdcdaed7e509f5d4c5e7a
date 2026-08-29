@@ -1,0 +1,27 @@
+src-tauri/src/lib.rs
+  s_fdfe4900a46284::t_121fbf068af07a 698,710-724,732,734-763
+  s_fdfe4900a46284::t_cf3848595b93d5 222,224-234
+  s_fdfe4900a46284::t_8b655b3972e05a 261,273,312-315
+  s_fdfe4900a46284::t_c7c52eeaa9dbed 733
+  s_fdfe4900a46284::t_68e607d3ac1273 316-318
+src-tauri/src/assignment/commands.rs
+  s_fdfe4900a46284::t_63cc67be9065c6 5,17,19
+src-tauri/src/assignment/repository.rs
+  s_fdfe4900a46284::t_a402242ccc7a00 72,79-80,83-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "15a6c2722a8cdfe7111cdcdaed7e509f5d4c5e7a",
+  "prompts": {},
+  "sessions": {
+    "s_fdfe4900a46284": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04ce5-c6de-7081-9986-f8835cc7ab55",
+        "model": "grok-4.6"
+      },
+      "human_author": null
+    }
+  }
+}
