@@ -21,11 +21,13 @@ impl WorkspacePathIdentity {
                 "Workspace root must be a directory",
             ));
         }
-        let normalized = canonical_root.to_string_lossy().replace('\\', "/");
-        #[cfg(windows)]
-        let identity = normalized.to_lowercase();
-        #[cfg(not(windows))]
-        let identity = normalized;
+        // Must match the SQLite workspace contract: lower(replace(path, '\', '/')).
+        // Windows already folded case here; Unix tempfile names are mixed-case, so
+        // skipping lower() lets the autofill trigger create a second workspace.
+        let identity = canonical_root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_lowercase();
         Ok(Self {
             canonical_root,
             identity,
