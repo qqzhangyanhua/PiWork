@@ -1,0 +1,34 @@
+src-tauri/src/assignment/repository.rs
+  s_444949e2854f5d::t_2f68030e732204 23
+src-tauri/src/engine/activity_observer.rs
+  s_444949e2854f5d::t_c4e73528e98434 14-15
+src-tauri/tests/assignment_scheduler.rs
+  s_444949e2854f5d::t_45e52469dae09b 11-12
+src-tauri/tests/execution_coordinator.rs
+  s_444949e2854f5d::t_c4e73528e98434 7-8
+src-tauri/src/engine/publisher.rs
+  s_444949e2854f5d::t_0e81c69aef9315 8
+src-tauri/src/lib.rs
+  s_444949e2854f5d::t_69f2ace7eca7b8 767-802
+  s_444949e2854f5d::t_f57951eb3635c4 766
+src-tauri/tests/collaboration_loop.rs
+  s_444949e2854f5d::t_2fef449911fbf8 15-16
+src-tauri/tests/assignment_lifecycle.rs
+  s_444949e2854f5d::t_8658a9d254affc 8-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "6a0a4e51f74675800eec5cf6f0b552d6250da6f2",
+  "prompts": {},
+  "sessions": {
+    "s_444949e2854f5d": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04cfd-22c9-7c41-bfb9-3c3bcdedc494",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
