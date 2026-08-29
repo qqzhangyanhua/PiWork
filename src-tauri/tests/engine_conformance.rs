@@ -1,11 +1,7 @@
-use std::{
-    collections::HashMap,
-    future::Future,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
+
+#[cfg(any(windows, target_os = "macos"))]
+use std::{path::Path, process::Command, sync::Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -20,8 +16,12 @@ use piwork_lib::{
         EngineAdapter, EngineCapabilities, EngineError, EngineEvent, EngineInput, EngineRunContext,
         EngineRunIdentity, EngineSessionRef,
         fake::{FakeEngineAdapter, FakeEngineConfig, FakeRunBehavior, FakeStartBarrier},
-        pi::PiEngineAdapter,
     },
+};
+
+#[cfg(any(windows, target_os = "macos"))]
+use piwork_lib::{
+    engine::pi::PiEngineAdapter,
     model::{
         AvailableModel, CredentialVault, ModelConfigurationRepository, ModelConnectionInput,
         ModelConnectionResult, ModelConnectionTester, ModelProvider, ModelService,
@@ -123,6 +123,7 @@ fn minimal_capabilities() -> EngineCapabilities {
     EngineCapabilities::default()
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn pi_capabilities() -> EngineCapabilities {
     EngineCapabilities {
         session_resume: true,
@@ -343,6 +344,7 @@ fn assert_event_contract(events: &[EngineEvent], capabilities: EngineCapabilitie
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 enum FixtureScenario {
     Complete,
     HoldUntilAbort,
@@ -436,11 +438,13 @@ impl AdapterFactory for FakeAdapterFactory {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[derive(Default)]
 struct FixtureVault {
     secrets: Mutex<HashMap<String, String>>,
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 impl CredentialVault for FixtureVault {
     fn store_api_key(&self, configuration_id: &str, api_key: &str) -> Result<(), String> {
         self.secrets
@@ -473,8 +477,10 @@ impl CredentialVault for FixtureVault {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 struct FixtureConnectionTester;
 
+#[cfg(any(windows, target_os = "macos"))]
 #[async_trait]
 impl ModelConnectionTester for FixtureConnectionTester {
     async fn test(&self, _input: &ModelConnectionInput) -> Result<ModelConnectionResult, String> {
@@ -487,6 +493,7 @@ impl ModelConnectionTester for FixtureConnectionTester {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 async fn fixture_model_service() -> Arc<ModelService> {
     let database = Database::open_in_memory().await.unwrap();
     let service = Arc::new(ModelService::new(
@@ -507,6 +514,7 @@ async fn fixture_model_service() -> Arc<ModelService> {
     service
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn node_executable() -> PathBuf {
     let output = if cfg!(windows) {
         Command::new("where.exe").arg("node.exe").output()
@@ -526,6 +534,7 @@ fn node_executable() -> PathBuf {
         .expect("Node lookup returned no executable")
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn install_node_fixture(root: &Path, scenario: FixtureScenario) -> PathBuf {
     let bundle = root.join("bundle");
     let fixture_directory = bundle.join("fixture");
@@ -714,11 +723,13 @@ rl.on('line', line => {{
     script_path
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 struct PiFixtureAdapter {
     inner: PiEngineAdapter,
     _root: tempfile::TempDir,
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[async_trait]
 impl EngineAdapter for PiFixtureAdapter {
     fn kind(&self) -> &'static str {
@@ -768,8 +779,10 @@ impl EngineAdapter for PiFixtureAdapter {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 struct PiAdapterFactory;
 
+#[cfg(any(windows, target_os = "macos"))]
 #[async_trait]
 impl AdapterFactory for PiAdapterFactory {
     fn name(&self) -> &'static str {
@@ -797,6 +810,7 @@ impl AdapterFactory for PiAdapterFactory {
 }
 
 fn adapter_factories() -> Vec<Box<dyn AdapterFactory>> {
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
     let mut factories: Vec<Box<dyn AdapterFactory>> = vec![
         Box::new(FakeAdapterFactory {
             profile: FakeProfile::Full,
@@ -810,10 +824,12 @@ fn adapter_factories() -> Vec<Box<dyn AdapterFactory>> {
     factories
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn fixture_marker(root: &Path, name: &str) -> PathBuf {
     root.join("bundle").join("fixture").join(name)
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 async fn wait_for_fixture_marker(root: &Path, name: &str) {
     let path = fixture_marker(root, name);
     let label = format!("Pi fixture marker {name}");
@@ -833,6 +849,7 @@ fn fixture_descendant_pid(root: &Path) -> u32 {
         .unwrap()
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn fixture_sidecar_pid(root: &Path) -> u32 {
     std::fs::read_to_string(fixture_marker(root, "sidecar-pid"))
         .unwrap()
@@ -868,7 +885,7 @@ fn process_is_alive(process_id: u32) -> bool {
     alive
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn process_is_alive(process_id: u32) -> bool {
     unsafe extern "C" {
         fn kill(process_id: i32, signal: i32) -> i32;
@@ -888,6 +905,7 @@ async fn release_fixture_descendant_if_alive(root: &Path, process_id: u32) {
     }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 async fn abort_returned_before_fixture_marker(
     root: &Path,
     abort: &tokio::task::JoinHandle<Result<(), EngineError>>,
@@ -907,6 +925,7 @@ async fn abort_returned_before_fixture_marker(
     .await
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 async fn start_returned_before_fixture_marker(
     root: &Path,
     marker_name: &str,
@@ -927,6 +946,7 @@ async fn start_returned_before_fixture_marker(
     .await
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 async fn pi_fixture_adapter(root: &Path, scenario: FixtureScenario) -> Arc<PiEngineAdapter> {
     Arc::new(
         PiEngineAdapter::production_with_executable(

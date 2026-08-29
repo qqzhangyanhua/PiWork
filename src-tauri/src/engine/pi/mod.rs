@@ -780,6 +780,7 @@ fn node_entrypoint_argument(path: &Path) -> String {
 }
 
 impl PiCommand {
+    #[cfg(any(windows, target_os = "macos"))]
     fn discover(preferred: Option<&Path>) -> Result<Self, EngineError> {
         if let Some(path) = preferred.filter(|path| path.is_file()) {
             return Self::from_path(path.to_path_buf());
@@ -820,6 +821,7 @@ impl PiCommand {
         ))
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     fn from_path(path: PathBuf) -> Result<Self, EngineError> {
         if path
             .extension()

@@ -8,10 +8,13 @@ use piwork_lib::{
     model::{
         AvailableModel, CredentialVault, ModelConfigurationRepository, ModelConnectionInput,
         ModelConnectionResult, ModelConnectionTester, ModelProvider, ModelService,
-        PlatformCredentialVault, SaveModelConfigurationInput, SelectModelForConfigurationInput,
+        SaveModelConfigurationInput, SelectModelForConfigurationInput,
     },
     storage::sqlite::Database,
 };
+
+#[cfg(target_os = "macos")]
+use piwork_lib::model::PlatformCredentialVault;
 
 #[derive(Default)]
 struct FakeVault {
