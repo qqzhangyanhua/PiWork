@@ -1,0 +1,47 @@
+docs/architecture/piwork-current-agent-architecture.zh-CN.md
+  s_f8320101e238ed::t_3f78cc695dfb24 214-217
+  s_f8320101e238ed::t_2f06e935c544e2 481,565
+  s_f8320101e238ed::t_347568b8a828a0 3,6-8,14-15,21-24,27-28,31-42,45,50,53,55-58,60
+  s_f8320101e238ed::t_0fae57201d4fd0 68,113,121-122,124-127,149,151,155-157,189,192-193,197,199-201
+  s_f8320101e238ed::t_b124b535ccc9fd 236,241,244-245,248-249,253,259-260,268,272,274-275,279-281,284-290,331-335,337,345,349,352,364
+  s_f8320101e238ed::t_a445fc478776b9 74,79
+  s_f8320101e238ed::t_5291dd73685281 47,317,541
+  s_f8320101e238ed::t_c210b824fc2830 424,426,428-435,437,439,441,443,445-450,452,454,456,458-460,462,464,466,468,470,474-475,477,536-538,549-551,553-555
+docs/piwork-current-ui-design-handoff.zh-CN.md
+  s_f8320101e238ed::t_aa1732997e9c65 341
+  s_f8320101e238ed::t_d3f7ac62142e17 30,32-34
+docs/architecture/piwork-capability-platform-market-implementation-plan.zh-CN.md
+  s_f8320101e238ed::t_25d1bec42b89c5 54
+  s_f8320101e238ed::t_dd6e4a642ba41c 3,5-7,37
+docs/architecture/piwork-agent-remediation-roadmap.zh-CN.md
+  s_f8320101e238ed::t_6c8e0104fbd338 35
+  s_f8320101e238ed::t_34ddddd2f37f30 3,5,9-17,20-24,146-147,186-187,258,358,416-417,480-481,557-559
+  s_f8320101e238ed::t_5893dceb77127f 75-77,261
+  s_f8320101e238ed::t_ad6bc191a19a86 18-19,257,362-364,420-422,616-617
+  s_f8320101e238ed::t_bf58ffa73123c8 190-192,642-645
+  s_f8320101e238ed::t_3ac5315d0a2d8c 611-615,618,624,626-632,634,698,703-706,709
+  s_f8320101e238ed::t_151da97f036ac0 649-650
+  s_f8320101e238ed::t_60b6ea3160995c 359
+CONTEXT.md
+  s_f8320101e238ed::t_614ed419078241 124-125
+AGENT.md
+  s_f8320101e238ed::t_cb3a209f6e4bf3 99
+  s_f8320101e238ed::t_f9deaeeb1089cd 9-11,106-107,109
+  s_f8320101e238ed::t_c3cb12e29c55be 13
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "cdf39b3165b5276644865c7d4e5942da6f0c9472",
+  "prompts": {},
+  "sessions": {
+    "s_f8320101e238ed": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04d76-9d1e-7c63-bcdb-d2e49db25eac",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
