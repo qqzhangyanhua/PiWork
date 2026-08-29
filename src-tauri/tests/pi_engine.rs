@@ -2,11 +2,14 @@ use std::path::Path;
 
 use piwork_lib::{
     engine::{
-        EngineAdapter, EngineCapabilities, EngineEvent,
-        pi::{PiEngineAdapter, PiProviderConfig, RpcEventTranslator},
+        EngineEvent,
+        pi::{PiProviderConfig, RpcEventTranslator},
     },
     model::{ModelProvider, RuntimeModelConfiguration},
 };
+
+#[cfg(any(windows, target_os = "macos"))]
+use piwork_lib::engine::{EngineAdapter, EngineCapabilities, pi::PiEngineAdapter};
 use serde_json::json;
 
 fn configuration(provider: ModelProvider) -> RuntimeModelConfiguration {

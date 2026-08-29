@@ -1,3 +1,4 @@
+#[cfg(any(windows, target_os = "macos"))]
 use zeroize::Zeroize;
 
 #[cfg(windows)]

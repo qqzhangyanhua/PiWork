@@ -35,6 +35,7 @@ impl PiProcessSpawnError {
         }
     }
 
+    #[cfg(any(windows, target_os = "macos"))]
     fn after_child(
         source: io::Error,
         cleanup_confirmed: bool,
