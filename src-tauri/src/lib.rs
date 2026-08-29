@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, future::Future, sync::Arc};
+use std::{collections::BTreeSet, future::Future, path::PathBuf, sync::Arc};
 
 #[cfg(all(test, windows))]
 #[link(name = "resource", kind = "static")]
@@ -127,6 +127,26 @@ fn production_agent_tools() -> BTreeSet<String> {
         .copied()
         .map(String::from)
         .collect()
+}
+
+fn production_engine_adapter(
+    model_service: Arc<model::ModelService>,
+    engine_sessions_dir: PathBuf,
+    runtime_dir: PathBuf,
+    bundled_pi: Option<PathBuf>,
+    host_tool_extension: PathBuf,
+    extension_service: Arc<extensions::ExtensionService>,
+) -> Result<Arc<dyn engine::EngineAdapter>, engine::EngineError> {
+    Ok(Arc::new(
+        engine::pi::PiEngineAdapter::production_with_executable(
+            model_service,
+            engine_sessions_dir,
+            runtime_dir,
+            bundled_pi,
+        )?
+        .with_host_tool_extension(host_tool_extension)
+        .with_extension_service(extension_service),
+    ))
 }
 
 fn production_agent_engine_capabilities() -> BTreeSet<String> {
@@ -292,16 +312,14 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             "bundled PiWork host tools extension is unavailable",
                         )
                     })?;
-                    let engine = Arc::new(
-                        engine::pi::PiEngineAdapter::production_with_executable(
-                            Arc::clone(&model_service),
-                            engine_sessions_dir.clone(),
-                            runtime_dir.clone(),
-                            bundled_pi.clone(),
-                        )?
-                        .with_host_tool_extension(host_tool_extension)
-                        .with_extension_service(Arc::clone(&extension_service)),
-                    );
+                    let engine = production_engine_adapter(
+                        Arc::clone(&model_service),
+                        engine_sessions_dir.clone(),
+                        runtime_dir.clone(),
+                        bundled_pi.clone(),
+                        host_tool_extension,
+                        Arc::clone(&extension_service),
+                    )?;
                     if !app.manage(observer.clone()) {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
@@ -331,7 +349,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         assignment_repository.clone(),
                         repository.clone(),
                         agent_repository.clone(),
-                        Arc::clone(&engine) as Arc<dyn engine::EngineAdapter>,
+                        Arc::clone(&engine),
                         Arc::clone(&publisher) as Arc<dyn engine::publisher::EventPublisher>,
                         format!("piwork-scheduler-{}", uuid::Uuid::new_v4()),
                         "Pi",
@@ -619,7 +637,9 @@ mod tests {
             .values()
             .windows(2)
             .find(|pair| pair[0] == "--tools")
-            .expect("Pi runtime arguments must include --tools")[1]
+            .expect(
+                "Pi runtime arguments must include --tools so production Work can constrain sidecar tools",
+            )[1]
             .split(',')
             .map(String::from)
             .collect::<std::collections::BTreeSet<_>>();
@@ -629,39 +649,87 @@ mod tests {
                 .map(|tool| String::from(*tool))
                 .collect();
 
-        assert_eq!(runtime_tools, tools);
-        assert_eq!(production_source_tools, tools);
-        assert_eq!(super::production_agent_tools(), tools);
+        assert_eq!(
+            runtime_tools, tools,
+            "Pi runtime --tools must cover every tool required by migrated executable capability packs so those packs can run in production Work"
+        );
+        assert_eq!(
+            production_source_tools, tools,
+            "the Pi production tool source must match migrated executable capability pack requirements"
+        );
+        assert_eq!(
+            super::production_agent_tools(),
+            tools,
+            "production Agent assembly must admit the same tools the Pi runtime allowlists, so assembled Agents can use executable packs"
+        );
         assert_eq!(
             super::production_agent_engine_capabilities(),
             engine_capabilities,
+            "production Agent assembly must declare the same engine capabilities required by migrated executable packs"
         );
     }
 
-    #[test]
-    fn production_agent_allowlist_delegates_to_pi_runtime_tool_source() {
-        let source = include_str!("lib.rs");
-        let production = source.split("#[cfg(test)]").next().unwrap();
+    async fn assemble_production_engine()
+    -> Result<Arc<dyn crate::engine::EngineAdapter>, crate::engine::EngineError> {
+        use crate::model::{ModelConfigurationRepository, ModelService};
 
-        assert!(production.contains("engine::pi::production_pi_tool_ids()"));
-        assert!(
-            !production
-                .contains("[\"read\", \"grep\", \"find\", \"ls\", \"edit\", \"write\", \"bash\"]")
-        );
-    }
-
-    #[test]
-    fn production_uses_pi_rpc_instead_of_direct_model_completion() {
-        let source = include_str!("lib.rs");
-        let assembly = source
-            .split("fn application_builder()")
-            .nth(1)
-            .unwrap()
-            .split("#[cfg_attr(mobile")
-            .next()
+        let database = crate::storage::sqlite::Database::open_in_memory()
+            .await
             .unwrap();
-        assert!(assembly.contains("engine::pi::PiEngineAdapter::production_with_executable"));
-        assert!(!assembly.contains("ConfiguredModelEngineAdapter::new"));
+        let model_service = Arc::new(
+            ModelService::production(ModelConfigurationRepository::new(database.pool().clone()))
+                .unwrap(),
+        );
+        let extension_service = Arc::new(
+            crate::extensions::ExtensionService::new(database.pool().clone(), None).unwrap(),
+        );
+        let temporary_directory = tempfile::tempdir().unwrap();
+        super::production_engine_adapter(
+            model_service,
+            temporary_directory.path().join("sessions"),
+            temporary_directory.path().join("runtime"),
+            Some(std::env::current_exe().unwrap()),
+            temporary_directory.path().join("piwork-host-tools.ts"),
+            extension_service,
+        )
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn production_engine_selects_pi_rpc_instead_of_direct_model_completion() {
+        let engine = assemble_production_engine()
+            .await
+            .expect("supported platforms must construct the Pi RPC engine for production Work");
+
+        assert_eq!(
+            engine.kind(),
+            "pi_rpc",
+            "production Work execution must run through the Pi RPC engine, not a direct model-completion adapter"
+        );
+        let capabilities = engine.capabilities();
+        assert!(
+            capabilities.thought_stream
+                && capabilities.tool_progress
+                && capabilities.usage_reporting,
+            "production engine must expose Pi RPC activity (thought, tool progress, usage), not a direct model-completion stub: {capabilities:?}"
+        );
+        assert!(
+            !capabilities.permission_requests,
+            "production Pi RPC still auto-approves tools; a permission-requesting adapter is a different engine"
+        );
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[tokio::test]
+    async fn production_engine_fail_closes_instead_of_direct_model_completion() {
+        use crate::engine::EngineError;
+
+        match assemble_production_engine().await {
+            Err(EngineError::Unsupported("pi_rpc_windows_only")) => {}
+            other => panic!(
+                "unsupported platforms must fail closed on the Pi RPC engine rather than falling back to direct model completion; got {other:?}"
+            ),
+        }
     }
 
     #[test]
