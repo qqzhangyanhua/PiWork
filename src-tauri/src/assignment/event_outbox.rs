@@ -14,6 +14,7 @@ const OUTBOX_CLAIM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const OUTBOX_CLAIM_POLL_MAX_INTERVAL: Duration = Duration::from_millis(250);
 const HAS_PENDING_EVENT_DELIVERIES_SQL: &str =
     "SELECT EXISTS(SELECT 1 FROM assignment_event_outbox WHERE status <> 'delivered' LIMIT 1)";
+const PENDING_EVENT_DELIVERIES_SQL: &str = "SELECT ordinal, event_id, assignment_id, status, attempt_count, last_attempt_at, last_error, lease_expires_at FROM assignment_event_outbox WHERE status <> 'delivered' ORDER BY ordinal LIMIT ?";
 
 /// Receives an at-least-once transport stream. Implementations and end-to-end consumers must
 /// deduplicate the stable `event_id` before applying externally visible side effects because a
@@ -191,12 +192,12 @@ impl AssignmentEventOutbox {
         requested_limit: usize,
     ) -> Result<Vec<PendingEventDelivery>, AppError> {
         let limit = requested_limit.min(OUTBOX_DIAGNOSTIC_LIMIT) as i64;
-        Ok(sqlx::query_as::<_, PendingEventDelivery>(
-            "SELECT ordinal, event_id, assignment_id, status, attempt_count, last_attempt_at, last_error, lease_expires_at FROM assignment_event_outbox WHERE status <> 'delivered' ORDER BY ordinal LIMIT ?",
+        Ok(
+            sqlx::query_as::<_, PendingEventDelivery>(PENDING_EVENT_DELIVERIES_SQL)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?,
         )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?)
     }
 
     /// Drains globally ordered, fixed-size batches of undelivered Assignment events.
