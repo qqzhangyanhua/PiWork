@@ -5,7 +5,7 @@ use tauri::Emitter;
 use tokio::sync::mpsc;
 
 use crate::{
-    assignment::repository::AssignmentEventSink, domain::event::WorkEventEnvelope,
+    assignment::event_outbox::AssignmentEventSink, domain::event::WorkEventEnvelope,
     engine::activity_observer::ActivityObserverHandle, error::AppError,
 };
 

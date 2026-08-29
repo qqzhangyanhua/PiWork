@@ -764,6 +764,43 @@ mod tests {
     }
 
     #[test]
+    fn assignment_persistence_does_not_expose_event_delivery() {
+        let source = include_str!("assignment/repository.rs");
+        assert!(
+            !source.contains("pub use super::event_outbox::"),
+            "persist must not re-export delivery types; callers import them from the Outbox"
+        );
+        assert!(
+            !source.contains("pub async fn pending_event_deliveries"),
+            "persist must not expose pending diagnostics"
+        );
+        assert!(
+            !source.contains("pub async fn drain_pending_events"),
+            "persist must not expose drain"
+        );
+        assert!(
+            !source.contains("initialize_with_event_sink"),
+            "persist must not recover through initialize"
+        );
+        assert!(
+            source.contains("pub fn new("),
+            "tests that do not observe delivery still construct from a pool"
+        );
+        assert!(
+            source.contains("pub fn with_event_sink("),
+            "integration tests that need a live sink still construct without recover"
+        );
+        assert!(
+            source.contains("async fn drain_after_commit"),
+            "commit still best-effort drains through the held Outbox clone"
+        );
+        assert!(
+            !source.contains("pub async fn drain_after_commit"),
+            "post-commit drain is not part of the persist interface"
+        );
+    }
+
+    #[test]
     fn every_windows_binary_declares_the_gui_subsystem() {
         let source = include_str!("main.rs");
         assert!(source.starts_with("#![cfg_attr(windows, windows_subsystem = \"windows\")]"));

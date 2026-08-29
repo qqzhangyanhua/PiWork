@@ -20,9 +20,7 @@ use crate::{
     work::projector::{WorkControlFact, WorkExecutionFacts, project_work_status},
 };
 
-use super::event_outbox::AssignmentEventOutbox;
-
-pub use super::event_outbox::{AssignmentEventSink, OutboxDrainReport, PendingEventDelivery};
+use super::event_outbox::{AssignmentEventOutbox, AssignmentEventSink};
 
 const MAX_ID_BYTES: usize = 255;
 const MAX_LABEL_BYTES: usize = 255;
@@ -1895,25 +1893,6 @@ impl AssignmentRepository {
         .into_iter()
         .map(WorkEventEnvelope::try_from)
         .collect()
-    }
-
-    /// Returns a bounded diagnostic snapshot rather than materializing the entire outbox backlog.
-    pub async fn pending_event_deliveries(&self) -> Result<Vec<PendingEventDelivery>, AppError> {
-        self.outbox.pending_event_deliveries().await
-    }
-
-    pub async fn pending_event_deliveries_limited(
-        &self,
-        requested_limit: usize,
-    ) -> Result<Vec<PendingEventDelivery>, AppError> {
-        self.outbox
-            .pending_event_deliveries_limited(requested_limit)
-            .await
-    }
-
-    /// Forwards to [`AssignmentEventOutbox::drain`].
-    pub async fn drain_pending_events(&self) -> Result<OutboxDrainReport, AppError> {
-        self.outbox.drain().await
     }
 
     async fn drain_after_commit(&self) {

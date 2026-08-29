@@ -8,7 +8,8 @@ use chrono::{TimeZone, Utc};
 use piwork_lib::{
     agent::repository::AgentRepository,
     assignment::{
-        repository::{AcceptAssignmentInput, AssignmentEventSink, AssignmentRepository},
+        event_outbox::AssignmentEventSink,
+        repository::{AcceptAssignmentInput, AssignmentRepository},
         scheduler::AssignmentScheduler,
         service::AssignmentService,
     },

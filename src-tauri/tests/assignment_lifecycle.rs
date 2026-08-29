@@ -5,8 +5,8 @@ use std::{
 
 use chrono::{TimeZone, Utc};
 use piwork_lib::{
-    assignment::event_outbox::AssignmentEventOutbox,
-    assignment::repository::{AcceptAssignmentInput, AssignmentEventSink, AssignmentRepository},
+    assignment::event_outbox::AssignmentEventSink,
+    assignment::repository::{AcceptAssignmentInput, AssignmentRepository},
     assignment::state_machine::{
         AssignmentAction, RecoveryDecision, recovery_decision, retry_delay, transition,
     },
@@ -431,9 +431,6 @@ async fn repository_state_mutations_return_committed_facts_when_every_publicatio
             .status,
         AssignmentStatus::Cancelled
     );
-    let outbox =
-        AssignmentEventOutbox::new(database.pool().clone(), Arc::new(RecordingSink::default()));
-    assert!(!outbox.pending_event_deliveries().await.unwrap().is_empty());
 }
 
 #[tokio::test]

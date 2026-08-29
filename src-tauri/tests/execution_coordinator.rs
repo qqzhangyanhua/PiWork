@@ -4,9 +4,8 @@ use chrono::{TimeZone, Utc};
 use piwork_lib::{
     agent::repository::AgentRepository,
     assignment::{
-        repository::{AssignmentEventSink, AssignmentRepository},
-        scheduler::AssignmentScheduler,
-        service::AssignmentService,
+        event_outbox::AssignmentEventSink, repository::AssignmentRepository,
+        scheduler::AssignmentScheduler, service::AssignmentService,
     },
     domain::{assignment::AssignmentStatus, event::WorkEventEnvelope, work::WorkStatus},
     engine::{fake::FakeEngineAdapter, publisher::EventPublisher},

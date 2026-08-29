@@ -11,7 +11,8 @@ use std::{
 use tokio::sync::broadcast;
 
 use crate::{
-    assignment::repository::AssignmentEventSink, domain::event::WorkEventEnvelope, error::AppError,
+    assignment::event_outbox::AssignmentEventSink, domain::event::WorkEventEnvelope,
+    error::AppError,
 };
 
 const ACTIVITY_BUFFER_CAP: usize = 1000;
