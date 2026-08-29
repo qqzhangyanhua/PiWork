@@ -1,0 +1,23 @@
+src-tauri/tests/pi_launch_arguments.rs
+  s_aa94f09270ebf2::t_8de4a6063d2f34 105-106,109-110
+  s_aa94f09270ebf2::t_673978709578c8 9-10
+  s_aa94f09270ebf2::t_7d7f13b3bd81ca 5,14
+  s_aa94f09270ebf2::t_eb1b2619b73397 1-4,6-8,11-13,15-40,42-104,107-108,111,143-144
+  s_aa94f09270ebf2::t_3d23a73f1f96ee 41,112-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "dfa002e0763455fc1f1975dcc2c312f48c3e4f6f",
+  "prompts": {},
+  "sessions": {
+    "s_aa94f09270ebf2": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04e0a-8f15-7742-abed-b879648b7158",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
