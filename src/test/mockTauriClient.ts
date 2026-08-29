@@ -8,6 +8,7 @@ import type {
   CapabilityPackSummary,
   CreateWorkInput,
   MessageSummary,
+  QueueWorkInput,
   ResourceSummary,
   ResourceThumbnail,
   RunSummary,
@@ -576,11 +577,18 @@ export const createMockTauriClient = (): MockTauriClient => {
     const activeRun = [...detail.runs]
       .reverse()
       .find(({ status }) => status === "queued" || status === "running" || status === "waiting");
-    if (!activeRun) throw new Error(`Work is not running: ${workId}`);
-    activeRun.status = "stopped";
-    activeRun.completedAt = now(50 + runSequence);
+    const inFlight =
+      detail.summary.status === "queued" ||
+      detail.summary.status === "running" ||
+      detail.summary.status === "waiting";
+    if (!activeRun && !inFlight) throw new Error(`Work is not running: ${workId}`);
+    const completedAt = now(50 + runSequence);
+    if (activeRun) {
+      activeRun.status = "stopped";
+      activeRun.completedAt = completedAt;
+    }
     detail.summary.status = "stopped";
-    detail.summary.updatedAt = activeRun.completedAt;
+    detail.summary.updatedAt = completedAt;
     return detail;
   });
   const archiveWork: Mock<PiWorkClient["archiveWork"]> = vi.fn(async (workId) => {
@@ -608,8 +616,45 @@ export const createMockTauriClient = (): MockTauriClient => {
     async () => [],
   );
   const queueWorkInput: Mock<PiWorkClient["queueWorkInput"]> = vi.fn(
-    async (_workId, _input) => {
-      throw new Error("queueWorkInput is not mocked");
+    async (workId: string, input: QueueWorkInput) => {
+      const detail = details.get(workId);
+      if (!detail) throw new Error(`Work not found: ${workId}`);
+      const assignmentId = `assignment-queued-${++runSequence}`;
+      const createdAt = now(10 + runSequence);
+      const instruction = input.instruction.trim();
+      const userMessage: MessageSummary = {
+        id: `message-${runSequence}`,
+        workId,
+        runId: `assignment:${assignmentId}`,
+        role: "user",
+        content: instruction,
+        resourceIds: [...input.resourceIds],
+        createdAt,
+      };
+      detail.messages.push(userMessage);
+      if (
+        detail.summary.status !== "queued" &&
+        detail.summary.status !== "running" &&
+        detail.summary.status !== "waiting"
+      ) {
+        detail.summary.status = "queued";
+        detail.summary.updatedAt = createdAt;
+      }
+      return {
+        assignment: assignmentSummary({
+          id: assignmentId,
+          workId,
+          instruction,
+          status: "queued",
+          attemptCount: 0,
+          claimedAt: null,
+          startedAt: null,
+          createdAt,
+          updatedAt: createdAt,
+        }),
+        run: null,
+        userMessage: { ...userMessage, assignmentId, runId: undefined },
+      } satisfies StartWorkOutput;
     },
   );
   const confirmAssignmentRecovery: Mock<

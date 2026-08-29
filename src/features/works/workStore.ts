@@ -55,7 +55,7 @@ export type WorkState = {
     prompt: string,
     referencedFiles?: string[],
     resourceIds?: string[],
-  ): void;
+  ): Promise<StartWorkOutput | undefined>;
   selectWork(workId: string): void;
   upsertWork(work: WorkSummary): void;
   applyEvent(event: WorkEventEnvelope): void;
@@ -134,6 +134,15 @@ const isTerminalStatus = (status: WorkSummary["status"]) =>
   status === "stopped" ||
   status === "interrupted" ||
   status === "idle";
+
+const isInFlightStatus = (status: WorkSummary["status"]) =>
+  status === "queued" || status === "running" || status === "waiting";
+
+const workStatusFromRun = (run: RunSummary): WorkSummary["status"] => {
+  if (run.status === "queued") return "queued";
+  if (run.status === "waiting") return "waiting";
+  return "running";
+};
 
 export const createWorkStore = (client: PiWorkClient = tauriClient) => {
   let hydration: Promise<void> | null = null;
@@ -243,7 +252,24 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
         ),
       };
       if (!run) {
-        return { timelines };
+        const currentWork = state.works[timelineMessage.workId];
+        if (!currentWork || isInFlightStatus(currentWork.status)) {
+          return { timelines };
+        }
+        return {
+          timelines,
+          works: {
+            ...state.works,
+            [timelineMessage.workId]: {
+              ...currentWork,
+              status: "queued",
+              updatedAt:
+                timelineMessage.createdAt > currentWork.updatedAt
+                  ? timelineMessage.createdAt
+                  : currentWork.updatedAt,
+            },
+          },
+        };
       }
       registerRun(run.workId, run.id, run.createdAt);
       const previousLatestRun = state.latestRuns[run.workId];
@@ -289,7 +315,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           ...state.works,
           [run.workId]: {
             ...currentWork,
-            status: "running",
+            status: workStatusFromRun(run),
             updatedAt: run.createdAt,
           },
         },
@@ -738,7 +764,7 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
           endOperation();
         }
       },
-      queueInstruction: (
+      queueInstruction: async (
         workId,
         prompt,
         referencedFiles = [],
@@ -746,19 +772,42 @@ export const createWorkStore = (client: PiWorkClient = tauriClient) => {
       ) => {
         const instruction = prompt.trim();
         if (!instruction && resourceIds.length === 0) return;
+        const queued: QueuedInstruction = {
+          prompt: instruction,
+          referencedFiles: [...referencedFiles],
+          resourceIds: [...resourceIds],
+        };
         set((state) => ({
           queuedInstructions: {
             ...state.queuedInstructions,
-            [workId]: [
-              ...(state.queuedInstructions[workId] ?? []),
-              {
-                prompt: instruction,
-                referencedFiles: [...referencedFiles],
-                resourceIds: [...resourceIds],
-              },
-            ],
+            [workId]: [...(state.queuedInstructions[workId] ?? []), queued],
           },
         }));
+        const operation = beginOperation();
+        try {
+          const output = await client.queueWorkInput(workId, {
+            instruction,
+            referencedFiles: [...referencedFiles],
+            resourceIds: [...resourceIds],
+          });
+          set((state) => reduceWork(state, { type: "startResponse", output }));
+          succeedOperation(operation);
+          return output;
+        } catch (error) {
+          set((state) => {
+            const current = state.queuedInstructions[workId] ?? [];
+            return {
+              queuedInstructions: {
+                ...state.queuedInstructions,
+                [workId]: current.slice(0, -1),
+              },
+            };
+          });
+          failOperation(operation, error);
+          throw error;
+        } finally {
+          endOperation();
+        }
       },
       selectWork: (workId) => {
         const intent = beginSelectionIntent();

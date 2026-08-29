@@ -172,7 +172,7 @@ const resource = (
 });
 
 const workDetail = (): WorkDetail => ({
-  summary: work,
+  summary: { ...work },
   runs: [],
   messages: [],
   events: [],
@@ -283,11 +283,14 @@ describe("createWorkStore", () => {
     expect(store.getState().error).toBeNull();
   });
 
-  it("copies resource ids when an instruction is queued", () => {
-    const store = createWorkStore(createMockTauriClient());
+  it("copies resource ids when an instruction is queued", async () => {
+    const client = createMockTauriClient();
+    client.seed(workDetail());
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
     const resourceIds = ["resource-1"];
 
-    store.getState().queueInstruction("w1", "Compare", [], resourceIds);
+    await store.getState().queueInstruction("w1", "Compare", [], resourceIds);
     resourceIds.push("resource-2");
 
     expect(store.getState().queuedInstructions.w1).toEqual([
@@ -297,6 +300,11 @@ describe("createWorkStore", () => {
         resourceIds: ["resource-1"],
       },
     ]);
+    expect(client.queueWorkInput).toHaveBeenCalledWith("w1", {
+      instruction: "Compare",
+      referencedFiles: [],
+      resourceIds: ["resource-1"],
+    });
   });
 
   it("hydrates Work resources beside the Work detail", async () => {
@@ -313,12 +321,42 @@ describe("createWorkStore", () => {
     expect(store.getState().resources.w1?.[0]?.id).toBe("resource-1");
   });
 
-  it("queues trimmed instructions per Work without creating events", () => {
-    const store = createWorkStore(unusedClient);
+  it("queues trimmed instructions per Work without creating events", async () => {
+    const outputs: StartWorkOutput[] = [];
+    const client: PiWorkClient = {
+      ...unusedClient,
+      queueWorkInput: async (workId, input) => {
+        const output: StartWorkOutput = {
+          assignment: assignmentSummary({
+            id: `assignment-${workId}`,
+            workId,
+            instruction: input.instruction,
+            status: "queued",
+            claimedAt: null,
+            startedAt: null,
+          }),
+          run: null,
+          userMessage: {
+            id: `message-${workId}`,
+            workId,
+            assignmentId: `assignment-${workId}`,
+            role: "user",
+            content: input.instruction,
+            resourceIds: [...input.resourceIds],
+            createdAt: "2026-07-28T09:00:01.000Z",
+          },
+        };
+        outputs.push(output);
+        return output;
+      },
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork(work);
+    store.getState().upsertWork({ ...work, id: "w2", title: "Second Work" });
 
-    store.getState().queueInstruction("w1", "  Follow up  ", ["src/context.ts"]);
-    store.getState().queueInstruction("w1", "   ");
-    store.getState().queueInstruction("w2", "Second Work");
+    await store.getState().queueInstruction("w1", "  Follow up  ", ["src/context.ts"]);
+    await store.getState().queueInstruction("w1", "   ");
+    await store.getState().queueInstruction("w2", "Second Work");
 
     expect(store.getState().queuedInstructions).toEqual({
       w1: [
@@ -330,7 +368,9 @@ describe("createWorkStore", () => {
       ],
       w2: [{ prompt: "Second Work", referencedFiles: [], resourceIds: [] }],
     });
-    expect(store.getState().timelines).toEqual({});
+    expect(outputs).toHaveLength(2);
+    expect(store.getState().timelines.w1?.some(isWorkEventTimelineItem)).toBe(false);
+    expect(store.getState().timelines.w2?.some(isWorkEventTimelineItem)).toBe(false);
   });
 
   it("ignores a duplicate sequence for the same run", () => {
@@ -959,7 +999,7 @@ describe("createWorkStore", () => {
     expect(calls).toEqual([{ workId: "w1", prompt: "Ship it" }]);
     expect(result).toBe(output);
     expect(store.getState().works.w1).toMatchObject({
-      status: "running",
+      status: "queued",
       updatedAt: queuedRun.createdAt,
     });
     expect(store.getState().timelines.w1).toEqual([output.userMessage]);
@@ -989,11 +1029,14 @@ describe("createWorkStore", () => {
       startWork: async () => output,
     };
     const store = createWorkStore(client);
-    store.getState().upsertWork(work);
+    store.getState().upsertWork({ ...work, status: "draft" });
 
     await store.getState().startWork("w1", "Queue it");
 
-    expect(store.getState().works.w1).toEqual(work);
+    expect(store.getState().works.w1).toMatchObject({
+      status: "queued",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
     expect(store.getState().latestRuns.w1).toBeUndefined();
     expect(store.getState().timelines.w1).toEqual([{
       id: "message-queued",
@@ -1004,6 +1047,87 @@ describe("createWorkStore", () => {
       resourceIds: [],
       createdAt: "2026-07-28T09:00:01.000Z",
     }]);
+  });
+
+  it("keeps a running Work running when another instruction is queued", async () => {
+    const output: StartWorkOutput = {
+      assignment: assignmentSummary({
+        id: "assignment-queued",
+        workId: "w1",
+        status: "queued",
+        startedAt: null,
+      }),
+      run: null,
+      userMessage: {
+        id: "message-follow-up",
+        workId: "w1",
+        assignmentId: "assignment-queued",
+        role: "user",
+        content: "Follow up",
+        resourceIds: [],
+        createdAt: "2026-07-28T09:00:02.000Z",
+      },
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      queueWorkInput: async () => output,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork({
+      ...work,
+      status: "running",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+
+    await store.getState().queueInstruction("w1", "Follow up");
+
+    expect(store.getState().works.w1).toMatchObject({
+      status: "running",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+    expect(store.getState().timelines.w1).toEqual([{
+      id: "message-follow-up",
+      workId: "w1",
+      runId: "assignment:assignment-queued",
+      role: "user",
+      content: "Follow up",
+      resourceIds: [],
+      createdAt: "2026-07-28T09:00:02.000Z",
+    }]);
+  });
+
+  it("applies a stopped Work detail after interrupt", async () => {
+    const detail: WorkDetail = {
+      summary: {
+        ...work,
+        status: "stopped",
+        updatedAt: "2026-07-28T09:00:03.000Z",
+      },
+      runs: [{
+        ...run,
+        status: "stopped",
+        completedAt: "2026-07-28T09:00:03.000Z",
+      }],
+      messages: [],
+      events: [],
+    };
+    const client: PiWorkClient = {
+      ...unusedClient,
+      stopWork: async () => detail,
+    };
+    const store = createWorkStore(client);
+    store.getState().upsertWork({
+      ...work,
+      status: "running",
+      updatedAt: "2026-07-28T09:00:01.000Z",
+    });
+
+    await store.getState().stopWork("w1");
+
+    expect(store.getState().works.w1).toMatchObject({
+      status: "stopped",
+      updatedAt: "2026-07-28T09:00:03.000Z",
+    });
   });
 
   it("deduplicates the same authoritative message across live start and hydration", async () => {

@@ -565,16 +565,98 @@ describe("WorkSurface", () => {
     expect(screen.queryByRole("button", { name: "发送" })).not.toBeInTheDocument();
     const queue = screen.getByRole("button", { name: "排在下一步" });
     expect(queue).toBeEnabled();
+    expect(screen.getByRole("button", { name: "停止处理" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "中断并替换" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "停止处理" })).not.toBeInTheDocument();
     expect(container.querySelectorAll(".composer-submit")).toHaveLength(1);
     expect(composer).toHaveTextContent("完成后补充单元测试");
     expect(client.startWork).not.toHaveBeenCalled();
+    expect(client.queueWorkInput).not.toHaveBeenCalled();
     expect(screen.getByText("CoDo 正在处理上一条指令，你仍可发送下一条")).toBeInTheDocument();
     expect(screen.queryByText(/已排队/u)).not.toBeInTheDocument();
     expect(dashboardStyles).toMatch(
       /\.workspace-main--dashboard \.composer-submit\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*50%;/su,
     );
+  });
+
+  it("运行中提交下一条指令会排队而不是再次 startWork", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail("running"));
+    const { container } = render(<WorkSurface client={client} />);
+
+    await screen.findByRole("button", { name: "营收看板, 运行中" });
+    expect(container.querySelector(".project-conversation__spinner")).toBeInTheDocument();
+
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
+    await user.type(composer, "完成后补充单元测试");
+    await user.click(screen.getByRole("button", { name: "排在下一步" }));
+
+    expect(client.startWork).not.toHaveBeenCalled();
+    expect(client.queueWorkInput).toHaveBeenCalledWith("work-1", {
+      instruction: "完成后补充单元测试",
+      referencedFiles: [],
+      resourceIds: [],
+    });
+    await waitFor(() => expect(composer).toBeEmptyDOMElement());
+    expect(await screen.findByText("完成后补充单元测试")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "营收看板, 运行中" })).toBeInTheDocument();
+    expect(container.querySelector(".project-conversation__spinner")).toBeInTheDocument();
+  });
+
+  it("可以从 composer 停止进行中的 Run 并更新侧栏状态", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail("running"));
+    const { container } = render(<WorkSurface client={client} />);
+
+    await screen.findByRole("button", { name: "营收看板, 运行中" });
+    expect(container.querySelector(".project-conversation__spinner")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "停止处理" }));
+
+    await waitFor(() => expect(client.stopWork).toHaveBeenCalledWith("work-1"));
+    expect(
+      await screen.findByRole("button", { name: "营收看板, 已停止" }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".project-conversation__spinner")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "停止处理" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  });
+
+  it("首次提交在 Scheduler 尚未创建 Run 时显示排队中", async () => {
+    const user = userEvent.setup();
+    const client = createMockTauriClient();
+    client.seed(seededDetail("idle"));
+    client.startWork.mockResolvedValueOnce({
+      assignment: assignmentSummary({
+        id: "assignment-queued",
+        workId: "work-1",
+        status: "queued",
+        claimedAt: null,
+        startedAt: null,
+      }),
+      run: null,
+      userMessage: {
+        id: "message-queued",
+        workId: "work-1",
+        assignmentId: "assignment-queued",
+        role: "user",
+        content: "先排队",
+        resourceIds: [],
+        createdAt: "2026-07-28T08:00:10.000Z",
+      },
+    });
+    const { container } = render(<WorkSurface client={client} />);
+
+    const composer = await screen.findByRole("textbox", { name: "给 CoDo 指令" });
+    await user.type(composer, "先排队");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(client.startWork).toHaveBeenCalledWith("work-1", "先排队", [], []);
+    expect(
+      await screen.findByRole("button", { name: "营收看板, 排队中" }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".project-conversation__spinner")).toBeInTheDocument();
   });
 
   it("连续 Enter 只启动一个 Run", async () => {
