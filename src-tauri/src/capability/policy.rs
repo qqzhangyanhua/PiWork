@@ -188,6 +188,10 @@ mod tests {
     use super::*;
 
     fn snapshot(root: PathBuf) -> RunCapabilitySnapshot {
+        snapshot_with(root, PermissionMode::Balanced)
+    }
+
+    fn snapshot_with(root: PathBuf, permission_mode: PermissionMode) -> RunCapabilitySnapshot {
         RunCapabilitySnapshot {
             id: "snapshot".into(),
             schema_version: RUN_CAPABILITY_SCHEMA_VERSION,
@@ -196,7 +200,7 @@ mod tests {
             assignment_id: "assignment".into(),
             agent_instance_id: "agent".into(),
             role_kind: RoleKind::Lead,
-            permission_mode: PermissionMode::Balanced,
+            permission_mode,
             workspace_root: root,
             expert_pack_ids: vec![],
             host_tool_ids: vec![],
@@ -207,20 +211,167 @@ mod tests {
         }
     }
 
+    fn workspace_write(root: &Path) -> CapabilityOperation {
+        CapabilityOperation::FilesystemWrite {
+            path: root.join("new.txt"),
+        }
+    }
+
+    fn outside_workspace(root: &Path) -> PathBuf {
+        root.join("../escape.txt")
+    }
+
+    /// Characterization (#18): the same mutating operation is Ask in Balanced
+    /// and Allow in AutoExecute at the policy layer.
     #[test]
-    fn expired_snapshot_denies_before_policy_evaluation() {
+    fn same_mutating_write_asks_in_balanced_and_allows_in_auto_execute() {
         let root = std::env::current_dir().unwrap();
-        let mut snapshot = snapshot(root.clone());
-        snapshot.expires_at = Some(Utc::now() - Duration::seconds(1));
+        let now = Utc::now();
+        let operation = workspace_write(&root);
+
+        assert!(
+            matches!(
+                authorize_at(
+                    &snapshot_with(root.clone(), PermissionMode::AskEveryStep),
+                    &operation,
+                    now
+                ),
+                CapabilityDecision::Ask { .. }
+            ),
+            "AskEveryStep must ask before a workspace write"
+        );
+        assert!(
+            matches!(
+                authorize_at(
+                    &snapshot_with(root.clone(), PermissionMode::Balanced),
+                    &operation,
+                    now
+                ),
+                CapabilityDecision::Ask { .. }
+            ),
+            "Balanced must ask before a workspace write"
+        );
+        assert!(
+            matches!(
+                authorize_at(
+                    &snapshot_with(root, PermissionMode::AutoExecute),
+                    &operation,
+                    now
+                ),
+                CapabilityDecision::Allow { .. }
+            ),
+            "AutoExecute must allow a workspace write"
+        );
+    }
+
+    /// Characterization (#18): FilesystemWrite and FilesystemRead outside the
+    /// Workspace fail closed with OutsideWorkspace.
+    #[test]
+    fn filesystem_write_and_read_outside_workspace_deny_fail_closed() {
+        let root = std::env::current_dir().unwrap();
+        let now = Utc::now();
+        let escaped = outside_workspace(&root);
+        let snapshot = snapshot(root);
+
         assert_eq!(
             authorize_at(
                 &snapshot,
-                &CapabilityOperation::FilesystemRead { path: root },
-                Utc::now()
+                &CapabilityOperation::FilesystemWrite {
+                    path: escaped.clone()
+                },
+                now
             ),
+            CapabilityDecision::Deny {
+                reason: DenialReason::OutsideWorkspace
+            }
+        );
+        assert_eq!(
+            authorize_at(
+                &snapshot,
+                &CapabilityOperation::FilesystemRead { path: escaped },
+                now
+            ),
+            CapabilityDecision::Deny {
+                reason: DenialReason::OutsideWorkspace
+            }
+        );
+    }
+
+    /// Characterization (#18): an expired Run Capability Snapshot is rejected
+    /// before operation policy runs. AutoExecute + in-bounds write would Allow
+    /// if evaluation were reached.
+    #[test]
+    fn expired_snapshot_denies_before_policy_evaluation() {
+        let root = std::env::current_dir().unwrap();
+        let mut snapshot = snapshot_with(root.clone(), PermissionMode::AutoExecute);
+        snapshot.expires_at = Some(Utc::now() - Duration::seconds(1));
+        assert_eq!(
+            authorize_at(&snapshot, &workspace_write(&root), Utc::now()),
             CapabilityDecision::Deny {
                 reason: DenialReason::Expired
             }
         );
+    }
+
+    /// Characterization (#18): a revoked Run Capability Snapshot is rejected
+    /// before operation policy runs. AutoExecute + in-bounds write would Allow
+    /// if evaluation were reached.
+    #[test]
+    fn revoked_snapshot_denies_before_policy_evaluation() {
+        let root = std::env::current_dir().unwrap();
+        let mut snapshot = snapshot_with(root.clone(), PermissionMode::AutoExecute);
+        snapshot.revoked_at = Some(Utc::now());
+        assert_eq!(
+            authorize_at(&snapshot, &workspace_write(&root), Utc::now()),
+            CapabilityDecision::Deny {
+                reason: DenialReason::Revoked
+            }
+        );
+    }
+
+    /// Characterization (#18): Secret and Publish stay Ask in every Permission
+    /// Mode; unknown operations stay Deny.
+    #[test]
+    fn secret_and_publish_always_ask_unknown_always_deny() {
+        let root = std::env::current_dir().unwrap();
+        let now = Utc::now();
+        let secret = CapabilityOperation::Secret {
+            secret_id: "secret".into(),
+        };
+        let publish = CapabilityOperation::Publish {
+            target: "channel".into(),
+        };
+        let unknown = CapabilityOperation::Unknown {
+            name: "invented".into(),
+        };
+
+        for mode in [
+            PermissionMode::AskEveryStep,
+            PermissionMode::Balanced,
+            PermissionMode::AutoExecute,
+        ] {
+            let snapshot = snapshot_with(root.clone(), mode);
+            assert!(
+                matches!(
+                    authorize_at(&snapshot, &secret, now),
+                    CapabilityDecision::Ask { .. }
+                ),
+                "{mode:?} must ask before Secret"
+            );
+            assert!(
+                matches!(
+                    authorize_at(&snapshot, &publish, now),
+                    CapabilityDecision::Ask { .. }
+                ),
+                "{mode:?} must ask before Publish"
+            );
+            assert_eq!(
+                authorize_at(&snapshot, &unknown, now),
+                CapabilityDecision::Deny {
+                    reason: DenialReason::UnknownOperation
+                },
+                "{mode:?} must deny unknown operations"
+            );
+        }
     }
 }
