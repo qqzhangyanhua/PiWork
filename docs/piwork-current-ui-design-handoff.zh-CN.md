@@ -27,11 +27,11 @@
 
 早期规格描述了计划、权限审批、文件 Diff、通知、设置、并发调度等完整方向，但当前版本只是其中一条可运行的垂直主线。
 
-当前代码已经使用真实 Pi Adapter 和打包的 sidecar，而根目录 `README.md` 中“仍使用 fake engine、尚未接入真实 Pi”的描述已经过时。当前生产装配见：
+当前代码已经使用真实 Pi Adapter 和打包的 sidecar。生产执行入口是 `ExecutionCoordinator`，不是 `EngineSupervisor`（后者只留在测试）。当前控制面事实以 [`docs/architecture/piwork-current-agent-architecture.zh-CN.md`](architecture/piwork-current-agent-architecture.zh-CN.md) 为准；下文部分时序图仍使用 2026-08-01 的 `EngineSupervisor` 叙事，视为历史基线。当前生产装配见：
 
-- `src-tauri/src/lib.rs:187`：创建 `PiEngineAdapter`；
-- `src-tauri/src/lib.rs:196`：创建 `EngineSupervisor`；
-- `src-tauri/src/lib.rs:230`：注册当前可用的 Tauri commands。
+- `src-tauri/src/lib.rs`：创建 `PiEngineAdapter` 并装配 `ExecutionCoordinator`、`CapabilityBroker`、`WorkspaceRepository`；
+- `src-tauri/src/work/commands.rs`：`start_work` / `stop_work` 只调用 Coordinator；
+- `src-tauri/src/lib.rs`：注册当前可用的 Tauri commands。
 
 Design 团队应把本文“当前已有”章节当作页面基线，把“已规划但未实现”当作未来信息架构输入。
 
@@ -338,7 +338,7 @@ Inspector 实现见 `src/features/workspace/WorkInspector.tsx:10-135`。
 1. Rust 在窗口显示前打开 SQLite、执行 migration；
 2. 把中断中的 Run 恢复为可解释状态；
 3. 恢复中断的附件导入并清理过期 staging；
-4. 装配 ModelService、ResourceService、Pi Adapter 和 EngineSupervisor；
+4. 装配 ModelService、ResourceService、Pi Adapter、CapabilityBroker、AssignmentScheduler 和 ExecutionCoordinator；
 5. 成功后才显示主窗口；
 6. 前端读取模型配置；
 7. 进入模型设置或 Work 主界面；

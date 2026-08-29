@@ -1,9 +1,26 @@
 # PiWork 核心 Agent 架构整改完整实施计划
 
-> 日期：2026-08-22  
+> 日期：2026-08-22；状态校准：2026-08-29  
 > 前置盘点：[`PiWork 当前 Agent 架构全景`](./piwork-current-agent-architecture.zh-CN.md)  
+> 稳定接口：[`piwork-core-control-plane-interfaces.zh-CN.md`](./piwork-core-control-plane-interfaces.zh-CN.md)  
 > 文档类型：实施计划（Plan A，共两份计划中的第一份）  
 > 目标：在不替换 Pi、Scheduler、EngineHarness 和 SQLite 的前提下，收紧执行、权限、状态和交付 seam，为第二份“能力平台与市场实施计划”建立稳定控制面。
+
+## 当前落地状态（2026-08-29）
+
+阶段 1～5 的控制面模块已经写进生产代码，并有 ADR `0001`～`0003` 与 migration `0016`～`0023`。**不要再按下文原始切片重复实现这些模块。** 下文第 5～9 节保留为设计说明和验收语义，不是待办实现清单。
+
+| 阶段 | 内容 | 状态 | 含义 |
+|---|---|---|---|
+| 0 安全网 | 行为测试、迁移 fixture、跨平台 CI | **待补测试** | 模块已存在；生产装配仍有源码字符串断言；缺少历史 SQLite fixture；停止/恢复/lease/Event 顺序未锁死；CI 无 Windows Rust library tests。对应 issue #10～#15 |
+| 1 ExecutionCoordinator | 唯一生产执行入口 | **已完成** | Tauri `start_work` / `stop_work` 只调用 Coordinator；`WorkService` 不再持有执行依赖。queued/running/waiting 停止语义 **待补测试**（#12） |
+| 2 CapabilityBroker | 不可变 `RunCapabilitySnapshot` | **已完成（待验证）** | Snapshot、Host Tool `authorize_and_record`、决策/执行审计已落地。Pi 仍 `--approve`；Balanced/Auto 对内置工具 allowlist 相同。Pi 内置工具执行前拦截 **待验证**，不要重写 Broker |
+| 3 WorkStatusProjector | 从持久事实投影 Work 状态 | **已完成（待补测试）** | `project_work_status` 被 Scheduler / Harness / Delivery 使用。历史库重放 **待补 fixture** |
+| 4 DeliveryModule | Result Envelope 与 Work Delivery | **已完成（待验证）** | Lead `agent_end` → `delivery_required`；Member 无有效 Result 不能 Completed。Validation 无 `source_event_id` 仍标 unverified，证据真实性待验证 |
+| 5 WorkspaceModule | 稳定 `workspace_id` 与路径 identity | **已完成（待补测试）** | `WorkspaceRepository::resolve_or_create` / `reconcile_legacy_paths` 已落地。历史 schema 升级 **待 fixture**（#11）。LSP/Worktree/沙箱不属于本阶段 |
+| 6 开源能力接入 | MCP / Browser / LSP / Sandbox / Worktree | **未开始** | 依赖阶段 0 安全网与阶段 2 的 Pi 内置工具验证，不依赖再实现 1～5 |
+
+下一步只做阶段 0，然后验证 Pi 内置工具 enforcement。不要启动第二套 Coordinator、Broker、Projector、Delivery 或 Workspace identity。
 
 ## 1. 核心建议
 
@@ -15,19 +32,7 @@
 
 也不建议毫无整体设计地逐个修补。`ExecutionCoordinator`、`CapabilityBroker`、`WorkStatusProjector`、`DeliveryModule` 和 `WorkspaceModule` 之间存在明确依赖，如果只按眼前 bug 修复，容易继续产生第二套状态和第二条执行路径。
 
-正确节奏是：
-
-```text
-一次性确定领域不变量、目标 seam 和依赖顺序
-                    ↓
-阶段 0 建立测试与迁移安全网
-                    ↓
-阶段 1～5 每次只替换一个核心 seam
-                    ↓
-每阶段验收、删除旧路径、形成稳定版本
-                    ↓
-再逐个接入 LSP / MCP / Browser / Documents / Sandbox
-```
+正确节奏（2026-08-22 原计划）是阶段 0～5 逐个替换 seam。2026-08-29 起：阶段 1～5 模块已落地，节奏收紧为 **阶段 0 安全网 → 验证 Pi 内置工具拦截 → 再接入开源 Adapter**。不要从阶段 1 重新实现控制面。
 
 ## 2. 整改期间不可破坏的五条不变量
 
@@ -67,7 +72,9 @@ flowchart LR
 
 ### 3.1 目标代码结构
 
-目录不是架构本身，但核心 seam 应在代码中有一个容易定位的归属。建议最终形成以下结构；内部文件可以继续细分，外部 interface 不随实现细节膨胀。
+> 该目录结构已经出现在 `src-tauri/src/`。以下是设计说明，不要再按此清单新建模块。
+
+目录不是架构本身，但核心 seam 应在代码中有一个容易定位的归属。内部文件可以继续细分，外部 interface 不随实现细节膨胀。
 
 ```text
 src-tauri/src/
@@ -136,6 +143,8 @@ src/
 
 ## 4. 阶段 0：建立安全网
 
+> 状态：**待补测试**。生产代码已有 Coordinator、Broker、Delivery、Workspace、Projector；本阶段仍要把行为锁进测试与 CI。不要在本阶段改产品语义。
+
 ### 目标
 
 先确保后续重构可以分辨“行为被有意改变”和“行为意外损坏”。
@@ -174,9 +183,13 @@ src/
 
 ## 5. 阶段 1：统一 ExecutionCoordinator
 
+> 状态：**已完成**。生产入口是 `execution::ExecutionCoordinator`。`EngineSupervisor` 只留在测试。剩余工作是停止语义的 characterization（queued/running/waiting、重复停止），不是再实现 Coordinator。
+
 ### 要解决的问题
 
-生产通过 `AssignmentService` 启动 Work，但 `stop_work` 仍依赖旧 `EngineSupervisor` 路径。调用者必须理解两套执行模型，当前 module 是浅的且容易误用。
+> 历史问题，2026-08-22 基线。当前生产路径已迁到 Coordinator。
+
+当时生产通过 `AssignmentService` 启动 Work，但 `stop_work` 仍依赖旧 `EngineSupervisor` 路径。调用者必须理解两套执行模型。当前不要再引入第二条执行路径。
 
 ### 目标 interface
 
@@ -241,9 +254,11 @@ pub enum ExecutionCommand {
 
 ## 6. 阶段 2：建立 CapabilityBroker
 
+> 状态：**模块已完成，Pi 内置工具 enforcement 待验证。** `capability::CapabilityBroker`、`RunCapabilitySnapshot`、Host Tool 审计已在生产装配中。Host Tool / Extension / Connector 走 Broker；2A 三档 permission matrix 对 Pi 内置工具尚未成立（Balanced 与 AutoExecute 共用同一 `--tools` 列表，进程仍 `--approve`）。2D 执行前拦截尚未证明。不要重写 Broker。
+
 ### 要解决的问题
 
-当前权限信息分散在 Work permission mode、Agent policy、Assignment permission scope、角色 Host Tool allowlist、Extension grant 和 Connector grant 中；Pi 内置工具仍由 `--tools` 与 `--approve` 粗粒度控制。
+Broker 已集中 Host Tool / Extension / Connector 裁决。Pi 内置工具仍由 `--tools` 与 `--approve` 粗粒度控制，这是阶段 2 仅剩的验证缺口。
 
 ### 目标 interface
 
@@ -340,9 +355,13 @@ Workspace defaults
 
 ## 7. 阶段 3：建立 WorkStatusProjector
 
+> 状态：**已完成**。`work::projector::project_work_status` 是 Work 非归档执行状态的唯一计算点。剩余是用历史 fixture 证明重放确定，不是再写一个 Projector。
+
 ### 要解决的问题
 
-Scheduler 当前会把一个 Assignment 的 outcome 直接反射为 Work 状态。Work 是聚合，Member 完成不等于 Work 完成，等待中的 Lead 与死信 Member 也不能靠最后一次 Run 判断。
+> 历史问题，2026-08-22 基线。当前 Scheduler / Harness / Delivery 已调用 `reproject_work_status`，不再把单个 Assignment outcome 直接写成 Work 终态。
+
+当时 Scheduler 会把一个 Assignment 的 outcome 直接反射为 Work 状态。Work 是聚合，Member 完成不等于 Work 完成。当前不要再让 Scheduler 直接写 Work terminal status。
 
 ### 目标 interface
 
@@ -394,9 +413,13 @@ pub fn project_work_status(facts: WorkExecutionFacts) -> WorkStatus;
 
 ## 8. 阶段 4：建立 DeliveryModule
 
+> 状态：**已完成**。`delivery::DeliveryModule` 验收 Member `Result Envelope` 与 Lead `Work Delivery`。普通 `agent_end` 不能完成 Work。剩余是证据真实性与 Inspector read model，不是再实现 Delivery。
+
 ### 要解决的问题
 
-Result Envelope、Work Delivery、Artifact path、Resource 和 Validation 当前分散。普通 `agent_end` 可能绕过 Member Result；Agent 声明的验证字符串也不等于真实验证证据。
+> 历史问题，2026-08-22 基线。当前 `DeliveryModule` 已验收 Result Envelope 与 Work Delivery；Lead 普通 `agent_end` 变为 `delivery_required`。
+
+当时 Result、Delivery、Artifact 和 Validation 分散，普通 `agent_end` 可能绕过 Member Result。当前不要再让 `agent_end` 直接完成 Work。Validation 无对应 Event 仍标 unverified，证据真实性仍待验证。
 
 ### 目标 interface
 
@@ -453,6 +476,8 @@ impl DeliveryModule {
 中到大。
 
 ## 9. 阶段 5：将 Workspace 提升为一等实体
+
+> 状态：**identity 已完成，历史升级待补测试。** `workspace::WorkspaceRepository` 提供稳定 `workspace_id`；migration `0018`～`0021` 已进入仓库。不要再做一次 expand-and-contract。LSP/索引/Worktree 仍属阶段 6。
 
 ### 为什么放在后面
 
@@ -529,7 +554,9 @@ Workspace
 
 ## 10. 阶段 6：移交能力平台并逐个接入开源能力
 
-完成阶段 0～5 后，按第二份 [`PiWork 能力平台与市场实施计划`](./piwork-capability-platform-market-implementation-plan.zh-CN.md) 把能力作为 Adapter 接入。每个能力单独立项、单独 feature flag、单独回滚：
+> 状态：**未开始。** 阶段 1～5 模块已存在，但阶段 0 安全网与阶段 2D 的 Pi 内置工具验证仍是接入高权限 Adapter 的门槛。
+
+完成阶段 0 并验证 Pi 内置工具 enforcement 后，按第二份 [`PiWork 能力平台与市场实施计划`](./piwork-capability-platform-market-implementation-plan.zh-CN.md) 把能力作为 Adapter 接入。每个能力单独立项、单独 feature flag、单独回滚：
 
 | 顺序 | 能力 | 依赖 seam | 首个最小闭环 |
 |---|---|---|---|
@@ -581,34 +608,30 @@ Feature flag 不适合：
 
 ## 12. 里程碑与决策检查点
 
-| 里程碑 | 包含阶段 | 可向用户证明什么 | 是否可开始接新能力 |
-|---|---|---|---|
-| R0 可重构 | 阶段 0 | 测试与迁移安全网可靠 | 否 |
-| R1 执行一致 | 阶段 1 | start/stop/interrupt 只有一条路径 | 仅低风险只读实验 |
-| R2 权限可信 | 阶段 2 | 所有工具有统一 Snapshot、裁决和审计 | 可接只读 MCP/LSP 试点 |
-| R3 状态可信 | 阶段 3 | Work 状态可由事实重放 | 仍不建议广泛发布 |
-| R4 交付可信 | 阶段 4 | Result、Artifact、Validation 不可绕过 | 可接浏览器与文档生成试点 |
-| R5 Workspace 稳定 | 阶段 5 | 能力有稳定项目归属和生命周期 | 可以规模化接入开源模块 |
+| 里程碑 | 包含阶段 | 当前状态 | 可向用户证明什么 | 是否可开始接新能力 |
+|---|---|---|---|---|
+| R0 可重构 | 阶段 0 | **未完成**（待补测试） | 测试与迁移安全网可靠 | 否 |
+| R1 执行一致 | 阶段 1 | **模块已完成**；停止语义待补测试 | start/stop/interrupt 只有一条路径 | 仅低风险只读实验 |
+| R2 权限可信 | 阶段 2 | **模块已完成**；Pi 内置工具待验证 | 所有工具有统一 Snapshot、裁决和审计 | 验证通过前不可接高权限 MCP/Browser |
+| R3 状态可信 | 阶段 3 | **模块已完成**；历史库重放待 fixture | Work 状态由 Projector 计算；重放证明仍待旧库 fixture | 仍不建议广泛发布新能力 |
+| R4 交付可信 | 阶段 4 | **模块已完成**；证据真实性待验证 | Result / Delivery 契约已不可绕过；无 Event 的 Validation 仍 unverified | 验证 R0/R2 后再接浏览器与文档生成试点 |
+| R5 Workspace 稳定 | 阶段 5 | **identity 已完成**；升级 fixture 待补 | 能力有稳定项目归属和生命周期 | 规模化接入仍等 R0 与 R2 验证 |
 
 每个里程碑都应做一次真实桌面演示，而不仅是单测：创建 Work、运行、委派、停止、恢复、提交 Result、验证 Artifact、重启后继续。
 
 ## 13. 第一批可直接执行的 Backlog
 
-建议接下来只启动阶段 0 和阶段 1：
+阶段 1 与 ADR、Coordinator 迁移已经完成。接下来只做阶段 0，不要重做阶段 1～5：
 
-1. 调查并修复 Rust test executable 的 Windows entrypoint 问题。
-2. 增加 production composition 测试，复现当前 `stop_work` seam 错位。
-3. 写三份精简架构决策：
-   - Assignment pipeline 是唯一生产执行所有者；
-   - 权限由 Rust Capability Snapshot 权威裁决；
-   - Work Completed 只能由 Lead Work Delivery 产生。
-4. 定义 `ExecutionCommand`、Receipt 和错误语义。
-5. 实现 queued/running/waiting 三种 Stop。
-6. 将 Work 与 Assignment Tauri commands 迁移到 Coordinator。
-7. 删除生产 `WorkService::Execution` 双轨。
-8. 运行 stop/interrupt/recovery/process-tree/lease 全链路测试。
+1. 用行为测试替换生产装配字符串断言（#10）。
+2. 建立历史 SQLite 迁移 fixture 安全网（#11）。
+3. 锁定 ExecutionCoordinator 对 queued/running/waiting 的停止语义（#12）。
+4. 锁定恢复与 Host Tool 租约安全语义（#13）。
+5. 锁定 Event 先落库后发布语义（#14）。
+6. 固化跨平台 CI，尤其 Windows Rust library tests（#15）。
+7. 若 Windows `STATUS_ENTRYPOINT_NOT_FOUND` 复现，只在测试/构建配置范围内修复；否则单独立项。
 
-阶段 1 验收后再开始 CapabilityBroker 2A；此时不要同时接入 MCP 或 Browser。
+阶段 0 完成后再验证 CapabilityBroker 对 Pi 内置工具的执行前拦截。此时不要同时接入 MCP 或 Browser，也不要再实现第二套 Coordinator / Broker / Projector / Delivery / Workspace identity。
 
 ## 14. 明确不做的事情
 
@@ -616,11 +639,14 @@ Feature flag 不适合：
 - 不替换当前 Scheduler、EngineHarness 或 SQLite。
 - 不先做全仓库目录重排。
 - 不把 Repository 按文件大小机械拆分。
-- 不在 CapabilityBroker 完成前接入高权限 MCP、Browser 或 Shell 扩展。
-- 不在 DeliveryModule 完成前宣称 Agent 产物与验证可信。
-- 不用一次大迁移把所有 `root_path` 直接替换成 `workspace_id`。
+- 不重写已落地的 ExecutionCoordinator、CapabilityBroker、WorkStatusProjector、DeliveryModule 或 Workspace identity。
+- 不在 Pi 内置工具执行前拦截验证通过前接入高权限 MCP、Browser 或 Shell 扩展。
+- 不把未经 DeliveryModule 验收的模型自述路径宣称成可信 Artifact。
+- 不用一次大迁移把所有 `root_path` 直接替换成 `workspace_id`（identity 迁移已经按 expand-and-contract 落地）。
 
 ### 14.1 全计划 Definition of Done
+
+模块落地不等于计划完成。Coordinator、Broker、Projector、Delivery、Workspace identity 已经存在；阶段 0 测试门槛、Pi 内置工具执行前拦截、以及下列质量门槛仍未全部满足。
 
 以下条件全部满足，核心架构整改才算完成：
 
@@ -669,16 +695,15 @@ Feature flag 不适合：
 
 ## 15. 最终判断
 
-PiWork 当前需要的是 **控制面收敛**，不是整体重写。
+PiWork 当前需要的是 **控制面证明与安全网**，不是整体重写，也不是再实现已经落地的 Coordinator / Broker / Projector / Delivery / Workspace。
 
 最佳实施方式是：
 
 ```text
-完整路线图现在一次确定
-→ 阶段 0～5 逐个完成
-→ 每阶段只改变一个核心 seam
-→ 新路径验收后删除旧路径
-→ 阶段 2/4/5 到位后逐个接入开源能力
+阶段 1～5 模块已经在生产装配中
+→ 只补阶段 0 测试、fixture 与 CI
+→ 验证 Pi 内置工具执行前拦截
+→ 再按 Plan B 逐个接入开源能力
 ```
 
-如果人力只有一条开发线，严格按 `0 → 1 → 2 → 3 → 4 → 5` 执行。若有两条独立开发线，只允许在阶段 1 完成后并行 `CapabilityBroker` 与 `WorkStatusProjector`；其他阶段保持依赖顺序。
+如果人力只有一条开发线，严格按 `阶段 0 安全网 → 阶段 2D 验证 → 阶段 6 Adapter` 执行。不要从阶段 1 重新实现控制面。

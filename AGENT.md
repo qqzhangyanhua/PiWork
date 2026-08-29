@@ -6,10 +6,11 @@
 
 **PiWork (代号 CoDo)** 是一个 local-first 的桌面 AI 助手应用，用于指挥持久化的 Agent 完成跨专业领域的耐久工作（Work）。每个 Work 在本地 SQLite 中保存目标、工作区、多次 Run 与事件历史，支持跨会话继续协作。执行引擎（engine）被隔藏在 CoDo 自有的引擎接口之后，可替换。
 
-- 当前仓库是基础垂直切片（foundation vertical slice），使用确定性的 fake engine 演练流式输出、工具事件、完成、多 Run 历史、持久化与中断恢复。真实的 pi 二进制、模型 provider、凭据流程、权限桥接尚未在此阶段集成/打包。
-- 首个支持的桌面目标平台是 **Windows 10/11 x64**。
+- 生产路径使用打包的 [pi](https://github.com/earendil-works/pi) sidecar（`src-tauri/binaries/pi-sidecar`）和 `PiEngineAdapter`。模型 provider 在应用内配置，API Key 存入操作系统凭据库（Windows Credential Manager / macOS Keychain）。Host Tool 经权限桥接的 registry 调用；`CapabilityBroker` 在 Run 启动前编译不可变 `RunCapabilitySnapshot`。确定性 fake engine 只作为测试替身，不是生产装配。
+- 已落地的核心控制面不要再按旧整改计划重复实现：`ExecutionCoordinator`、`CapabilityBroker`、`DeliveryModule`、`WorkspaceModule`（代码中为 `WorkspaceRepository`）、`WorkStatusProjector`。当前缺口主要是测试安全网与 Pi 内置工具执行前拦截是否真正生效，而不是这些模块缺失。
+- 支持的桌面目标平台是 **Windows 10/11 x64** 和 **macOS Apple Silicon**。
 
-核心术语（Work / Assignment / Run / Agent Definition / Agent Instance / Result Envelope 等）的完整定义见 [`CONTEXT.md`](CONTEXT.md)，修改相关代码前建议先读一遍，避免概念混用。
+核心术语（Workspace / Work / Assignment / Run / Agent Definition / Agent Instance / Run Capability Snapshot / Result Envelope / Work Delivery 等）的完整定义见 [`CONTEXT.md`](CONTEXT.md)，修改相关代码前建议先读一遍，避免概念混用。
 
 ## 技术栈
 
@@ -95,13 +96,14 @@ pnpm tauri build --debug --bundles nsis
 - 架构设计（中/英）：`docs/superpowers/specs/2026-07-28-piwork-design*.md`
 - 当前 Agent 架构：`docs/architecture/piwork-current-agent-architecture.zh-CN.md`
 - 核心控制面接口：`docs/architecture/piwork-core-control-plane-interfaces.zh-CN.md`
+- 整改路线图（含阶段落地状态）：`docs/architecture/piwork-agent-remediation-roadmap.zh-CN.md`
 - 能力平台/市场实施计划：`docs/architecture/piwork-capability-platform-market-implementation-plan.zh-CN.md`
 - ADR（架构决策记录）：`docs/adr/000*.md`
 - 第三方归属与许可：[`NOTICE`](NOTICE)、[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)
 
 ## 注意事项
 
-- 修改涉及 Work / Assignment / Run / Agent Definition / Agent Instance 等核心概念的代码前，务必先对照 `CONTEXT.md` 确认术语用法是否一致。
-- 引擎（engine）当前是可替换的 fake engine，真实 pi 引擎集成、模型 provider、凭据与权限桥接尚未完成，涉及这些模块时注意不要假设生产级实现已存在。
+- 修改涉及 Workspace / Work / Assignment / Run / Agent Definition / Agent Instance / Run Capability Snapshot / Result Envelope / Work Delivery 等核心概念的代码前，务必先对照 `CONTEXT.md` 确认术语用法是否一致。
+- 生产引擎是 Pi sidecar + `PiEngineAdapter`；fake engine 只用于确定性测试。改执行、权限、交付或 Workspace 时，先读 [`docs/architecture/piwork-current-agent-architecture.zh-CN.md`](docs/architecture/piwork-current-agent-architecture.zh-CN.md) 和 [`docs/architecture/piwork-agent-remediation-roadmap.zh-CN.md`](docs/architecture/piwork-agent-remediation-roadmap.zh-CN.md) 的当前落地状态，不要把已存在的控制面模块当成未来计划。
 - `src-tauri/binaries/pi-sidecar` 下包含打包的第三方 sidecar，一般无需手动编辑。内置扩展 `pi-web-access` 的 `node_modules` **不入库**，由 `scripts/bundle-pi-web-access.sh`（macOS）或 `scripts/bundle-pi-web-access.ps1`（Windows）在 `tauri` dev/build 前生成；也可手动执行 `pnpm bundle:pi-web-access`（Windows）或 `bash scripts/bundle-pi-web-access.sh`。
-- Windows 是首要目标平台，构建脚本以 PowerShell 为主；在其他平台开发时注意跨平台差异。
+- Windows 与 macOS 都是当前支持平台；构建脚本仍以 PowerShell 为主，在其他平台开发时注意跨平台差异。

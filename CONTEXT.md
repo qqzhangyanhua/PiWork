@@ -121,8 +121,8 @@ An authorization rule or approval that permits a bounded Capability Operation wi
 _Avoid_: Capability Binding, Package Installation, Run Capability Snapshot
 
 **Run Capability Snapshot**:
-The immutable, versioned compilation of bindings, grants, policies, and installed release digests that governs one Run.
-_Avoid_: Capability Binding, mutable runtime registry
+The immutable, versioned compilation of bindings, grants, policies, and installed release digests that the Rust CapabilityBroker compiles before a Run starts. Host Tools and other adapters re-read this snapshot; they do not become a second authority.
+_Avoid_: Capability Binding, mutable runtime registry, Pi `--tools` flag, Agent prompt permission text
 
 **Runtime Instance**:
 A concrete process, connection, index, browser profile, or sandbox launched from an exact Package Release for a bounded scope.

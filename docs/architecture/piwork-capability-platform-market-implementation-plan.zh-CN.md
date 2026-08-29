@@ -1,9 +1,10 @@
 # PiWork 能力平台与市场实施计划
 
-> 日期：2026-08-22  
+> 日期：2026-08-22；状态校准：2026-08-29  
 > 前置文档：[`PiWork 当前 Agent 架构全景`](./piwork-current-agent-architecture.zh-CN.md)、[`PiWork 核心 Agent 架构整改完整实施计划`](./piwork-agent-remediation-roadmap.zh-CN.md)  
-> 范围：在 `ExecutionCoordinator`、`CapabilityBroker`、`WorkStatusProjector`、`DeliveryModule`、`WorkspaceModule` 之上，接入 LSP/AST、MCP、Browser、文档解析与生成、Worktree、Sandbox、Skill，并建设统一的 Plugin/MCP/Skill 能力市场。  
-> 计划原则：开源引擎优先；PiWork 自己掌握安装、授权、生命周期、审计、状态与产品体验。
+> 范围：在已落地的 `ExecutionCoordinator`、`CapabilityBroker`、`WorkStatusProjector`、`DeliveryModule`、`WorkspaceModule` 之上，接入 LSP/AST、MCP、Browser、文档解析与生成、Worktree、Sandbox、Skill，并建设统一的 Plugin/MCP/Skill 能力市场。  
+> 计划原则：开源引擎优先；PiWork 自己掌握安装、授权、生命周期、审计、状态与产品体验。  
+> 控制面现状：上述五个模块已经存在于生产代码，不要在本计划中重复实现。当前门槛是阶段 0 安全网与 Pi 内置工具执行前拦截验证，而不是再建控制面。
 
 ## 1. 执行结论
 
@@ -33,7 +34,7 @@ Worktree
 Verified Marketplace → Community Marketplace
 ```
 
-禁止在 `CapabilityBroker` 完成前开放高权限 MCP、Browser 或可执行 Skill；禁止在 `DeliveryModule` 完成前把截图、PDF、DOCX 或测试报告声明为可信 Artifact；禁止在 `WorkspaceModule` 完成前规模化管理 LSP 索引、浏览器 Profile、Worktree 和项目级 Skill。
+`CapabilityBroker`、`DeliveryModule`、`WorkspaceModule` 已经落地。仍然禁止在 **Pi 内置工具执行前拦截得到验证** 之前开放高权限 MCP、Browser 或可执行 Skill；禁止把截图、PDF、DOCX 或测试报告在未经 Delivery 验收的情况下声明为可信 Artifact；禁止在 Workspace identity 之上尚未挂接生命周期管理时规模化管理 LSP 索引、浏览器 Profile、Worktree 和项目级 Skill。
 
 ## 2. 当前基线与必须保留的资产
 
@@ -50,7 +51,7 @@ PiWork 已经具备能力平台的部分基础，不应从零重写：
 | Resource/Document Runtime | 已有 Xberg 解析和 derivative/resource 模型 | 作为文档解析主路径；Docling 只做高级 fallback/增强 |
 | Secret Store | 已通过操作系统凭证存储保存 Web/Connector secret | 继续作为唯一 secret 事实源；数据库只保存引用 |
 
-当前最关键的缺口是 `ExtensionService::runtime_snapshot` 仍忽略 `agent_instance_id` 与 `work_id`；市场页面展示了授权概念，但生产装配没有完整执行这些 grant。能力平台不得在这个问题修复前开放任意社区代码。
+`ExtensionService::runtime_snapshot` 已消费 `agent_instance_id` 与 `work_id`（Agent grant 与 Workspace policy）。当前最关键的缺口是 Pi 内置工具仍带 `--approve` 启动，执行前拦截尚未证明。能力平台不得在该验证完成前开放任意社区代码。
 
 ## 3. 开源选型核验基线
 
