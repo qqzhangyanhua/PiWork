@@ -726,8 +726,11 @@ mod tests {
 
         match assemble_production_engine().await {
             Err(EngineError::Unsupported("pi_rpc_windows_only")) => {}
-            other => panic!(
-                "unsupported platforms must fail closed on the Pi RPC engine rather than falling back to direct model completion; got {other:?}"
+            Err(error) => panic!(
+                "unsupported platforms must fail closed on the Pi RPC engine rather than falling back to direct model completion; got Err({error:?})"
+            ),
+            Ok(_) => panic!(
+                "unsupported platforms must fail closed on the Pi RPC engine rather than falling back to direct model completion; got Ok"
             ),
         }
     }
