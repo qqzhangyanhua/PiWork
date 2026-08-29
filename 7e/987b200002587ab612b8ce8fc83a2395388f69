@@ -1,0 +1,31 @@
+docs/architecture/piwork-current-agent-architecture.zh-CN.md
+  s_1c1d8ea3ca375a::t_2d9142bc8e77c4 7,60
+  s_1c1d8ea3ca375a::t_1601e1f07502ea 52
+  s_1c1d8ea3ca375a::t_b39cba899ce049 58
+  s_1c1d8ea3ca375a::t_81e883f61a89bf 57,441,443,445-450
+docs/architecture/piwork-agent-remediation-roadmap.zh-CN.md
+  s_1c1d8ea3ca375a::t_debb813fc0b61c 631
+  s_1c1d8ea3ca375a::t_963627b879b5e6 15
+  s_1c1d8ea3ca375a::t_2cfbb2a768fa8e 23,146,613,624,626-630
+.github/workflows/ci.yml
+  s_1c1d8ea3ca375a::t_24c07b1db63497 80-109,112,114-117
+  s_1c1d8ea3ca375a::t_e6e8f9e3abcc22 78-79
+  s_1c1d8ea3ca375a::t_c5dd4eb1ccf3e8 110-111
+  s_1c1d8ea3ca375a::t_ffe8e11691b5b1 113
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "7e987b200002587ab612b8ce8fc83a2395388f69",
+  "prompts": {},
+  "sessions": {
+    "s_1c1d8ea3ca375a": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04de9-0015-70b2-8d0e-ee2a08559ecf",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
