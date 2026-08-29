@@ -1214,6 +1214,14 @@
   box-shadow: 0 6px 15px rgb(47 118 243 / 22%);
 }
 
+.workspace-main--dashboard .composer-stop {
+  border: 0;
+  border-radius: 50%;
+  background: var(--pw-text-primary);
+  color: var(--pw-surface-raised);
+  box-shadow: 0 6px 15px rgb(24 36 51 / 16%);
+}
+
 .workspace-main--dashboard .work-inspector {
   min-width: 0;
   grid-column: 2;

@@ -1,4 +1,4 @@
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { type Ref, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -37,8 +37,12 @@ export function WorkComposer({
   const [attachmentResults, setAttachmentResults] = useState<ResourceSummary[]>([]);
   const [selectedResourceIds, setSelectedResourceIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const submittingRef = useRef(false);
+  const stoppingRef = useRef(false);
   const startWork = useWorkStore((state) => state.startWork);
+  const queueInstruction = useWorkStore((state) => state.queueInstruction);
+  const stopWork = useWorkStore((state) => state.stopWork);
   const loading = useWorkStore((state) => state.loading);
   const runActive = queueStatuses.includes(work.status);
   const actionLabel = continueStatuses.includes(work.status)
@@ -53,6 +57,7 @@ export function WorkComposer({
     ),
   );
   const canSubmit = Boolean(prompt.trim()) || readyResourceIds.length > 0;
+  const busy = submitting || stopping || loading;
 
   const clearDraft = () => {
     setPrompt("");
@@ -68,7 +73,11 @@ export function WorkComposer({
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      await startWork(work.id, instruction, referencedFiles, readyResourceIds);
+      if (runActive) {
+        await queueInstruction(work.id, instruction, referencedFiles, readyResourceIds);
+      } else {
+        await startWork(work.id, instruction, referencedFiles, readyResourceIds);
+      }
       clearDraft();
     } catch (error) {
       if (didPersistStartInstruction(error)) {
@@ -78,6 +87,20 @@ export function WorkComposer({
     } finally {
       submittingRef.current = false;
       setSubmitting(false);
+    }
+  };
+
+  const stop = async () => {
+    if (stoppingRef.current) return;
+    stoppingRef.current = true;
+    setStopping(true);
+    try {
+      await stopWork(work.id);
+    } catch {
+      // The store normalizes and exposes the error in the product UI.
+    } finally {
+      stoppingRef.current = false;
+      setStopping(false);
     }
   };
 
@@ -109,7 +132,7 @@ export function WorkComposer({
         <div className="work-composer__actions">
           <AttachmentButton
             available={availableResources}
-            disabled={submitting}
+            disabled={busy}
             draftId={null}
             pickAttachments={pickAttachments}
             selectedIds={selectedResourceIds}
@@ -124,11 +147,22 @@ export function WorkComposer({
             onSelectedIdsChange={setSelectedResourceIds}
           />
           <ComposerModelIndicator modelLabel={modelLabel} />
+          {runActive && (
+            <button
+              aria-label={t("composer.stop")}
+              className="button button--primary composer-stop composer-submit--stop"
+              type="button"
+              disabled={busy}
+              onClick={() => void stop()}
+            >
+              <Square aria-hidden="true" size={14} />
+            </button>
+          )}
           <button
             aria-label={runActive ? t("composer.queueNext") : actionLabel}
             className={`button button--primary composer-submit${runActive ? " composer-submit--queue" : ""}`}
             type="button"
-            disabled={!canSubmit || submitting || loading}
+            disabled={!canSubmit || busy}
             onClick={() => void submit()}
           >
             <ArrowUp aria-hidden="true" size={16} />
