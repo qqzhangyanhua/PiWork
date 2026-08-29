@@ -1,3 +1,9 @@
+//! Characterization: CapabilityBroker policy-layer Permission Mode differences (#18).
+//!
+//! Public seam: `CapabilityBroker::authorize` (and snapshot compile/revoke).
+//! Module seam for `policy::authorize_at` lives next to that function.
+//! These tests do not start a real engine or Pi sidecar.
+
 use chrono::{Duration, Utc};
 use piwork_lib::{
     capability::{
@@ -154,4 +160,138 @@ async fn balanced_asks_for_workspace_writes_and_denies_escape() {
         .await
         .unwrap();
     assert_eq!(pending, vec![request]);
+}
+
+#[tokio::test]
+async fn authorize_locks_policy_layer_mode_differences_without_an_engine() {
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open_in_memory().await.unwrap();
+    seed_run(database.pool(), &root.path().to_string_lossy()).await;
+    let broker = CapabilityBroker::new(database.pool().clone());
+    let balanced = broker
+        .snapshot(RunCapabilityRequest {
+            run_id: "run-cap".into(),
+            work_id: "work-cap".into(),
+            assignment_id: "assignment-cap".into(),
+            agent_instance_id: "agent-instance:piwork-lead".into(),
+            role_kind: RoleKind::Lead,
+            permission_mode: PermissionMode::Balanced,
+            workspace_root: root.path().to_path_buf(),
+            expert_pack_ids: vec![],
+            host_tool_ids: vec![],
+            extension_tool_ids: vec![],
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    let mut auto_execute = balanced.clone();
+    auto_execute.permission_mode = PermissionMode::AutoExecute;
+
+    let write = CapabilityOperation::FilesystemWrite {
+        path: root.path().join("new.txt"),
+    };
+    assert!(
+        matches!(
+            broker.authorize(&balanced, &write),
+            CapabilityDecision::Ask { .. }
+        ),
+        "Balanced must ask before the same workspace write"
+    );
+    assert!(
+        matches!(
+            broker.authorize(&auto_execute, &write),
+            CapabilityDecision::Allow { .. }
+        ),
+        "AutoExecute must allow the same workspace write"
+    );
+
+    let escaped = root.path().join("../escape.txt");
+    assert!(matches!(
+        broker.authorize(
+            &balanced,
+            &CapabilityOperation::FilesystemWrite {
+                path: escaped.clone()
+            }
+        ),
+        CapabilityDecision::Deny {
+            reason: DenialReason::OutsideWorkspace
+        }
+    ));
+    assert!(matches!(
+        broker.authorize(
+            &balanced,
+            &CapabilityOperation::FilesystemRead { path: escaped }
+        ),
+        CapabilityDecision::Deny {
+            reason: DenialReason::OutsideWorkspace
+        }
+    ));
+
+    for snapshot in [&balanced, &auto_execute] {
+        assert!(
+            matches!(
+                broker.authorize(
+                    snapshot,
+                    &CapabilityOperation::Secret {
+                        secret_id: "secret".into()
+                    }
+                ),
+                CapabilityDecision::Ask { .. }
+            ),
+            "{:?} must ask before Secret",
+            snapshot.permission_mode
+        );
+        assert!(
+            matches!(
+                broker.authorize(
+                    snapshot,
+                    &CapabilityOperation::Publish {
+                        target: "channel".into()
+                    }
+                ),
+                CapabilityDecision::Ask { .. }
+            ),
+            "{:?} must ask before Publish",
+            snapshot.permission_mode
+        );
+        assert!(
+            matches!(
+                broker.authorize(
+                    snapshot,
+                    &CapabilityOperation::Unknown {
+                        name: "invented".into()
+                    }
+                ),
+                CapabilityDecision::Deny {
+                    reason: DenialReason::UnknownOperation
+                }
+            ),
+            "{:?} must deny unknown operations",
+            snapshot.permission_mode
+        );
+    }
+
+    let mut expired = auto_execute.clone();
+    expired.expires_at = Some(Utc::now() - Duration::seconds(1));
+    assert!(
+        matches!(
+            broker.authorize(&expired, &write),
+            CapabilityDecision::Deny {
+                reason: DenialReason::Expired
+            }
+        ),
+        "expired Run Capability Snapshot must be rejected before AutoExecute write policy"
+    );
+
+    broker.revoke(&balanced.id).await.unwrap();
+    let revoked = broker.inspect(&balanced.id).await.unwrap().unwrap();
+    assert!(
+        matches!(
+            broker.authorize(&revoked, &write),
+            CapabilityDecision::Deny {
+                reason: DenialReason::Revoked
+            }
+        ),
+        "revoked Run Capability Snapshot must be rejected before write policy"
+    );
 }
