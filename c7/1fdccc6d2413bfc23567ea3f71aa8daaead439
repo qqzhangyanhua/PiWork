@@ -1,0 +1,24 @@
+src-tauri/tests/recovery_and_host_tool_lease.rs
+  s_81c5f01c2a900e::t_101a005eb8a0e2 84,265,287,505-510
+  s_81c5f01c2a900e::t_cc134778f3a58f 1-83,85-183,191-264,266-286,288-294,296-297,301-305,307-311,313-332,337-350,379-485,487-500,502-504,511-575
+  s_81c5f01c2a900e::t_75c58376e0b8f5 501
+  s_81c5f01c2a900e::t_a56d3be06accfb 184-190
+  s_81c5f01c2a900e::t_88f1a6a159c129 295,298-300,306,312,333-336,351-378
+  s_81c5f01c2a900e::t_42d6105dfc1823 486
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "c71fdccc6d2413bfc23567ea3f71aa8daaead439",
+  "prompts": {},
+  "sessions": {
+    "s_81c5f01c2a900e": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "5697b6f5-dc95-4ed6-8ece-490a044f7625",
+        "model": "grok-4.5"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
