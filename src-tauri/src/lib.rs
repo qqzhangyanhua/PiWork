@@ -219,13 +219,19 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                                 observer.clone(),
                             ),
                         );
-                        let assignment_sink: Arc<dyn assignment::repository::AssignmentEventSink> =
+                        let assignment_sink: Arc<dyn assignment::event_outbox::AssignmentEventSink> =
                             publisher.clone();
-                        let assignment_repository = assignment::repository::AssignmentRepository::initialize_with_event_sink(
-                            database.pool().clone(),
-                            assignment_sink,
-                        )
-                        .await?;
+                        let assignment_event_outbox =
+                            assignment::event_outbox::AssignmentEventOutbox::new(
+                                database.pool().clone(),
+                                assignment_sink,
+                            );
+                        assignment_event_outbox.recover().await?;
+                        let assignment_repository =
+                            assignment::repository::AssignmentRepository::with_outbox(
+                                database.pool().clone(),
+                                assignment_event_outbox.clone(),
+                            );
                         // Recover assignments orphaned by a previous process before
                         // the window is shown or the scheduler starts dispatching.
                         assignment_repository.recover_orphans(&[]).await?;
@@ -252,6 +258,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                             resource_service,
                             agent_repository,
                             publisher,
+                            assignment_event_outbox,
                             assignment_repository,
                             database.pool().clone(),
                         ))
@@ -263,6 +270,7 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                     resource_service,
                     agent_repository,
                     publisher,
+                    assignment_event_outbox,
                     assignment_repository,
                     pool,
                 )| -> StartupResult<()> {
@@ -298,6 +306,13 @@ fn application_builder() -> tauri::Builder<tauri::Wry> {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
                             "PiWork activity observer is already managed",
+                        )
+                        .into());
+                    }
+                    if !app.manage(assignment_event_outbox.clone()) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            "PiWork assignment event outbox is already managed",
                         )
                         .into());
                     }
@@ -680,7 +695,7 @@ mod tests {
     }
 
     #[test]
-    fn production_initializes_and_manages_the_assignment_outbox_before_readiness() {
+    fn production_recovers_and_hosts_the_assignment_event_outbox_before_readiness() {
         let source = include_str!("lib.rs");
         let assembly = source
             .split("fn application_builder()")
@@ -692,12 +707,21 @@ mod tests {
         let publisher = assembly
             .find("engine::publisher::TauriEventPublisher::with_observer")
             .expect("production assignment sink does not use the shared Tauri publisher");
-        let initialize = assembly
-            .find("assignment::repository::AssignmentRepository::initialize_with_event_sink")
-            .expect("production startup does not recover and drain the assignment outbox");
-        let manage = assembly
-            .find("app.manage(assignment_repository.clone())")
-            .expect("the initialized assignment repository is not retained in managed state");
+        let sink = assembly
+            .find("assignment::event_outbox::AssignmentEventSink")
+            .expect("production does not use the Outbox transport trait as the assignment sink");
+        let outbox = assembly
+            .find("assignment::event_outbox::AssignmentEventOutbox::new")
+            .expect("production does not construct the Assignment Event Outbox");
+        let recover = assembly
+            .find("assignment_event_outbox.recover()")
+            .expect("production startup does not recover the Assignment Event Outbox");
+        let manage_outbox = assembly
+            .find("app.manage(assignment_event_outbox.clone())")
+            .expect("the recovered Assignment Event Outbox is not retained in managed state");
+        let persist_clone = assembly
+            .find("assignment::repository::AssignmentRepository::with_outbox")
+            .expect("Assignment persistence does not take a clone of the recovered Outbox");
         let drain_command = assembly
             .find("assignment::commands::drain_assignment_event_outbox")
             .expect("the frontend-ready outbox drain command is not registered");
@@ -705,8 +729,38 @@ mod tests {
             .find(".show()?")
             .expect("the main window readiness boundary is missing");
 
-        assert!(publisher < initialize && initialize < manage && manage < show);
-        assert!(manage < drain_command);
+        assert!(publisher < sink && sink < outbox && outbox < recover);
+        assert!(recover < persist_clone && recover < manage_outbox && manage_outbox < show);
+        assert!(manage_outbox < drain_command);
+        assert!(
+            !assembly.contains("AssignmentRepository::initialize_with_event_sink"),
+            "production must not recover through Assignment persistence"
+        );
+        assert!(
+            !assembly.contains("AssignmentRepository::with_event_sink"),
+            "production must not start with a live sink that skips recover"
+        );
+        assert!(
+            !assembly.contains("AssignmentRepository::new("),
+            "production must not start Assignment persistence without a sink"
+        );
+    }
+
+    #[test]
+    fn frontend_ready_drain_command_targets_the_hosted_outbox() {
+        let source = include_str!("assignment/commands.rs");
+        assert!(
+            source.contains("State<'_, AssignmentEventOutbox>"),
+            "drain command must depend on the hosted Outbox"
+        );
+        assert!(
+            source.contains("outbox.drain()"),
+            "drain command must return the Outbox drain Result"
+        );
+        assert!(
+            !source.contains("drain_pending_events"),
+            "drain command must not go through Assignment persistence"
+        );
     }
 
     #[test]

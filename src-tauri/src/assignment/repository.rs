@@ -69,33 +69,19 @@ pub struct AssignmentRepository {
 
 impl AssignmentRepository {
     pub fn new(pool: SqlitePool) -> Self {
-        Self {
-            pool: pool.clone(),
-            outbox: AssignmentEventOutbox::unavailable(pool),
-        }
+        Self::with_outbox(pool.clone(), AssignmentEventOutbox::unavailable(pool))
     }
 
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
 
-    pub fn with_event_sink(pool: SqlitePool, event_sink: Arc<dyn AssignmentEventSink>) -> Self {
-        Self {
-            pool: pool.clone(),
-            outbox: AssignmentEventOutbox::new(pool, event_sink),
-        }
+    pub fn with_outbox(pool: SqlitePool, outbox: AssignmentEventOutbox) -> Self {
+        Self { pool, outbox }
     }
 
-    /// Constructs a repository for an exclusive startup lifecycle and recovers deliveries claimed
-    /// by the previous process. The frontend-ready command drains pending events only after its
-    /// live listener is registered, so a successful Tauri emit cannot be acknowledged too early.
-    pub async fn initialize_with_event_sink(
-        pool: SqlitePool,
-        event_sink: Arc<dyn AssignmentEventSink>,
-    ) -> Result<Self, AppError> {
-        let repository = Self::with_event_sink(pool, event_sink);
-        repository.outbox.recover().await?;
-        Ok(repository)
+    pub fn with_event_sink(pool: SqlitePool, event_sink: Arc<dyn AssignmentEventSink>) -> Self {
+        Self::with_outbox(pool.clone(), AssignmentEventOutbox::new(pool, event_sink))
     }
 
     pub async fn accept(

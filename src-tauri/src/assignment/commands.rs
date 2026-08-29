@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::{
     app_state::AppState,
-    assignment::repository::AssignmentRepository,
+    assignment::event_outbox::AssignmentEventOutbox,
     domain::{
         assignment::{AssignmentSummary, InterruptWorkInput, QueueWorkInput},
         work::StartWorkOutput,
@@ -14,9 +14,9 @@ use crate::{
 /// Called after the frontend has registered its live event listener.
 #[tauri::command]
 pub async fn drain_assignment_event_outbox(
-    repository: State<'_, AssignmentRepository>,
+    outbox: State<'_, AssignmentEventOutbox>,
 ) -> Result<(), AppError> {
-    repository.drain_pending_events().await?;
+    outbox.drain().await?;
     Ok(())
 }
 
