@@ -12,7 +12,7 @@
 
 | 阶段 | 内容 | 状态 | 含义 |
 |---|---|---|---|
-| 0 安全网 | 行为测试、迁移 fixture、跨平台 CI | **待补测试** | 模块已存在；生产装配仍有源码字符串断言；缺少历史 SQLite fixture；停止/恢复/lease/Event 顺序未锁死；CI 无 Windows Rust library tests。对应 issue #10～#15 |
+| 0 安全网 | 行为测试、迁移 fixture、跨平台 CI | **测试已纳入 CI** | #10～#14 表征测试已写入。CI 在 Ubuntu 跑前端 typecheck/测试与 Rust fmt/clippy/test，在 Windows 上先编译再执行 `cargo test --lib` 与阶段 0 表征测试（#15）。 |
 | 1 ExecutionCoordinator | 唯一生产执行入口 | **已完成** | Tauri `start_work` / `stop_work` 只调用 Coordinator；`WorkService` 不再持有执行依赖。queued/running/waiting 停止语义 **待补测试**（#12） |
 | 2 CapabilityBroker | 不可变 `RunCapabilitySnapshot` | **已完成（待验证）** | Snapshot、Host Tool `authorize_and_record`、决策/执行审计已落地。Pi 仍 `--approve`；Balanced/Auto 对内置工具 allowlist 相同。Pi 内置工具执行前拦截 **待验证**，不要重写 Broker |
 | 3 WorkStatusProjector | 从持久事实投影 Work 状态 | **已完成（待补测试）** | `project_work_status` 被 Scheduler / Harness / Delivery 使用。历史库重放 **待补 fixture** |
@@ -20,7 +20,7 @@
 | 5 WorkspaceModule | 稳定 `workspace_id` 与路径 identity | **已完成（待补测试）** | `WorkspaceRepository::resolve_or_create` / `reconcile_legacy_paths` 已落地。历史 schema 升级 **待 fixture**（#11）。LSP/Worktree/沙箱不属于本阶段 |
 | 6 开源能力接入 | MCP / Browser / LSP / Sandbox / Worktree | **未开始** | 依赖阶段 0 安全网与阶段 2 的 Pi 内置工具验证，不依赖再实现 1～5 |
 
-下一步只做阶段 0，然后验证 Pi 内置工具 enforcement。不要启动第二套 Coordinator、Broker、Projector、Delivery 或 Workspace identity。
+阶段 0 测试与 CI 已收口（#10～#15）。下一步验证 Pi 内置工具 enforcement。不要启动第二套 Coordinator、Broker、Projector、Delivery 或 Workspace identity。
 
 ## 1. 核心建议
 
@@ -143,7 +143,7 @@ src/
 
 ## 4. 阶段 0：建立安全网
 
-> 状态：**待补测试**。生产代码已有 Coordinator、Broker、Delivery、Workspace、Projector；本阶段仍要把行为锁进测试与 CI。不要在本阶段改产品语义。
+> 状态：**测试已纳入 CI**。生产代码已有 Coordinator、Broker、Delivery、Workspace、Projector；#10～#15 已把行为锁进测试与跨平台 CI。不要在本阶段改产品语义。
 
 ### 目标
 
@@ -610,7 +610,7 @@ Feature flag 不适合：
 
 | 里程碑 | 包含阶段 | 当前状态 | 可向用户证明什么 | 是否可开始接新能力 |
 |---|---|---|---|---|
-| R0 可重构 | 阶段 0 | **未完成**（待补测试） | 测试与迁移安全网可靠 | 否 |
+| R0 可重构 | 阶段 0 | **测试已纳入 CI** | 测试与迁移安全网在 Ubuntu/Windows CI 上执行 | 否（仍待 R2 Pi 内置工具验证） |
 | R1 执行一致 | 阶段 1 | **模块已完成**；停止语义待补测试 | start/stop/interrupt 只有一条路径 | 仅低风险只读实验 |
 | R2 权限可信 | 阶段 2 | **模块已完成**；Pi 内置工具待验证 | 所有工具有统一 Snapshot、裁决和审计 | 验证通过前不可接高权限 MCP/Browser |
 | R3 状态可信 | 阶段 3 | **模块已完成**；历史库重放待 fixture | Work 状态由 Projector 计算；重放证明仍待旧库 fixture | 仍不建议广泛发布新能力 |
@@ -621,14 +621,14 @@ Feature flag 不适合：
 
 ## 13. 第一批可直接执行的 Backlog
 
-阶段 1 与 ADR、Coordinator 迁移已经完成。接下来只做阶段 0，不要重做阶段 1～5：
+阶段 1 与 ADR、Coordinator 迁移已经完成。阶段 0 测试与 CI 已收口，不要重做阶段 1～5：
 
-1. 用行为测试替换生产装配字符串断言（#10）。
-2. 建立历史 SQLite 迁移 fixture 安全网（#11）。
-3. 锁定 ExecutionCoordinator 对 queued/running/waiting 的停止语义（#12）。
-4. 锁定恢复与 Host Tool 租约安全语义（#13）。
-5. 锁定 Event 先落库后发布语义（#14）。
-6. 固化跨平台 CI，尤其 Windows Rust library tests（#15）。
+1. 用行为测试替换生产装配字符串断言（#10）— 已落地。
+2. 建立历史 SQLite 迁移 fixture 安全网（#11）— 已落地。
+3. 锁定 ExecutionCoordinator 对 queued/running/waiting 的停止语义（#12）— 已落地。
+4. 锁定恢复与 Host Tool 租约安全语义（#13）— 已落地。
+5. 锁定 Event 先落库后发布语义（#14）— 已落地。
+6. 跨平台 CI 已固化：Ubuntu 前端 typecheck/测试与 Rust fmt/clippy/test，Windows runner 上先编译再执行 `cargo test --lib` 以及阶段 0 表征测试（#15）。CI 不跑 ignored live Pi 测试，也不要求模型/connector 凭据。
 7. 若 Windows `STATUS_ENTRYPOINT_NOT_FOUND` 复现，只在测试/构建配置范围内修复；否则单独立项。
 
 阶段 0 完成后再验证 CapabilityBroker 对 Pi 内置工具的执行前拦截。此时不要同时接入 MCP 或 Browser，也不要再实现第二套 Coordinator / Broker / Projector / Delivery / Workspace identity。

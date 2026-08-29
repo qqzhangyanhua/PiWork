@@ -10,6 +10,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   frontend:
     name: Frontend (typecheck + test)
@@ -71,3 +75,43 @@ jobs:
 
       - name: cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  rust-windows:
+    name: Rust library + Phase 0 tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Compile and run are separate so STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)
+      # is attributed to executing the test binary, not to linking.
+      - name: Build Rust library test binary
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run
+
+      - name: Run Rust library tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build Phase 0 characterization test binaries
+        run: >
+          cargo test --manifest-path src-tauri/Cargo.toml --no-run
+          --test migration_fixture
+          --test execution_coordinator
+          --test recovery_and_host_tool_lease
+          --test event_persist_before_publish
+
+      - name: Run Phase 0 characterization tests
+        run: >
+          cargo test --manifest-path src-tauri/Cargo.toml
+          --test migration_fixture
+          --test execution_coordinator
+          --test recovery_and_host_tool_lease
+          --test event_persist_before_publish

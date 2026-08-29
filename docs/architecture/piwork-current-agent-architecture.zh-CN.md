@@ -4,7 +4,7 @@
 > 文档性质：基于当前工作区代码的实现盘点，不是目标愿景，也不是历史规格复述。  
 > 领域语言来源：[`CONTEXT.md`](../../CONTEXT.md)  
 > 控制面接口：[`piwork-core-control-plane-interfaces.zh-CN.md`](./piwork-core-control-plane-interfaces.zh-CN.md)  
-> 整改状态：[`Plan A：核心 Agent 架构整改`](./piwork-agent-remediation-roadmap.zh-CN.md)（阶段 1～5 模块已落地；阶段 0 测试安全网仍待补）  
+> 整改状态：[`Plan A：核心 Agent 架构整改`](./piwork-agent-remediation-roadmap.zh-CN.md)（阶段 1～5 模块已落地；阶段 0 测试与 CI 已纳入 #10～#15）  
 > 后续计划：[`Plan B：能力平台与市场`](./piwork-capability-platform-market-implementation-plan.zh-CN.md)
 
 ## 1. 结论先行
@@ -49,15 +49,15 @@ React 产品界面
 - Assignment 支持父子依赖、重试、死信、恢复确认和等待子任务后恢复 Lead。
 - Host Tool Bridge 使用每 Run 租约、角色 allowlist、回环地址，并在调用时走 Broker。
 - 本地资源、文档提取、模型凭据、邮件连接器、远程记忆均已进入真实运行链路。
+- CI 在 Ubuntu 上执行前端 typecheck/测试与 Rust fmt/clippy/test，在 Windows runner 上先编译再执行 `cargo test --lib` 以及阶段 0 表征测试；忽略的 live Pi 测试不会跑。
 
 当前必须优先处理的部分（验证与测试，不是再建一套控制面）：
 
 1. **Pi 内置工具的执行前拦截尚未证明。** 进程仍带 `--approve` 启动；`AskEveryStep` 主要通过缩短 `--tools` 列表实现，`Balanced` 与 `AutoExecute` 对 Pi 内置工具 allowlist 没有实质差异。Broker 已对 Host Tool / Extension Tool 生效，不能据此宣称 Pi `read/edit/write/bash` 已是生产级边界。
-2. **阶段 0 安全网不完整。** 生产装配仍有源码字符串断言；缺少带旧数据的 SQLite 迁移 fixture；queued/running/waiting 停止、重启后未知副作用、Host Tool 租约撤销、Event 先落库后发布等行为测试尚未锁死。
-3. **CI 尚未覆盖 Windows Rust library tests。** 当前 GitHub Actions 在 Linux 上跑前端与 Rust 门槛；历史提到的 Windows `STATUS_ENTRYPOINT_NOT_FOUND` 仍需作为固定门槛捕获。
-4. **高权限 Adapter 仍未接入。** MCP、Browser、LSP、Worktree、Sandbox 不在生产运行链中；在 Pi 内置工具 enforcement 验证完成前不要开放它们。
+2. **阶段 0 安全网的测试与 CI 已收口（#10～#15）。** 不要再把生产装配、迁移 fixture、停止、恢复/lease、Event 顺序或 Windows library tests 当成未做工作。
+3. **高权限 Adapter 仍未接入。** MCP、Browser、LSP、Worktree、Sandbox 不在生产运行链中；在 Pi 内置工具 enforcement 验证完成前不要开放它们。
 
-因此，接下来不需要重写现有 Agent 架构，也不应再实现 `ExecutionCoordinator`、`CapabilityBroker`、`DeliveryModule`、`WorkspaceModule` 或 `WorkStatusProjector`。正确方向是先补齐阶段 0 测试与迁移安全网，再验证权限 enforcement，然后向既有 seam 接入开源模块。
+因此，接下来不需要重写现有 Agent 架构，也不应再实现 `ExecutionCoordinator`、`CapabilityBroker`、`DeliveryModule`、`WorkspaceModule` 或 `WorkStatusProjector`。正确方向是在阶段 0 安全网已经进入 CI 的前提下，验证权限 enforcement，然后向既有 seam 接入开源模块。
 
 ## 2. 领域模型
 
@@ -438,16 +438,16 @@ Queued → Claimed → Running → Waiting / Completed / Failed
 
 阶段 1～5 的控制面模块已经落地。下面不再建议“建立”这些模块，只列出仍需验证、补测试或刻意不做的事项。
 
-### P0：阶段 0 安全网（未完成，应立即做）
+### P0：阶段 0 安全网（#10～#15 已纳入 CI）
 
-不要改产品语义。用现有 seam 锁住行为：
+不要改产品语义。下列行为已由现有 seam 锁定，并由 Ubuntu/Windows CI 执行：
 
-- 生产 engine 选择与 Pi tool allowlist 改为行为测试，删除 `include_str!("lib.rs")` 装配字符串断言。
-- 至少一个历史 SQLite fixture 经真实 migration runner 升到当前 schema，并检查外键、行数、Workspace identity、Run/Assignment/Event/Delivery 可追溯关系。
-- 通过 `ExecutionCoordinator` 表征 queued / running / waiting 停止，以及重复停止的稳定结果。
-- 重启后未知副作用不得自动重放；Run 终态后 Host Tool lease 不得继续调用产品工具。
-- Event 必须先 journal 到 SQLite 再发布；写入失败不得发布。
-- CI 在 Windows runner 上执行 Rust library tests，并纳入上述安全网。
+- 生产 engine 选择与 Pi tool allowlist 的行为测试（#10）
+- 历史 SQLite fixture 经真实 migration runner 升级（#11）
+- `ExecutionCoordinator` queued / running / waiting 停止（#12）
+- 重启后未知副作用不自动重放；Run 终态后 Host Tool lease 撤销（#13）
+- Event 先 journal 到 SQLite 再发布（#14）
+- Windows runner 上先编译再执行 `cargo test --lib` 与上述表征测试（#15）
 
 ### P1：已落地控制面的剩余验证
 
