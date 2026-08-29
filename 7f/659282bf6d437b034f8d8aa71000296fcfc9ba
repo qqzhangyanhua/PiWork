@@ -1,0 +1,24 @@
+src-tauri/src/lib.rs
+  s_c20aef6209d016::t_56a866be055fa6 1,132-136,150-151
+  s_c20aef6209d016::t_763cdef7d38e5e 672,687,694-695,697-708,722-730
+  s_c20aef6209d016::t_ffb21e23448ec6 137-149,315-322,352,673,682-684,692-693,709-710,714-715,717-718
+  s_c20aef6209d016::t_125d1f95a76b73 674-681,685-686,688-691,731-732
+  s_c20aef6209d016::t_1cbc825b8e08ed 711-713
+  s_c20aef6209d016::t_fdd81d8f75ef0f 640-642,652-664,668
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.6.23",
+  "base_commit_sha": "7f659282bf6d437b034f8d8aa71000296fcfc9ba",
+  "prompts": {},
+  "sessions": {
+    "s_c20aef6209d016": {
+      "agent_id": {
+        "tool": "grok",
+        "id": "01a04d88-28b0-7470-9307-ab4df7292c60",
+        "model": "grok-4.6"
+      },
+      "human_author": "张艳华 <939593210@qq.com>"
+    }
+  }
+}
