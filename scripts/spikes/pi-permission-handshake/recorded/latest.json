@@ -1,0 +1,805 @@
+{
+  "sidecar": {
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.80.2",
+    "entry": "src-tauri/binaries/pi-sidecar/dist/piwork-pi.js",
+    "node": "node",
+    "nodeVersion": "v22.14.0",
+    "approveFlagMeansProjectTrust": true,
+    "helpLines": [
+      "  --model <pattern>              Model pattern or ID (supports \"provider/id\" and optional \":<thinking>\")",
+      "  --mode <mode>                  Output mode: text (default), json, or rpc",
+      "  --models <patterns>            Comma-separated model patterns for Ctrl+P cycling",
+      "  --tools, -t <tools>            Comma-separated allowlist of tool names to enable",
+      "  --extension, -e <path>         Load an extension file (can be used multiple times)",
+      "  --approve, -a                  Trust project-local files for this run",
+      "  --no-approve, -na              Ignore project-local files for this run",
+      "  pi --provider openai --model gpt-4o-mini \"Help me refactor this code\"",
+      "  pi --model openai/gpt-4o \"Help me refactor this code\"",
+      "  pi --model sonnet:high \"Solve this complex problem\"",
+      "  pi --models claude-sonnet,claude-haiku,gpt-4o",
+      "  pi --models \"github-copilot/*\"",
+      "  pi --models sonnet:high,haiku:low",
+      "  pi --tools read,grep,find,ls -p \"Review the code in src/\""
+    ],
+    "hasPermissionCliFlag": false
+  },
+  "rustAdapterNote": "PiEngineAdapter::production is fail-closed on Linux; this spike invokes the JS sidecar directly.",
+  "nativeHandshake": {
+    "emitsPermissionRequestBeforeBuiltinTools": false,
+    "externalAllowDenyCommandExists": false,
+    "evidence": {
+      "unknownPermissionCommands": [
+        {
+          "id": "inventory-1",
+          "type": "response",
+          "command": "permission_request",
+          "success": false,
+          "error": "Unknown command: permission_request"
+        },
+        {
+          "id": "inventory-2",
+          "type": "response",
+          "command": "permission_response",
+          "success": false,
+          "error": "Unknown command: permission_response"
+        },
+        {
+          "id": "inventory-3",
+          "type": "response",
+          "command": "permission",
+          "success": false,
+          "error": "Unknown command: permission"
+        },
+        {
+          "id": "inventory-4",
+          "type": "response",
+          "command": "approve",
+          "success": false,
+          "error": "Unknown command: approve"
+        },
+        {
+          "id": "inventory-5",
+          "type": "response",
+          "command": "deny",
+          "success": false,
+          "error": "Unknown command: deny"
+        },
+        {
+          "id": "inventory-6",
+          "type": "response",
+          "command": "allow",
+          "success": false,
+          "error": "Unknown command: allow"
+        },
+        {
+          "id": "inventory-7",
+          "type": "response",
+          "command": "ask",
+          "success": false,
+          "error": "Unknown command: ask"
+        }
+      ],
+      "noGateNativePermissionEvents": [],
+      "noGateExtensionUiRequests": 0,
+      "noGateCreatedFile": "SPIKE_WRITE_OK\n"
+    }
+  },
+  "extensionMediatedHandshake": {
+    "available": true,
+    "requestType": "extension_ui_request",
+    "responseType": "extension_ui_response",
+    "allowObserved": {
+      "type": "extension_ui_request",
+      "id": "19b6f2f2-9f49-4176-8b0c-88d9c445568a",
+      "method": "confirm",
+      "title": "Allow write?",
+      "message": "{\"toolCallId\":\"spike-write-1\",\"toolName\":\"write\",\"input\":{\"path\":\"created.txt\",\"content\":\"SPIKE_WRITE_OK\\n\"}}"
+    },
+    "denyBlocked": true,
+    "denyCreatedFile": null
+  },
+  "invocations": {
+    "inventory": {
+      "program": "node",
+      "args": [
+        "src-tauri/binaries/pi-sidecar/dist/piwork-pi.js",
+        "--mode",
+        "rpc",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--offline",
+        "--provider",
+        "spike",
+        "--model",
+        "spike-tools",
+        "--session-dir",
+        "/tmp/pi-handshake-inventory-iLVQws/sessions",
+        "--session-id",
+        "spike-inventory",
+        "--tools",
+        "read,grep,find,ls,edit,write,bash",
+        "--no-extensions",
+        "--approve",
+        "--extension",
+        "scripts/spikes/pi-permission-handshake/extensions/mock-provider.ts"
+      ],
+      "cwd": "<isolated-temp-workspace>",
+      "env": {
+        "PI_CODING_AGENT_DIR": "<workspace>/agent",
+        "PI_CODING_AGENT_SESSION_DIR": "<workspace>/sessions",
+        "SPIKE_TOOLS": "read",
+        "PI_OFFLINE": "1"
+      }
+    },
+    "noGate": {
+      "program": "node",
+      "args": [
+        "src-tauri/binaries/pi-sidecar/dist/piwork-pi.js",
+        "--mode",
+        "rpc",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--offline",
+        "--provider",
+        "spike",
+        "--model",
+        "spike-tools",
+        "--session-dir",
+        "/tmp/pi-handshake-no-gate-builtin-tools-UuVVSQ/sessions",
+        "--session-id",
+        "spike-no-gate-builtin-tools",
+        "--tools",
+        "read,grep,find,ls,edit,write,bash",
+        "--no-extensions",
+        "--approve",
+        "--extension",
+        "scripts/spikes/pi-permission-handshake/extensions/mock-provider.ts"
+      ],
+      "cwd": "<isolated-temp-workspace>",
+      "env": {
+        "PI_CODING_AGENT_DIR": "<workspace>/agent",
+        "PI_CODING_AGENT_SESSION_DIR": "<workspace>/sessions",
+        "SPIKE_TOOLS": "read,edit,write,bash",
+        "PI_OFFLINE": "1"
+      }
+    },
+    "allow": {
+      "program": "node",
+      "args": [
+        "src-tauri/binaries/pi-sidecar/dist/piwork-pi.js",
+        "--mode",
+        "rpc",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--offline",
+        "--provider",
+        "spike",
+        "--model",
+        "spike-tools",
+        "--session-dir",
+        "/tmp/pi-handshake-gate-allow-write-5bNDE4/sessions",
+        "--session-id",
+        "spike-gate-allow-write",
+        "--tools",
+        "read,grep,find,ls,edit,write,bash",
+        "--no-extensions",
+        "--approve",
+        "--extension",
+        "scripts/spikes/pi-permission-handshake/extensions/mock-provider.ts",
+        "--extension",
+        "scripts/spikes/pi-permission-handshake/extensions/permission-gate.ts"
+      ],
+      "cwd": "<isolated-temp-workspace>",
+      "env": {
+        "PI_CODING_AGENT_DIR": "<workspace>/agent",
+        "PI_CODING_AGENT_SESSION_DIR": "<workspace>/sessions",
+        "SPIKE_TOOLS": "write",
+        "PI_OFFLINE": "1"
+      }
+    },
+    "deny": {
+      "program": "node",
+      "args": [
+        "src-tauri/binaries/pi-sidecar/dist/piwork-pi.js",
+        "--mode",
+        "rpc",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-context-files",
+        "--offline",
+        "--provider",
+        "spike",
+        "--model",
+        "spike-tools",
+        "--session-dir",
+        "/tmp/pi-handshake-gate-deny-write-V2iaV8/sessions",
+        "--session-id",
+        "spike-gate-deny-write",
+        "--tools",
+        "read,grep,find,ls,edit,write,bash",
+        "--no-extensions",
+        "--approve",
+        "--extension",
+        "scripts/spikes/pi-permission-handshake/extensions/mock-provider.ts",
+        "--extension",
+        "scripts/spikes/pi-permission-handshake/extensions/permission-gate.ts"
+      ],
+      "cwd": "<isolated-temp-workspace>",
+      "env": {
+        "PI_CODING_AGENT_DIR": "<workspace>/agent",
+        "PI_CODING_AGENT_SESSION_DIR": "<workspace>/sessions",
+        "SPIKE_TOOLS": "write",
+        "PI_OFFLINE": "1"
+      }
+    }
+  },
+  "scenarios": {
+    "inventory": {
+      "messages": [
+        {
+          "type": "response",
+          "id": "ready-1",
+          "command": "get_state",
+          "success": true
+        },
+        {
+          "type": "response",
+          "id": "inventory-1",
+          "command": "permission_request",
+          "success": false,
+          "error": "Unknown command: permission_request"
+        },
+        {
+          "type": "response",
+          "id": "inventory-2",
+          "command": "permission_response",
+          "success": false,
+          "error": "Unknown command: permission_response"
+        },
+        {
+          "type": "response",
+          "id": "inventory-3",
+          "command": "permission",
+          "success": false,
+          "error": "Unknown command: permission"
+        },
+        {
+          "type": "response",
+          "id": "inventory-4",
+          "command": "approve",
+          "success": false,
+          "error": "Unknown command: approve"
+        },
+        {
+          "type": "response",
+          "id": "inventory-5",
+          "command": "deny",
+          "success": false,
+          "error": "Unknown command: deny"
+        },
+        {
+          "type": "response",
+          "id": "inventory-6",
+          "command": "allow",
+          "success": false,
+          "error": "Unknown command: allow"
+        },
+        {
+          "type": "response",
+          "id": "inventory-7",
+          "command": "ask",
+          "success": false,
+          "error": "Unknown command: ask"
+        },
+        {
+          "type": "response",
+          "id": "inventory-state",
+          "command": "get_state",
+          "success": true
+        },
+        {
+          "type": "response",
+          "id": "inventory-commands",
+          "command": "get_commands",
+          "success": true
+        }
+      ]
+    },
+    "noGate": {
+      "accepted": {
+        "id": "prompt-no-gate-builtin-tools",
+        "type": "response",
+        "command": "prompt",
+        "success": true
+      },
+      "files": {
+        "probe": "PROBE_EDITED\n",
+        "created": "SPIKE_WRITE_OK\n"
+      },
+      "messages": [
+        {
+          "type": "response",
+          "id": "ready-1",
+          "command": "get_state",
+          "success": true
+        },
+        {
+          "type": "response",
+          "id": "prompt-no-gate-builtin-tools",
+          "command": "prompt",
+          "success": true
+        },
+        {
+          "type": "agent_start"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "spike-read-1",
+          "toolName": "read",
+          "args": {
+            "path": "probe.txt"
+          }
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "spike-read-1",
+          "toolName": "read",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "PROBE_UNCHANGED\n"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "spike-edit-2",
+          "toolName": "edit",
+          "args": {
+            "path": "probe.txt",
+            "edits": [
+              {
+                "oldText": "PROBE_UNCHANGED",
+                "newText": "PROBE_EDITED"
+              }
+            ]
+          }
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "spike-edit-2",
+          "toolName": "edit",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "Successfully replaced 1 block(s) in probe.txt."
+              }
+            ],
+            "details": {
+              "diff": "-1 PROBE_UNCHANGED\n+1 PROBE_EDITED",
+              "patch": "--- probe.txt\n+++ probe.txt\n@@ -1,1 +1,1 @@\n-PROBE_UNCHANGED\n+PROBE_EDITED\n",
+              "firstChangedLine": 1
+            }
+          }
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "spike-write-3",
+          "toolName": "write",
+          "args": {
+            "path": "created.txt",
+            "content": "SPIKE_WRITE_OK\n"
+          }
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "spike-write-3",
+          "toolName": "write",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "Successfully wrote 15 bytes to created.txt"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "spike-bash-4",
+          "toolName": "bash",
+          "args": {
+            "command": "echo SPIKE_BASH_OK"
+          }
+        },
+        {
+          "type": "tool_execution_update"
+        },
+        {
+          "type": "tool_execution_update"
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "spike-bash-4",
+          "toolName": "bash",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "SPIKE_BASH_OK\n"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "agent_end"
+        }
+      ]
+    },
+    "allow": {
+      "accepted": {
+        "id": "prompt-gate-allow-write",
+        "type": "response",
+        "command": "prompt",
+        "success": true
+      },
+      "files": {
+        "probe": "PROBE_UNCHANGED\n",
+        "created": "SPIKE_WRITE_OK\n"
+      },
+      "messages": [
+        {
+          "type": "response",
+          "id": "ready-1",
+          "command": "get_state",
+          "success": true
+        },
+        {
+          "type": "response",
+          "id": "prompt-gate-allow-write",
+          "command": "prompt",
+          "success": true
+        },
+        {
+          "type": "agent_start"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "spike-write-1",
+          "toolName": "write",
+          "args": {
+            "path": "created.txt",
+            "content": "SPIKE_WRITE_OK\n"
+          }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "19b6f2f2-9f49-4176-8b0c-88d9c445568a",
+          "method": "confirm",
+          "title": "Allow write?",
+          "message": "{\"toolCallId\":\"spike-write-1\",\"toolName\":\"write\",\"input\":{\"path\":\"created.txt\",\"content\":\"SPIKE_WRITE_OK\\n\"}}"
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "spike-write-1",
+          "toolName": "write",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "Successfully wrote 15 bytes to created.txt"
+              }
+            ]
+          }
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "agent_end"
+        }
+      ]
+    },
+    "deny": {
+      "accepted": {
+        "id": "prompt-gate-deny-write",
+        "type": "response",
+        "command": "prompt",
+        "success": true
+      },
+      "files": {
+        "probe": "PROBE_UNCHANGED\n",
+        "created": null
+      },
+      "messages": [
+        {
+          "type": "response",
+          "id": "ready-1",
+          "command": "get_state",
+          "success": true
+        },
+        {
+          "type": "response",
+          "id": "prompt-gate-deny-write",
+          "command": "prompt",
+          "success": true
+        },
+        {
+          "type": "agent_start"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "tool_execution_start",
+          "toolCallId": "spike-write-1",
+          "toolName": "write",
+          "args": {
+            "path": "created.txt",
+            "content": "SPIKE_WRITE_OK\n"
+          }
+        },
+        {
+          "type": "extension_ui_request",
+          "id": "761eb314-e78f-40c5-9f73-6020b87917f7",
+          "method": "confirm",
+          "title": "Allow write?",
+          "message": "{\"toolCallId\":\"spike-write-1\",\"toolName\":\"write\",\"input\":{\"path\":\"created.txt\",\"content\":\"SPIKE_WRITE_OK\\n\"}}"
+        },
+        {
+          "type": "tool_execution_end",
+          "toolCallId": "spike-write-1",
+          "toolName": "write",
+          "isError": true,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "spike-denied:write:spike-write-1"
+              }
+            ],
+            "details": {}
+          }
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "turn_start"
+        },
+        {
+          "type": "message_start"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_update"
+        },
+        {
+          "type": "message_end"
+        },
+        {
+          "type": "turn_end"
+        },
+        {
+          "type": "agent_end"
+        }
+      ]
+    }
+  }
+}
